@@ -1,0 +1,5519 @@
+{
+  "source_path": "plan/fbvbs-design.md",
+  "historical_name_mapping": "旧来の略称と本書での説明的名称の対応は次のとおりである。HEKI は Kernel Code Integrity Service、KDP は Kernel State Integrity Service の一部機能概念、IKV は Identity Key Service、DKV は Storage Key Service に対応する。本書では、略称のみを前提とした記述は行わない。",
+  "acronym_paragraphs": [
+    "本書では独自略語を主要名称として使わない方針を採ったが、実装仕様として不可避な業界標準略語は残る。この付録は、それらを一括して定義する。",
+    "TCB は Trusted Computing Base の略であり、ある保護性質を成立させるために信頼しなければならない最小のコード、設定、鍵、ハードウェア機構の集合を指す。DMA は Direct Memory Access の略であり、CPU を介さずにデバイスが主記憶へアクセスする機構を指す。IOMMU は I/O Memory Management Unit の略であり、DMA の到達範囲を制御する。UART は Universal Asynchronous Receiver/Transmitter の略であり、シリアル通信に用いられるハードウェアである。OOB は Out-of-Band の略であり、本書では FreeBSD の信頼境界外に存在する監査経路を指す。SOL は Serial-over-LAN の略であり、BMC 経由でホストのシリアルコンソールを遠隔取得する機構を指す。",
+    "VT-x は Intel の仮想化拡張、AMD-V は AMD の仮想化拡張を指す。EPT は Extended Page Tables、NPT は Nested Page Tables の略であり、いずれも第二レベルアドレス変換機構である。HLAT は Hypervisor-Managed Linear Address Translation の略であり、Intel が公開している、ハイパーバイザー管理下の線形アドレス変換機構を指す。MBEC は Mode-Based Execute Control の略であり、Intel 側の実行権限細粒度化機構を指す。AMD 側の対応機能は GMET と呼ばれる。RMP は Reverse Map Table の略であり、SEV-SNP における物理ページ所有権整合性の管理機構を指す。VMPL は Virtual Machine Privilege Level の略であり、SEV-SNP guest における特権階層を指す。",
+    "W^X は Write XOR Execute の略記であり、あるページが同時に書込み可能かつ実行可能であってはならないという原則を意味する。PIO は Programmed I/O、MMIO は Memory-Mapped I/O の略であり、それぞれポート空間 I/O とメモリ写像 I/O を指す。MSI は Message Signaled Interrupts、MSI-X はその拡張である。SR-IOV は Single Root I/O Virtualization の略であり、一つの物理デバイスを複数の仮想機能へ分割して提供する仕組みである。ACS は Access Control Services の略であり、PCI Express 上でのトランザクション分離に関係する。",
+    "CRC32C は Castagnoli 多項式を用いる 32-bit cyclic redundancy check を指し、本書では主として伝送破損検出に用いる。SBOM は Software Bill of Materials の略であり、成果物に含まれる依存関係の部品表を意味する。provenance は成果物の生成経路、ビルド主体、署名主体を示す由来情報である。HSM は Hardware Security Module の略であり、署名鍵の保護と使用制御のための専用ハードウェアを指す。MC/DC は Modified Condition/Decision Coverage の略であり、安全性重視システムで用いられる高水準の分岐網羅指標である。"
+  ],
+  "final_verification_paragraphs": [
+    "本仕様書の最終検証として、以下の観点を文書全体に対して再確認した。第一に、一次監査ログと FreeBSD 可視ログが混同されていないことを確認した。第二に、Intel では HLAT を必須としつつ、AMD については「HLAT 相当がある」と虚偽に書かず、同等のセキュリティ目標を目指す複合機構として定義し、その同等性が要実証であることを明記した。第三に、更新機構を `freebsd-update` に固定せず、搬送手段非依存の署名付き成果物モデルに置き換え、同時に freshness と snapshot 一貫性の要件を追加した。第四に、Ada/SPARK に理想を置きながらも、既存の検証志向実装の現実的制約を認め、外部ライブラリ利用時にはそれを TCB に含めることを明記した。第五に、Kernel State Integrity Service が防げる攻撃と防げない攻撃とを明示的に分離した。第六に、`bhyve` 統合が表面的な一節に留まらず、制御プレーン、実行プレーン、DMA、割込み、所有権、boot-time 介入点、非目標にまで分解されていることを確認した。第七に、Windows 固有の防御機構を否定する誤った比較を除去し、各保護機構の層の違いを明確化した。第八に、本書で用いた主要略語について、本文または付録で必ず説明を与え、MBEC/GMET の区別も補った。第九に、共有コマンドページ、trap レジスタ規約、状態遷移、error code 集合、call_id 空間、各 hypercall の前提条件と失敗条件が凍結済み ABI として文書内で一意に解釈できることを確認した。第十に、requirements metadata が行内記述または section metadata 継承規則で一意に復元可能であることを確認した。",
+    "この検証の結果、本仕様書は、FBVBS v7 の凍結済み設計仕様、凍結済み ABI 仕様、ならびに実装契約書として完成している。本書は依然として本番宣言前の立証課題を持つが、それらは仕様未完成を意味しない。未解決なのは実装と検証の完了であり、仕様の空欄ではない。"
+  ],
+  "production_obligations": [
+    "本書は、設計仕様としては実装に進むための十分な具体性を備えるが、本書に従って実装されたすべての構成が、直ちに本番運用に適すると主張するものではない。特に本番宣言の前には、設計上明示した仮定と未立証事項を、実装と試験によって閉じなければならない。",
+    "第一の立証課題は、AMD における翻訳整合性経路である。Intel では HLAT を用いる構成が明確であるのに対し、AMD では NPT、ページテーブル更新トラップ、シャドウ翻訳経路、TLB 無効化監視、必要に応じた SEV-SNP 補助機構を組み合わせる。したがって本番宣言の前には、PFN 差し替え、PTE 改ざん、TLB invalidate race、複数コア更新競合、異常な fault 順序、ならびに復旧経路まで含む実証が必要である。",
+    "第二の立証課題は、FreeBSD 介入点の十分性である。本書は `execve(2)`、`fexecve(2)`、`setuid(2)` 系、Jail、選択された MAC フック、Capsicum capability mode 遷移、および KLD ロード経路を対象に含めるが、実際の FreeBSD 版差分において、それらが本書で想定した不変条件を十分に観測・制御できるかは、コード読解と試験によって確認しなければならない。",
+    "第三の立証課題は、更新メタデータ集合の freshness と整合性である。本書は timestamp、snapshot、一貫性識別子、失効時刻、役割分離、またはそれと同等の機能を要求しているが、実装時には freeze 攻撃、mix-and-match 攻撃、期限切れメタデータ、分断環境での stale mirror、ならびにロールバック復旧手順を含めて、更新系が本当に fail-closed に振る舞うことを示す必要がある。",
+    "第四の立証課題は、一次監査ログ経路の運用実在性である。本書は UART、BMC、SOL、または専用ロガーのいずれかを前提とするが、これは設計紙面上で存在すると書けば足りるものではない。本番宣言の前には、対象ハードウェア、ファームウェア設定、BMC 設定、配線、収集サーバ、保存ポリシー、障害時の代替経路、ならびに過負荷時の欠落特性を、運用手順込みで確定しなければならない。",
+    "第五の立証課題は、暗号実装選定である。本書は Ada/SPARK の既存 primitive 候補を優先評価すると定めるが、どの実装を採用し、どの実装を TCB に含め、どの範囲を proof obligation とし、どの範囲を外部監査または既存実装の成熟度に依拠するかは、最終的に成果物レベルで決めなければならない。特に TLS、SSH、IPsec のような複雑なプロトコル経路は、primitive の選択と同一視してはならない。",
+    "第六の立証課題は、`bhyve` passthrough と IOMMU 統合である。本書は所有権、interrupt remapping、MSI/MSI-X 再設定、デバイスリセット、guest memory 所有権の原則を与えるが、実機ではデバイスごとの癖、ACS 不備、グルーピング制約、firmware の挙動差が存在する。本番宣言の前には、少なくともサポート対象デバイス群ごとに qualification matrix を作成し、非対応条件を明文化しなければならない。"
+  ],
+  "requirement_defaults": [
+    {
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-BOOT-<requirement-number>",
+      "evidence_id_pattern": "E-BOOT-<requirement-number>"
+    },
+    {
+      "subsection": "G.2. Logging and Audit Requirements",
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-LOG-<requirement-number>",
+      "evidence_id_pattern": "E-LOG-<requirement-number>"
+    },
+    {
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-PART-<requirement-number>",
+      "evidence_id_pattern": "E-PART-<requirement-number>"
+    },
+    {
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-CPU-<requirement-number>",
+      "evidence_id_pattern": "E-CPU-<requirement-number>"
+    },
+    {
+      "subsection": "G.5. Kernel Code Integrity Requirements",
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "26",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel Code Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-KCI-<requirement-number>",
+      "evidence_id_pattern": "E-KCI-<requirement-number>"
+    },
+    {
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-KSI-<requirement-number>",
+      "evidence_id_pattern": "E-KSI-<requirement-number>"
+    },
+    {
+      "subsection": "G.7. Key Service Requirements",
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-KEY-<requirement-number>",
+      "evidence_id_pattern": "E-KEY-<requirement-number>"
+    },
+    {
+      "subsection": "G.8. Update and Artifact Requirements",
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-UVS-<requirement-number>",
+      "evidence_id_pattern": "E-UVS-<requirement-number>"
+    },
+    {
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-FBSD-<requirement-number>",
+      "evidence_id_pattern": "E-FBSD-<requirement-number>"
+    },
+    {
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-VM-<requirement-number>",
+      "evidence_id_pattern": "E-VM-<requirement-number>"
+    },
+    {
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-QUAL-<requirement-number>",
+      "evidence_id_pattern": "E-QUAL-<requirement-number>"
+    },
+    {
+      "subsection": "G.12. Production Readiness Requirements",
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id_pattern": "T-PROD-<requirement-number>",
+      "evidence_id_pattern": "E-PROD-<requirement-number>"
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "FBVBS-REQ-0001",
+      "number": 1,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "マイクロハイパーバイザーは、FreeBSD より前にロードされなければならない。",
+      "verification_phrase": "boot trace の inspection と platform integration test",
+      "verification_labels": [
+        "boot trace の inspection",
+        "platform integration test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0001",
+      "evidence_id": "E-BOOT-0001"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0002",
+      "number": 2,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "Intel 構成では FreeBSD が VMX root operation を取得する前に、AMD 構成では FreeBSD が SVM のホスト側仮想化制御権を取得する前に、マイクロハイパーバイザーが有効化されなければならない。",
+      "verification_phrase": "boot path analysis と platform test",
+      "verification_labels": [
+        "boot path analysis",
+        "platform test"
+      ],
+      "verification_classes": [
+        "analysis",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0002",
+      "evidence_id": "E-BOOT-0002"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0003",
+      "number": 3,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "FBVBS v7 適合を主張する構成では、DMA 分離を成立させるために IOMMU が存在し、かつ有効化されていなければならない。",
+      "verification_phrase": "configuration inspection と platform test",
+      "verification_labels": [
+        "configuration inspection",
+        "platform test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0003",
+      "evidence_id": "E-BOOT-0003"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0004",
+      "number": 4,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "ロールバック防止を主張する構成では、TPM NV 領域または同等の version store を用いて成果物世代を比較しなければならない。",
+      "verification_phrase": "update rollback test と inspection",
+      "verification_labels": [
+        "update rollback test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0004",
+      "evidence_id": "E-BOOT-0004"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0005",
+      "number": 5,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "FBVBS v7 適合を主張する構成では、UART、BMC host serial redirection、IPMI Serial-over-LAN、または専用ロガーのいずれかによる一次監査ログ経路が実際に構成されていなければならない。高保証構成ではその運用成立性まで確認しなければならない。",
+      "verification_phrase": "operational drill と inspection",
+      "verification_labels": [
+        "operational drill",
+        "inspection"
+      ],
+      "verification_classes": [
+        "operational drill",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0005",
+      "evidence_id": "E-BOOT-0005"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0006",
+      "number": 6,
+      "subsection": "G.1. Roots of Trust, Boot, and Platform Requirements",
+      "text": "高保証構成では、起動時検証および測定を満たし、起動連鎖の証拠を監査可能にしなければならない。",
+      "verification_phrase": "boot attestation test と evidence inspection",
+      "verification_labels": [
+        "boot attestation test",
+        "evidence inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "operational"
+      ],
+      "source_sections": [
+        "8",
+        "12-15",
+        "Appendix F"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "firmware integration",
+        "platform configuration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-BOOT-0006",
+      "evidence_id": "E-BOOT-0006"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0100",
+      "number": 100,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "システムは、FreeBSD ホストから独立した一次監査ログと、FreeBSD 可視のミラーログを分離しなければならない。",
+      "verification_phrase": "design inspection と runtime test",
+      "verification_labels": [
+        "design inspection",
+        "runtime test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0100",
+      "evidence_id": "E-LOG-0100"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0101",
+      "number": 101,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "一次監査ログは、FreeBSD ホスト侵害時にも観測可能な OOB 経路を通じて取得できなければならない。",
+      "verification_phrase": "adversarial operational drill",
+      "verification_labels": [
+        "adversarial operational drill"
+      ],
+      "verification_classes": [
+        "operational drill"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0101",
+      "evidence_id": "E-LOG-0101"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0102",
+      "number": 102,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "ミラーログは一次監査根拠として扱ってはならない。",
+      "verification_phrase": "documentation review",
+      "verification_labels": [
+        "documentation review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0102",
+      "evidence_id": "E-LOG-0102"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0103",
+      "number": 103,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "一次監査ログレコードは、少なくとも sequence、boot identifier、CPU identifier、source component、severity、event code、payload length、payload、CRC32C を含まなければならない。",
+      "verification_phrase": "interface test と inspection",
+      "verification_labels": [
+        "interface test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0103",
+      "evidence_id": "E-LOG-0103"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0104",
+      "number": 104,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "CRC32C のみを根拠として改ざん耐性を主張してはならない。より強い改ざん検知を主張する場合は、署名、HMAC、または外部アンカー連結を追加しなければならない。",
+      "verification_phrase": "design inspection",
+      "verification_labels": [
+        "design inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0104",
+      "evidence_id": "E-LOG-0104"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0105",
+      "number": 105,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "FreeBSD から見えるリングバッファは読み取り専用でなければならず、第二レベルページングにより書込みが拒否されなければならない。",
+      "verification_phrase": "runtime test と fault injection",
+      "verification_labels": [
+        "runtime test",
+        "fault injection"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0105",
+      "evidence_id": "E-LOG-0105"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0106",
+      "number": 106,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "early boot と panic 時ログ完全性は best effort として扱い、完全取得を無条件に主張してはならない。",
+      "verification_phrase": "documentation review と panic-path test",
+      "verification_labels": [
+        "documentation review",
+        "panic-path test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0106",
+      "evidence_id": "E-LOG-0106"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0107",
+      "number": 107,
+      "subsection": "G.2. Logging and Audit Requirements",
+      "text": "FreeBSD 可視ミラーログリングバッファは `fbvbs_log_ring_header_v1` 固定ヘッダを持ち、その後ろに `fbvbs_log_record_v1` 固定長スロット列を置かなければならない。",
+      "verification_phrase": "interface test と inspection",
+      "verification_labels": [
+        "interface test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "interface",
+        "operational"
+      ],
+      "source_sections": [
+        "13-15",
+        "Appendix C"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "log relay",
+        "FreeBSD mirror consumer",
+        "OOB logging path"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-LOG-0107",
+      "evidence_id": "E-LOG-0107"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0200",
+      "number": 200,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "マイクロハイパーバイザーの責務は、パーティション管理、CPU 状態遷移、第二レベルページング管理、IOMMU ドメイン制御、限定的 CPU 制御強制、起動検証、一次監査ログ生成に限定しなければならない。",
+      "verification_phrase": "architecture inspection",
+      "verification_labels": [
+        "architecture inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0200",
+      "evidence_id": "E-PART-0200"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0201",
+      "number": 201,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "新規 TCB ロジックは原則として Ada/SPARK で実装しなければならない。例外を設ける場合は境界、理由、安全性契約を文書化しなければならない。",
+      "verification_phrase": "code review と proof artifact review",
+      "verification_labels": [
+        "code review",
+        "proof artifact review"
+      ],
+      "verification_classes": [
+        "inspection",
+        "proof"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0201",
+      "evidence_id": "E-PART-0201"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0202",
+      "number": 202,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "パーティション状態は Created、Measured、Loaded、Runnable、Running、Quiesced、Faulted、Destroyed を少なくとも持ち、不正遷移を許してはならない。",
+      "verification_phrase": "state-machine test と inspection",
+      "verification_labels": [
+        "state-machine test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0202",
+      "evidence_id": "E-PART-0202"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0203",
+      "number": 203,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "Destroyed パーティションのメモリは再割当前にゼロ化しなければならない。",
+      "verification_phrase": "memory reuse test",
+      "verification_labels": [
+        "memory reuse test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0203",
+      "evidence_id": "E-PART-0203"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0204",
+      "number": 204,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "capability はマイクロハイパーバイザーのみが付与、取消、監査でき、パーティション自身が生成または拡張してはならない。",
+      "verification_phrase": "proof、analysis、negative test",
+      "verification_labels": [
+        "proof",
+        "analysis",
+        "negative test"
+      ],
+      "verification_classes": [
+        "proof",
+        "analysis",
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0204",
+      "evidence_id": "E-PART-0204"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0205",
+      "number": 205,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "hypercall ABI は固定形式で定義され、呼出番号、呼出元、長さ、返却コード、未使用領域ゼロ化条件を明示しなければならない。",
+      "verification_phrase": "interface test と fuzzing",
+      "verification_labels": [
+        "interface test",
+        "fuzzing"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0205",
+      "evidence_id": "E-PART-0205"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0206",
+      "number": 206,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "共有コマンドページの未使用領域がゼロ化されていない要求は `INVALID_PARAMETER` として拒否しなければならない。",
+      "verification_phrase": "negative interface test",
+      "verification_labels": [
+        "negative interface test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0206",
+      "evidence_id": "E-PART-0206"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0207",
+      "number": 207,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "trap レジスタ規約は `RAX=command_page_gpa`、`RBX/RCX/RDX=0` を入力とし、返却時 `RAX=status_code`、`RBX=command_state`、`RCX=actual_output_length` を返す固定 ABI としなければならない。",
+      "verification_phrase": "interface test と trap-level inspection",
+      "verification_labels": [
+        "interface test",
+        "trap-level inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0207",
+      "evidence_id": "E-PART-0207"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0208",
+      "number": 208,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "`abi_version` 不一致要求は `ABI_VERSION_UNSUPPORTED` で拒否しなければならない。",
+      "verification_phrase": "negative interface test",
+      "verification_labels": [
+        "negative interface test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0208",
+      "evidence_id": "E-PART-0208"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0209",
+      "number": 209,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "`caller_sequence` は vCPU ごとに単調増加でなければならず、後退または再利用は `REPLAY_DETECTED` で拒否しなければならない。",
+      "verification_phrase": "replay test",
+      "verification_labels": [
+        "replay test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0209",
+      "evidence_id": "E-PART-0209"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0210",
+      "number": 210,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "command page 状態機械は `EMPTY`、`READY`、`EXECUTING`、`COMPLETED`、`FAILED` に固定し、`EXECUTING` 中の再入は `RESOURCE_BUSY` としなければならない。",
+      "verification_phrase": "state-machine test と concurrency test",
+      "verification_labels": [
+        "state-machine test",
+        "concurrency test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0210",
+      "evidence_id": "E-PART-0210"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0211",
+      "number": 211,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "partition lifecycle の合法遷移は Section 18.1 に列挙したものに限定し、表にない遷移は `INVALID_STATE` としなければならない。",
+      "verification_phrase": "lifecycle transition test と inspection",
+      "verification_labels": [
+        "lifecycle transition test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0211",
+      "evidence_id": "E-PART-0211"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0212",
+      "number": 212,
+      "subsection": "G.3. Microhypervisor and Partition Requirements",
+      "text": "`PARTITION_RESUME` は `Quiesced` から `Runnable` へのみ有効であり、`Faulted` 回復には `PARTITION_RECOVER` を用いなければならない。",
+      "verification_phrase": "negative lifecycle test",
+      "verification_labels": [
+        "negative lifecycle test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "interface",
+        "security"
+      ],
+      "source_sections": [
+        "16-20",
+        "Appendix D",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "partition manager",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PART-0212",
+      "evidence_id": "E-PART-0212"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0300",
+      "number": 300,
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "text": "FreeBSD は CR0.WP、CR4.SMEP、CR4.SMAP、および構成依存の CET 関連制御を任意に解除できてはならない。",
+      "verification_phrase": "trap test と inspection",
+      "verification_labels": [
+        "trap test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-CPU-0300",
+      "evidence_id": "E-CPU-0300"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0301",
+      "number": 301,
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "text": "Intel 構成では HLAT を必須とする。HLAT を用いない Intel 構成は FBVBS v7 適合を名乗ってはならない。",
+      "verification_phrase": "platform capability inspection と conformance review",
+      "verification_labels": [
+        "platform capability inspection",
+        "conformance review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-CPU-0301",
+      "evidence_id": "E-CPU-0301"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0302",
+      "number": 302,
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "text": "AMD 構成では HLAT 相当の単一保証を主張してはならず、NPT write-protect、fault handling、shadow translation、TLB 同期を含む複合経路を実装しなければならない。",
+      "verification_phrase": "design inspection と adversarial test",
+      "verification_labels": [
+        "design inspection",
+        "adversarial test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-CPU-0302",
+      "evidence_id": "E-CPU-0302"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0303",
+      "number": 303,
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "text": "AMD 構成で高保証を主張する場合、PFN 差し替え、PTE 改ざん、TLB invalidate race、複数コア更新競合に対する実証が完了していなければならない。",
+      "verification_phrase": "adversarial multiprocessor test",
+      "verification_labels": [
+        "adversarial multiprocessor test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-CPU-0303",
+      "evidence_id": "E-CPU-0303"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0304",
+      "number": 304,
+      "subsection": "G.4. CPU Control and Translation Integrity Requirements",
+      "text": "SEV-SNP を用いる場合、RMP と VMPL は補強として利用してよいが、それのみを根拠として HLAT と同一保証を主張してはならない。",
+      "verification_phrase": "design review と documentation review",
+      "verification_labels": [
+        "design review",
+        "documentation review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional"
+      ],
+      "source_sections": [
+        "21-25"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "CPU virtualization path",
+        "IOMMU integration"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-CPU-0304",
+      "evidence_id": "E-CPU-0304"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0400",
+      "number": 400,
+      "subsection": "G.5. Kernel Code Integrity Requirements",
+      "text": "カーネルコードページおよび許可済みモジュールコードページは W^X を維持しなければならない。",
+      "verification_phrase": "memory protection test",
+      "verification_labels": [
+        "memory protection test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "26",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel Code Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KCI-0400",
+      "evidence_id": "E-KCI-0400"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0401",
+      "number": 401,
+      "subsection": "G.5. Kernel Code Integrity Requirements",
+      "text": "未署名モジュールは既定で不許可とし、署名、失効、世代番号、対象プラットフォームが許可条件を満たす場合のみ execute 権限を付与しなければならない。",
+      "verification_phrase": "module load test と negative test",
+      "verification_labels": [
+        "module load test",
+        "negative test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "26",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel Code Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KCI-0401",
+      "evidence_id": "E-KCI-0401"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0402",
+      "number": 402,
+      "subsection": "G.5. Kernel Code Integrity Requirements",
+      "text": "コード整合性を主張する構成では、Kernel Translation Integrity と整合する形でコードの物理ページ対応も保護しなければならない。",
+      "verification_phrase": "translation tamper test",
+      "verification_labels": [
+        "translation tamper test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "26",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel Code Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KCI-0402",
+      "evidence_id": "E-KCI-0402"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0500",
+      "number": 500,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "Kernel State Integrity Service は、少なくとも起動後不変状態、制御付き更新状態、保護対象外の高頻度状態を区別しなければならない。",
+      "verification_phrase": "design inspection",
+      "verification_labels": [
+        "design inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0500",
+      "evidence_id": "E-KSI-0500"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0501",
+      "number": 501,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "制御付き更新状態の変更は、検証済み shadow copy と最小時間の write-enable 区間を通じてのみ実行しなければならない。",
+      "verification_phrase": "concurrency test と analysis",
+      "verification_labels": [
+        "concurrency test",
+        "analysis"
+      ],
+      "verification_classes": [
+        "test",
+        "analysis"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0501",
+      "evidence_id": "E-KSI-0501"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0502",
+      "number": 502,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "参照ポインタの更新は、登録済み正規オブジェクト集合に対する遷移のみを許可しなければならない。",
+      "verification_phrase": "negative test と proof または analysis",
+      "verification_labels": [
+        "negative test",
+        "proof",
+        "analysis"
+      ],
+      "verification_classes": [
+        "test",
+        "proof",
+        "analysis"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0502",
+      "evidence_id": "E-KSI-0502"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0503",
+      "number": 503,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "`execve(2)`、`fexecve(2)`、`setuid(2)` 系、および対応する `gid` 系に関する典型的特権上昇は検査対象に含めなければならない。ABI v1 の承認入力は、操作種別と `ruid/euid/suid/rgid/egid/sgid` の完全な要求後状態を表現できなければならない。",
+      "verification_phrase": "syscall test と interface review",
+      "verification_labels": [
+        "syscall test",
+        "interface review"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0503",
+      "evidence_id": "E-KSI-0503"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0504",
+      "number": 504,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "特権上昇認可の主キーにパスを用いてはならず、vnode または `fsid+fileid` に基づく識別子を主としなければならない。",
+      "verification_phrase": "exec path variation test",
+      "verification_labels": [
+        "exec path variation test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0504",
+      "evidence_id": "E-KSI-0504"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0505",
+      "number": 505,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "既存の特権付き file descriptor 継承など、exec 起点以外の権限持越し問題は別途残余リスクまたは補助対策として扱わなければならない。",
+      "verification_phrase": "documentation review",
+      "verification_labels": [
+        "documentation review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0505",
+      "evidence_id": "E-KSI-0505"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0506",
+      "number": 506,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "Tier B 更新時の callsite 検証は caller 提供値ではなくマイクロハイパーバイザーが観測した RIP に基づかなければならない。",
+      "verification_phrase": "adversarial caller spoofing test",
+      "verification_labels": [
+        "adversarial caller spoofing test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0506",
+      "evidence_id": "E-KSI-0506"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0507",
+      "number": 507,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "`KSI_VALIDATE_SETUID` 相当の ABI は、少なくとも `fsid`、`fileid`、測定ハッシュ、要求 UID/GID 遷移、caller ucred 参照、Jail context、MAC context を入力に含めなければならない。",
+      "verification_phrase": "interface review と syscall/path test",
+      "verification_labels": [
+        "interface review",
+        "syscall/path test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0507",
+      "evidence_id": "E-KSI-0507"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0508",
+      "number": 508,
+      "subsection": "G.6. Kernel State Integrity Requirements",
+      "text": "`CALLSITE_REJECTED` 判定は、マイクロハイパーバイザーが保持する許可 callsite table に対する完全一致 RIP 比較で行わなければならない。許可 table は対応 manifest の `allowed_callsites` metadata から KASLR 再配置後の実アドレスへ機械的に導出され、KLD 更新時には新 manifest に基づいて原子的に再計算されなければならない。",
+      "verification_phrase": "callsite relocation test と negative spoofing test",
+      "verification_labels": [
+        "callsite relocation test",
+        "negative spoofing test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "27",
+        "Appendix H",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Kernel State Integrity Service",
+        "microhypervisor",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KSI-0508",
+      "evidence_id": "E-KSI-0508"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0600",
+      "number": 600,
+      "subsection": "G.7. Key Service Requirements",
+      "text": "Identity Key Service は鍵素材をサービス境界外へ返却してはならない。",
+      "verification_phrase": "interface test と code inspection",
+      "verification_labels": [
+        "interface test",
+        "code inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KEY-0600",
+      "evidence_id": "E-KEY-0600"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0601",
+      "number": 601,
+      "subsection": "G.7. Key Service Requirements",
+      "text": "Identity Key Service の API は `IMPORT_KEY`、`SIGN`、`KEY_EXCHANGE`、`DERIVE`、`DESTROY` 等の狭い操作集合に限定しなければならない。",
+      "verification_phrase": "interface review",
+      "verification_labels": [
+        "interface review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KEY-0601",
+      "evidence_id": "E-KEY-0601"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0602",
+      "number": 602,
+      "subsection": "G.7. Key Service Requirements",
+      "text": "外部暗号ライブラリを用いる場合、それを該当性質の TCB に含めなければならない。",
+      "verification_phrase": "dependency review と evidence review",
+      "verification_labels": [
+        "dependency review",
+        "evidence review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KEY-0602",
+      "evidence_id": "E-KEY-0602"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0603",
+      "number": 603,
+      "subsection": "G.7. Key Service Requirements",
+      "text": "Storage Key Service は未マウント時の鍵非抽出性を主張してよいが、オンライン平文保護を主張してはならない。",
+      "verification_phrase": "documentation review と threat-model review",
+      "verification_labels": [
+        "documentation review",
+        "threat-model review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KEY-0603",
+      "evidence_id": "E-KEY-0603"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0604",
+      "number": 604,
+      "subsection": "G.7. Key Service Requirements",
+      "text": "`KEY_EXCHANGE` の返却値は生の共有秘密ではなく不透明ハンドルまたはサービス内部参照でなければならない。",
+      "verification_phrase": "interface test と code inspection",
+      "verification_labels": [
+        "interface test",
+        "code inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "security",
+        "functional",
+        "interface"
+      ],
+      "source_sections": [
+        "28-29",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Identity Key Service",
+        "Storage Key Service",
+        "FreeBSD front-end"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-KEY-0604",
+      "evidence_id": "E-KEY-0604"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0700",
+      "number": 700,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "更新搬送手段を `freebsd-update` に固定してはならない。",
+      "verification_phrase": "design inspection",
+      "verification_labels": [
+        "design inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0700",
+      "evidence_id": "E-UVS-0700"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0701",
+      "number": 701,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "成果物には署名付きマニフェストが付随し、少なくとも format version、component type、target platform、hash、size、generation、security epoch、dependency、revocation reference を含まなければならない。",
+      "verification_phrase": "parser test と inspection",
+      "verification_labels": [
+        "parser test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0701",
+      "evidence_id": "E-UVS-0701"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0702",
+      "number": 702,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "更新メタデータ集合は freshness、freeze 攻撃検出、mix-and-match 防止、一貫性 snapshot view を扱えなければならない。",
+      "verification_phrase": "update adversarial test",
+      "verification_labels": [
+        "update adversarial test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0702",
+      "evidence_id": "E-UVS-0702"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0703",
+      "number": 703,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "高保証運用プロファイルでは、署名鍵を HSM または同等保護で管理し、二者承認以上のリリース署名手順を要求しなければならない。",
+      "verification_phrase": "operational audit",
+      "verification_labels": [
+        "operational audit"
+      ],
+      "verification_classes": [
+        "operational drill"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0703",
+      "evidence_id": "E-UVS-0703"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0704",
+      "number": 704,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "freshness 失敗、freeze 攻撃、期限切れメタデータ、stale mirror 検出時は `FRESHNESS_FAILED` を返さなければならない。",
+      "verification_phrase": "adversarial update test",
+      "verification_labels": [
+        "adversarial update test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0704",
+      "evidence_id": "E-UVS-0704"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0705",
+      "number": 705,
+      "subsection": "G.8. Update and Artifact Requirements",
+      "text": "snapshot view 不整合、mix-and-match、役割分離違反検出時は `SNAPSHOT_INCONSISTENT` または `DEPENDENCY_UNSATISFIED` を返さなければならない。",
+      "verification_phrase": "adversarial metadata consistency test",
+      "verification_labels": [
+        "adversarial metadata consistency test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "update",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "30",
+        "39-40",
+        "Appendix L"
+      ],
+      "target_components": [
+        "Update Verification Service",
+        "Kernel Code Integrity Service",
+        "microhypervisor"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-UVS-0705",
+      "evidence_id": "E-UVS-0705"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0800",
+      "number": 800,
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "text": "FreeBSD front-end は非信頼の ABI 変換層として扱い、その侵害時影響は誤要求、要求省略、サービス拒否に閉じ込めなければならない。",
+      "verification_phrase": "architecture review と adversarial test",
+      "verification_labels": [
+        "architecture review",
+        "adversarial test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-FBSD-0800",
+      "evidence_id": "E-FBSD-0800"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0801",
+      "number": 801,
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "text": "front-end は信頼サービスメモリ、第二レベルページテーブル、および一次監査ログに対する書換え能力を持ってはならない。",
+      "verification_phrase": "isolation test",
+      "verification_labels": [
+        "isolation test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-FBSD-0801",
+      "evidence_id": "E-FBSD-0801"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0802",
+      "number": 802,
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "text": "FreeBSD 介入点は、KLD ロード、資格情報変更、Jail、選択された MAC フック、Capsicum capability mode/rights 縮減導入点、鍵利用経路、`bhyve`/`vmm` 統合経路を少なくとも含まなければならない。",
+      "verification_phrase": "integration review と syscall/path test",
+      "verification_labels": [
+        "integration review",
+        "syscall/path test"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-FBSD-0802",
+      "evidence_id": "E-FBSD-0802"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0803",
+      "number": 803,
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "text": "`mac(9)` の entry point checks だけで攻撃面を網羅したと主張してはならず、各不変条件に対して十分な介入点の存在を個別に実証しなければならない。",
+      "verification_phrase": "code audit と threat traceability review",
+      "verification_labels": [
+        "code audit",
+        "threat traceability review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-FBSD-0803",
+      "evidence_id": "E-FBSD-0803"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0804",
+      "number": 804,
+      "subsection": "G.9. FreeBSD Integration Requirements",
+      "text": "`vmm(4)` と passthrough が要求する boot-time 設定および loader 段階の介入点を設計対象に含めなければならない。",
+      "verification_phrase": "boot integration test",
+      "verification_labels": [
+        "boot integration test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "31-32"
+      ],
+      "target_components": [
+        "FreeBSD front-end",
+        "FreeBSD kernel fork",
+        "integration hooks"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-FBSD-0804",
+      "evidence_id": "E-FBSD-0804"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0900",
+      "number": 900,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "`bhyve` ユーザーランドは制御プレーンおよびデバイスモデル層として残し、実行プレーンの最終制御権はマイクロハイパーバイザーが保持しなければならない。",
+      "verification_phrase": "architecture inspection",
+      "verification_labels": [
+        "architecture inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0900",
+      "evidence_id": "E-VM-0900"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0901",
+      "number": 901,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "`/dev/vmm` と `libvmmapi` の高レベル ABI は、`VM_CREATE`, `VM_DESTROY`, `VM_RUN`, `VM_SET_REGISTER`, `VM_GET_REGISTER`, `VM_MAP_MEMORY`, `VM_INJECT_INTERRUPT`, `VM_ASSIGN_DEVICE`, `VM_RELEASE_DEVICE` に対応する本仕様書定義の意味論を維持しなければならない。ABI v1 の適合範囲外の既存操作は互換義務を負わず、必要なら明示的拡張としてのみ追加してよい。",
+      "verification_phrase": "compatibility test",
+      "verification_labels": [
+        "compatibility test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0901",
+      "evidence_id": "E-VM-0901"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0902",
+      "number": 902,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "未分類 VM exit は fail-open で FreeBSD に委譲してはならず、fail-closed として停止・記録されなければならない。",
+      "verification_phrase": "exit classification test と fault injection",
+      "verification_labels": [
+        "exit classification test",
+        "fault injection"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0902",
+      "evidence_id": "E-VM-0902"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0903",
+      "number": 903,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "guest memory は再利用前にゼロ化しなければならない。",
+      "verification_phrase": "memory reuse test",
+      "verification_labels": [
+        "memory reuse test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0903",
+      "evidence_id": "E-VM-0903"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0904",
+      "number": 904,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "passthrough デバイスは、IOMMU group、ACS、MSI/MSI-X 制御、interrupt remapping、reset 能力を満たした場合にのみ割り当ててよい。",
+      "verification_phrase": "device qualification test",
+      "verification_labels": [
+        "device qualification test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0904",
+      "evidence_id": "E-VM-0904"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0905",
+      "number": 905,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "live migration と nested virtualization を本版の適合要件に含めてはならない。",
+      "verification_phrase": "documentation review",
+      "verification_labels": [
+        "documentation review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0905",
+      "evidence_id": "E-VM-0905"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0906",
+      "number": 906,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "VM 実行系 ABI は `Runnable` 状態の vCPU に対してのみ `VM_RUN` を許可し、その他状態では `INVALID_STATE` を返さなければならない。",
+      "verification_phrase": "VM lifecycle negative test",
+      "verification_labels": [
+        "VM lifecycle negative test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0906",
+      "evidence_id": "E-VM-0906"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0907",
+      "number": 907,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "vCPU 状態機械は少なくとも `Created`、`Runnable`、`Running`、`Blocked`、`Faulted`、`Destroyed` を持ち、`VM_RUN`、割込み待ち、fault、破棄要求に対する合法遷移を定義しなければならない。`Blocked` は外部イベントまたは割込み注入により再開可能な待機状態に限定しなければならない。",
+      "verification_phrase": "vCPU state-machine test と inspection",
+      "verification_labels": [
+        "vCPU state-machine test",
+        "inspection"
+      ],
+      "verification_classes": [
+        "test",
+        "inspection"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0907",
+      "evidence_id": "E-VM-0907"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0908",
+      "number": 908,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "ABI v1 は、各 vCPU の外部可視状態を返す `VM_GET_VCPU_STATUS` call を持たなければならない。",
+      "verification_phrase": "interface test と VM lifecycle test",
+      "verification_labels": [
+        "interface test",
+        "VM lifecycle test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0908",
+      "evidence_id": "E-VM-0908"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-0909",
+      "number": 909,
+      "subsection": "G.10. `bhyve` and Virtualization Requirements",
+      "text": "memory object と shared registration の寿命は、対応する release/unregister ABI により明示的に終了できなければならない。",
+      "verification_phrase": "resource lifecycle test",
+      "verification_labels": [
+        "resource lifecycle test"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "functional",
+        "security",
+        "interface"
+      ],
+      "source_sections": [
+        "33-38",
+        "Appendix L"
+      ],
+      "target_components": [
+        "microhypervisor",
+        "vmm front-end",
+        "bhyve userland"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-VM-0909",
+      "evidence_id": "E-VM-0909"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1000",
+      "number": 1000,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "要求、設計、実装、試験、証拠の双方向トレーサビリティを維持しなければならない。",
+      "verification_phrase": "traceability audit",
+      "verification_labels": [
+        "traceability audit"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1000",
+      "evidence_id": "E-QUAL-1000"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1001",
+      "number": 1001,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "TCB 変更は独立レビュア一名以上の承認を必要としなければならない。",
+      "verification_phrase": "review record audit",
+      "verification_labels": [
+        "review record audit"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1001",
+      "evidence_id": "E-QUAL-1001"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1002",
+      "number": 1002,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "SPARK 対象コードは実行時例外不在を証明しなければならない。",
+      "verification_phrase": "proof artifact review",
+      "verification_labels": [
+        "proof artifact review"
+      ],
+      "verification_classes": [
+        "proof"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1002",
+      "evidence_id": "E-QUAL-1002"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1003",
+      "number": 1003,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "Rust TCB 部は `no_std`、`panic=abort`、固定 toolchain、`unsafe` 局所化、安全性契約文書化を満たさなければならない。",
+      "verification_phrase": "code inspection と build inspection",
+      "verification_labels": [
+        "code inspection",
+        "build inspection"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1003",
+      "evidence_id": "E-QUAL-1003"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1004",
+      "number": 1004,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "hypercall parser、IPC parser、update parser、signature loader、log decoder、`bhyve` front-end 境界は fuzzing 対象に含めなければならない。",
+      "verification_phrase": "fuzz campaign evidence",
+      "verification_labels": [
+        "fuzz campaign evidence"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1004",
+      "evidence_id": "E-QUAL-1004"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1005",
+      "number": 1005,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "中核分岐は MC/DC を目標とし、困難な場合は代替基準と理由を記録しなければならない。",
+      "verification_phrase": "coverage review",
+      "verification_labels": [
+        "coverage review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1005",
+      "evidence_id": "E-QUAL-1005"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1006",
+      "number": 1006,
+      "subsection": "G.11. Quality and Supply-Chain Requirements",
+      "text": "リリース成果物は再現可能ビルド、SBOM、署名付き provenance を持たなければならない。",
+      "verification_phrase": "supply-chain audit",
+      "verification_labels": [
+        "supply-chain audit"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "quality",
+        "operational",
+        "security"
+      ],
+      "source_sections": [
+        "41-45"
+      ],
+      "target_components": [
+        "all TCB components",
+        "build system",
+        "CI",
+        "release pipeline"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-QUAL-1006",
+      "evidence_id": "E-QUAL-1006"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1100",
+      "number": 1100,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前に AMD 翻訳整合性経路の実証を完了しなければならない。",
+      "verification_phrase": "adversarial multiprocessor campaign",
+      "verification_labels": [
+        "adversarial multiprocessor campaign"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1100",
+      "evidence_id": "E-PROD-1100"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1101",
+      "number": 1101,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前に FreeBSD 介入点の十分性をコード読解と試験で実証しなければならない。",
+      "verification_phrase": "design review と integration campaign",
+      "verification_labels": [
+        "design review",
+        "integration campaign"
+      ],
+      "verification_classes": [
+        "inspection",
+        "test"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1101",
+      "evidence_id": "E-PROD-1101"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1102",
+      "number": 1102,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前に更新 freshness、freeze 耐性、mix-and-match 耐性を実証しなければならない。",
+      "verification_phrase": "update adversarial campaign",
+      "verification_labels": [
+        "update adversarial campaign"
+      ],
+      "verification_classes": [
+        "test"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1102",
+      "evidence_id": "E-PROD-1102"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1103",
+      "number": 1103,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前に一次監査ログ経路の実運用成立性を確認しなければならない。",
+      "verification_phrase": "operational drill",
+      "verification_labels": [
+        "operational drill"
+      ],
+      "verification_classes": [
+        "operational drill"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1103",
+      "evidence_id": "E-PROD-1103"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1104",
+      "number": 1104,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前に採用暗号実装の TCB 範囲、外部依存、証明範囲、監査根拠を確定しなければならない。",
+      "verification_phrase": "crypto review board と evidence audit",
+      "verification_labels": [
+        "crypto review board",
+        "evidence audit"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1104",
+      "evidence_id": "E-PROD-1104"
+    },
+    {
+      "requirement_id": "FBVBS-REQ-1105",
+      "number": 1105,
+      "subsection": "G.12. Production Readiness Requirements",
+      "text": "本番宣言前にサポート対象 passthrough デバイス群ごとの qualification matrix を作成しなければならない。",
+      "verification_phrase": "device qualification report review",
+      "verification_labels": [
+        "device qualification report review"
+      ],
+      "verification_classes": [
+        "inspection"
+      ],
+      "requirement_types": [
+        "operational",
+        "security",
+        "quality"
+      ],
+      "source_sections": [
+        "Appendix F"
+      ],
+      "target_components": [
+        "program governance",
+        "release authority",
+        "validation campaign"
+      ],
+      "status": "normative-frozen",
+      "test_id": "T-PROD-1105",
+      "evidence_id": "E-PROD-1105"
+    }
+  ],
+  "partition_transitions": [
+    {
+      "current_states": [
+        "なし"
+      ],
+      "trigger": "PARTITION_CREATE または VM_CREATE",
+      "next_state": "Created",
+      "required_condition": "資源確保成功",
+      "notes": "`VM_CREATE` は guest VM のみ"
+    },
+    {
+      "current_states": [
+        "Created"
+      ],
+      "trigger": "PARTITION_MEASURE",
+      "next_state": "Measured",
+      "required_condition": "指定成果物が検証済み",
+      "notes": "イメージとマニフェストの測定値を記録"
+    },
+    {
+      "current_states": [
+        "Measured"
+      ],
+      "trigger": "PARTITION_LOAD_IMAGE",
+      "next_state": "Loaded",
+      "required_condition": "ロード先メモリ確保成功",
+      "notes": "コードと初期データを配置"
+    },
+    {
+      "current_states": [
+        "Loaded"
+      ],
+      "trigger": "PARTITION_START",
+      "next_state": "Runnable",
+      "required_condition": "初期 CPU 状態構築成功",
+      "notes": "実行可能だが未実行"
+    },
+    {
+      "current_states": [
+        "Runnable"
+      ],
+      "trigger": "スケジューラ選択",
+      "next_state": "Running",
+      "required_condition": "vCPU 割当可能",
+      "notes": "マイクロハイパーバイザー内部遷移"
+    },
+    {
+      "current_states": [
+        "Running",
+        "Runnable"
+      ],
+      "trigger": "PARTITION_QUIESCE",
+      "next_state": "Quiesced",
+      "required_condition": "vCPU 停止成功または未実行化成功",
+      "notes": "実行一時停止または実行開始前停止"
+    },
+    {
+      "current_states": [
+        "Quiesced"
+      ],
+      "trigger": "PARTITION_RESUME",
+      "next_state": "Runnable",
+      "required_condition": "中断条件消滅",
+      "notes": "`Faulted` からの回復には使わない"
+    },
+    {
+      "current_states": [
+        "Running",
+        "Runnable",
+        "Quiesced"
+      ],
+      "trigger": "致命障害検出",
+      "next_state": "Faulted",
+      "required_condition": "なし",
+      "notes": "一次監査ログ必須"
+    },
+    {
+      "current_states": [
+        "Faulted"
+      ],
+      "trigger": "PARTITION_RECOVER",
+      "next_state": "Runnable",
+      "required_condition": "再測定、ゼロ化、必要状態復元成功",
+      "notes": "回復失敗時は `Faulted` 維持"
+    },
+    {
+      "current_states": [
+        "Created",
+        "Measured",
+        "Loaded",
+        "Runnable",
+        "Running",
+        "Quiesced",
+        "Faulted"
+      ],
+      "trigger": "PARTITION_DESTROY",
+      "next_state": "Destroyed",
+      "required_condition": "資源回収とゼロ化成功",
+      "notes": "`Running` からの破棄要求は内部的に quiesce 後に処理"
+    }
+  ],
+  "protected_structures": [
+    {
+      "tier": "Tier A",
+      "structure": "sysent[]（syscall テーブル）",
+      "attack_effect": "syscall フック。攻撃者が任意のカーネル関数を syscall エントリに差し替え可能",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "コンパイル時定義。ランタイム変更の正当理由なし"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "IDT（Interrupt Descriptor Table）",
+      "attack_effect": "割り込みハイジャック。例外・割り込みハンドラを攻撃者制御コードに誘導",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "ブート時設定後不変"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "GDT（Global Descriptor Table）",
+      "attack_effect": "セグメント記述子改竄。特権レベル境界の破壊",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "ブート時設定後不変"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "カーネル .rodata セクション",
+      "attack_effect": "定数改竄。文字列テーブル、エラーメッセージ、設定定数の書換え",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "定義上不変"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "vop_vector（VFS 操作テーブル）",
+      "attack_effect": "ファイル操作リダイレクト。open/read/write を攻撃者制御関数に誘導",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "コンパイル時定義。`.rodata` に配置されるべき"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "cdevsw（キャラクタデバイス操作テーブル）",
+      "attack_effect": "デバイス操作リダイレクト",
+      "change_frequency": "ゼロ（ドライバロード後）",
+      "phase": "2",
+      "rationale": "KLD ロード時に登録後不変"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "filterops（kqueue フィルタ操作テーブル）",
+      "attack_effect": "イベント操作リダイレクト",
+      "change_frequency": "ゼロ",
+      "phase": "2",
+      "rationale": "コンパイル時定義"
+    },
+    {
+      "tier": "Tier A",
+      "structure": "カーネルテキスト領域の PTE（AMD のみ、静的コアカーネル範囲）",
+      "attack_effect": "PFN スワップ。カーネルコードが指す物理ページを攻撃者制御ページに差替え",
+      "change_frequency": "ゼロ",
+      "phase": "3",
+      "rationale": "Intel は HLAT で保護。AMD は HLAT 相当の単一機構がないため、静的コアカーネル範囲の PTE 自体を不変化"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "struct ucred（資格情報）",
+      "attack_effect": "権限昇格。uid/gid 変更で root 取得",
+      "change_frequency": "低（setuid/crget 時）",
+      "phase": "2",
+      "rationale": "権限昇格防止の核心"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "td->td_ucred 等の ucred ポインタ",
+      "attack_effect": "ポインタ差替え。偽 ucred への誘導で間接的権限昇格",
+      "change_frequency": "低",
+      "phase": "2",
+      "rationale": "ucred 本体を保護してもポインタが自由なら迂回可能"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "struct prison（Jail メタデータ）",
+      "attack_effect": "Jail エスケープ。`pr_allow` 変更で全操作許可、`pr_path` 変更で chroot 脱出",
+      "change_frequency": "極低（Jail 作成/破棄時）",
+      "phase": "2",
+      "rationale": "Jail 境界は FreeBSD の主要分離機構"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "prison ポインタ（p->p_ucred->cr_prison 等）",
+      "attack_effect": "Jail ポインタ差替え。`prison0`（ホスト Jail）への誘導で Jail 脱出",
+      "change_frequency": "極低",
+      "phase": "2",
+      "rationale": "prison 本体保護の補完"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "securelevel 変数",
+      "attack_effect": "securelevel 迂回。不変ファイル変更、raw デバイスアクセス、ファイアウォール変更が可能に",
+      "change_frequency": "極低（手動変更のみ）",
+      "phase": "2",
+      "rationale": "FreeBSD 固有の重要セキュリティ機構"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "MAC ポリシー構造体（mac_policy_list 等）",
+      "attack_effect": "MAC 無効化。強制アクセス制御の全ポリシーを無効化",
+      "change_frequency": "極低（ポリシーロード時）",
+      "phase": "2",
+      "rationale": "MAC Framework は FreeBSD の主要セキュリティ層"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "Capsicum capability mode フラグ（p_flag 内 P_CAPSICUM 等）",
+      "attack_effect": "サンドボックス脱出。capability mode からの離脱でグローバル名前空間アクセス復帰",
+      "change_frequency": "極低（`cap_enter` は一方通行）",
+      "phase": "2",
+      "rationale": "Capsicum はアプリケーション分離の基盤"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "pf ルール構造体（pf_krule 等）",
+      "attack_effect": "ファイアウォール無効化。全ポートの開放、アクセス制限の解除",
+      "change_frequency": "極低（管理者が `pfctl` で変更時のみ）",
+      "phase": "4",
+      "rationale": "サーバー環境のネットワーク境界"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "ipfw ルール構造体",
+      "attack_effect": "同上",
+      "change_frequency": "極低",
+      "phase": "4",
+      "rationale": "同上"
+    },
+    {
+      "tier": "Tier B",
+      "structure": "p_textvp（実行バイナリ vnode ポインタ）",
+      "attack_effect": "Setuid 検証の基盤改竄。攻撃者が `p_textvp` を許可済みバイナリの vnode に差替えれば、Setuid 検証を迂回可能",
+      "change_frequency": "極低（exec 時のみ）",
+      "phase": "4",
+      "rationale": "Setuid 検証が依拠する識別情報"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "struct filedesc（fd テーブル）",
+      "attack_effect": "他プロセスの open 済み fd を差込み、ucred チェックなしで読書き",
+      "change_frequency": "極高（全 open/close/dup）",
+      "phase": null,
+      "rationale": "変更頻度が高すぎて第二レベルページング保護は性能破綻"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "struct file（個別ファイル記述子）",
+      "attack_effect": "`f_ops` 差替え等",
+      "change_frequency": "高",
+      "phase": null,
+      "rationale": "同上"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "struct socket",
+      "attack_effect": "ソケットハイジャック",
+      "change_frequency": "高",
+      "phase": null,
+      "rationale": "同上"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "struct inpcb",
+      "attack_effect": "接続パラメータ改竄",
+      "change_frequency": "高",
+      "phase": null,
+      "rationale": "同上"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "ルーティングテーブル（動的環境）",
+      "attack_effect": "トラフィックリダイレクト",
+      "change_frequency": "中〜高",
+      "phase": null,
+      "rationale": "動的ルーティング環境では正当変更が高頻度"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "スレッドスケジューリング構造体",
+      "attack_effect": "スケジューリング操作",
+      "change_frequency": "極高",
+      "phase": null,
+      "rationale": "カーネルの最高頻度操作"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "ネットワークバッファ（mbuf 等）",
+      "attack_effect": "通信データ傍受/改竄",
+      "change_frequency": "極高",
+      "phase": null,
+      "rationale": "データパス上のバッファ"
+    },
+    {
+      "tier": "Tier C",
+      "structure": "VFS キャッシュ",
+      "attack_effect": "ファイルデータの一時的改竄",
+      "change_frequency": "高",
+      "phase": null,
+      "rationale": "キャッシュの性質上、頻繁な更新が不可避"
+    }
+  ],
+  "service_failures": [
+    {
+      "service": "Kernel Code Integrity Service",
+      "stopped_function": "新規 KLD の署名検証と execute 権限付与。新規の CR/MSR インターセプト設定",
+      "preserved_protection": "既存コードページの W^X（第二レベルページングが維持）。既設定の CR ピニング（マイクロハイパーバイザーが維持）",
+      "freebsd_impact": "新規 KLD ロード不可。既存カーネルとモジュールは正常動作継続",
+      "recovery": "パーティション再起動。再起動後にイメージ再検証。既存 W^X 設定は破壊されないため、再起動中の追加リスクは「新規 KLD が検証なしで実行される」可能性のみ。ただし既定方針で未署名 KLD は execute 不可であるため、このリスクはサービス停止中の KLD ロード試行を FreeBSD 側で保留することで緩和される"
+    },
+    {
+      "service": "Kernel State Integrity Service",
+      "stopped_function": "Tier B の新規変更承認（ucred 変更、Setuid 検証、Jail パラメータ変更等）",
+      "preserved_protection": "既存の Tier A read-only 保護。既存の Tier B read-only 保護（変更ができなくなるだけで、既設定値は維持）",
+      "freebsd_impact": "setuid exec がブロックされる。Jail 作成/変更がブロックされる。securelevel 変更がブロックされる。通常の read 操作（ucred 参照等）は影響なし",
+      "recovery": "パーティション再起動。保護テーブルを永続メモリから復元。復元中の Tier B 保護は第二レベルページングが維持するため、既存値は安全"
+    },
+    {
+      "service": "Identity Key Service",
+      "stopped_function": "新規鍵インポート、署名操作、鍵交換操作",
+      "preserved_protection": "他サービスのメモリ分離。他サービスの機能",
+      "freebsd_impact": "TLS ハンドシェイク不可。SSH ホスト認証不可。IPsec IKE 再ネゴシエーション不可。既存セッション（セッション鍵が FreeBSD 側にあるもの）は継続",
+      "recovery": "パーティション再起動。鍵素材を安全なストレージ（TPM シール等）から再ロード"
+    },
+    {
+      "service": "Storage Key Service",
+      "stopped_function": "新規ボリュームマウント（鍵アンロック）。進行中の暗号操作",
+      "preserved_protection": "他サービスのメモリ分離。鍵素材はサービスパーティション内に残留（再起動まで抽出不可）",
+      "freebsd_impact": "マウント済みボリュームの I/O が停止。新規マウント不可",
+      "recovery": "パーティション再起動。鍵素材を再ロード。マウント済みボリュームは再マウントが必要"
+    },
+    {
+      "service": "Update Verification Service",
+      "stopped_function": "成果物の署名/世代番号/依存関係検証",
+      "preserved_protection": "他サービスのメモリ分離。既に検証済みでロード済みの成果物は影響なし",
+      "freebsd_impact": "新規アップデートの適用不可。KLD の新規ロード不可（Kernel Code Integrity Service が Update Verification Service に依存する場合）",
+      "recovery": "パーティション再起動。検証状態を再構築"
+    },
+    {
+      "service": "マイクロハイパーバイザー自体",
+      "stopped_function": "**全保護が崩壊**",
+      "preserved_protection": "なし",
+      "freebsd_impact": "**全システム停止**",
+      "recovery": "システム再起動のみ。マイクロハイパーバイザーの障害は設計の最悪シナリオであり、形式検証の最大の動機"
+    }
+  ],
+  "performance_reference": [
+    {
+      "table": "baseline",
+      "operation": "通常 syscall（getpid 等）",
+      "cost": "~100-300ns",
+      "ipc_count": null,
+      "rationale": "最軽量 syscall"
+    },
+    {
+      "table": "baseline",
+      "operation": "execve",
+      "cost": "~1-5ms",
+      "ipc_count": null,
+      "rationale": "ファイル読込、ELF パース、マッピング"
+    },
+    {
+      "table": "baseline",
+      "operation": "open/close",
+      "cost": "~1-10µs",
+      "ipc_count": null,
+      "rationale": "VFS 層の処理"
+    },
+    {
+      "table": "baseline",
+      "operation": "fork",
+      "cost": "~100µs-1ms",
+      "ipc_count": null,
+      "rationale": "ページテーブルコピー"
+    },
+    {
+      "table": "baseline",
+      "operation": "TLS ハンドシェイク",
+      "cost": "~1-10ms",
+      "ipc_count": null,
+      "rationale": "鍵交換 + 署名"
+    },
+    {
+      "table": "baseline",
+      "operation": "ZFS 128KB sequential read",
+      "cost": "~50-200µs",
+      "ipc_count": null,
+      "rationale": "ディスク I/O 含む"
+    },
+    {
+      "table": "baseline",
+      "operation": "VM exit（I/O）",
+      "cost": "~1-3µs",
+      "ipc_count": null,
+      "rationale": "VMCS 保存/復元"
+    }
+  ],
+  "performance_targets": [
+    {
+      "table": "target",
+      "operation": "**通常 syscall（FBVBS 非関与）**",
+      "cost": "実質ゼロに近いことを目標",
+      "ipc_count": "0",
+      "rationale": "FBVBS は通常 syscall に介入しない。追加コストは第二レベルページング由来の小さな TLB 影響に限ることを目標とする"
+    },
+    {
+      "table": "target",
+      "operation": "**Tier B 読取り（ucred 参照等）**",
+      "cost": "追加 IPC なし（実質ゼロに近いことを目標）",
+      "ipc_count": "0",
+      "rationale": "Tier B は第二レベルページングで read-only。CPU は直接メモリ読取りし、VMCALL を要求しない"
+    },
+    {
+      "table": "target",
+      "operation": "**Tier B 変更（ucred 更新、Jail 変更等）**",
+      "cost": "数µs〜十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "VMCALL → マイクロハイパーバイザー → Kernel State Integrity Service → shadow copy 更新 → ページ write-enable/copy/read-only サイクル → 返却"
+    },
+    {
+      "table": "target",
+      "operation": "**Setuid exec 検証**",
+      "cost": "十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "execve のベースコストに対して小さい割合に抑えることを目標とする。ハッシュ照合はメモリ内 DB ルックアップ"
+    },
+    {
+      "table": "target",
+      "operation": "**KLD ロード（署名検証）**",
+      "cost": "100ms〜サブ秒級を許容",
+      "ipc_count": "2",
+      "rationale": "署名検証（暗号演算）+ 世代番号検証 + EPT 設定。低頻度操作のため許容"
+    },
+    {
+      "table": "target",
+      "operation": "**TLS 署名（Identity Key Service）**",
+      "cost": "数µs〜十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "VMCALL → Identity Key Service → 署名演算 → 返却。TLS ハンドシェイク全体に対して小さい割合に抑えることを目標とする"
+    },
+    {
+      "table": "target",
+      "operation": "**ZFS I/O（Storage Key Service、バッチ）**",
+      "cost": "< 10% を目標",
+      "ipc_count": "1/バッチ",
+      "rationale": "VMCALL コストを I/O コストで償却するにはバッチ化が必要であり、バッチサイズ調整で追加コストを抑える"
+    },
+    {
+      "table": "target",
+      "operation": "**bhyve VM exit（ファストパス: EPT 違反等）**",
+      "cost": "サブµs級を目標",
+      "ipc_count": "0",
+      "rationale": "マイクロハイパーバイザー内で完結。FreeBSD への転送なし"
+    },
+    {
+      "table": "target",
+      "operation": "**bhyve VM exit（スローパス: I/O エミュレーション）**",
+      "cost": "数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "マイクロハイパーバイザー → FreeBSD 転送 → デバイスモデル処理 → VMCALL → 再開。高頻度 exit では無視できないため、分類とバッチ化が重要"
+    },
+    {
+      "table": "target",
+      "operation": "**一次監査ログ書込み**",
+      "cost": "サブµs〜数µs/レコードを目標",
+      "ipc_count": "0",
+      "rationale": "マイクロハイパーバイザー内のリングバッファ書込み + UART 出力（非同期）。通常操作には影響しない（セキュリティイベント時のみ）"
+    },
+    {
+      "table": "target",
+      "operation": "**ミラーログ読取り（FreeBSD 側）**",
+      "cost": "追加 IPC なし（実質ゼロに近いことを目標）",
+      "ipc_count": "0",
+      "rationale": "共有リングバッファの直接読取り"
+    }
+  ],
+  "roadmap_phases": [
+    {
+      "phase": 0,
+      "title": "マイクロハイパーバイザー基盤（4ヶ月）",
+      "goal": "FreeBSD を deprivileged host として起動し、最低1つの信頼サービスパーティションを稼働させる。",
+      "deliverables": [
+        "Ada/SPARK マイクロハイパーバイザー: パーティション管理、第二レベルページング、IPC、VMCALL ハンドリング、一次監査ログ（UART）",
+        "Intel VT-x 対応（AMD は Phase 3）",
+        "最小限のブートシーケンス: UEFI → マイクロハイパーバイザー → 空の信頼サービスパーティション → FreeBSD パーティション",
+        "FreeBSD が VMX non-root で正常起動することの実証"
+      ],
+      "verification": [
+        "FreeBSD が信頼サービスパーティションのメモリにアクセスできないことの実証",
+        "IPC ラウンドトリップ時間の計測",
+        "GNATprove によるパーティション管理ロジックの実行時例外不在証明"
+      ]
+    },
+    {
+      "phase": 1,
+      "title": "Kernel Code Integrity Service（3ヶ月）",
+      "goal": "W^X 強制と KLD 署名検証。",
+      "deliverables": [
+        "Kernel Code Integrity Service パーティション（Ada/SPARK）",
+        "fbvbs.ko 基盤（Rust）: VMCALL ラッパー、KLD ロードフック",
+        "FreeBSD カーネル .text の W^X 設定",
+        "MBEC/GMET を用いたユーザー/スーパーバイザー実行分離",
+        "CR ピニング（CR0.WP, CR4.SMEP/SMAP）",
+        "KLD 署名検証パイプライン"
+      ],
+      "verification": [
+        "カーネルコードページへの書込み試行が第二レベルページング違反を引き起こすことの実証",
+        "未署名 KLD のロード拒否の実証",
+        "CR 変更試行がインターセプトされることの実証"
+      ]
+    },
+    {
+      "phase": 2,
+      "title": "Kernel State Integrity Service（3ヶ月）",
+      "goal": "Tier A/B 保護と Setuid 検証。",
+      "deliverables": [
+        "Kernel State Integrity Service パーティション（Ada/SPARK）",
+        "Tier A 保護: sysent, IDT, GDT, .rodata, vop_vector, cdevsw, filterops",
+        "Tier B 保護: ucred + ポインタチェーン, prison + ポインタチェーン, securelevel, MAC, Capsicum",
+        "Setuid 検証ロジックと許可 DB ローダ",
+        "shadow copy 更新機構",
+        "マルチコア安全性（write-enable 区間の他コアブロック）"
+      ],
+      "verification": [
+        "Tier A 構造体への書込み試行が違反を引き起こすことの実証",
+        "Tier B 構造体への直接書込み試行が違反を引き起こすことの実証",
+        "ポインタ差替え試行が検出されることの実証",
+        "Setuid 検証: 許可済みバイナリの exec が成功し、未許可バイナリの exec が拒否されることの実証",
+        "マルチコア競合テスト"
+      ]
+    },
+    {
+      "phase": 3,
+      "title": "Identity Key Service + Storage Key Service + AMD 対応（4ヶ月）",
+      "goal": "鍵隔離と AMD プラットフォーム対応。",
+      "deliverables": [
+        "Identity Key Service パーティション（Ada/SPARK）: IMPORT_KEY, SIGN, KEY_EXCHANGE, DERIVE, DESTROY",
+        "Storage Key Service パーティション（Ada/SPARK）: ディスク鍵管理、レート制限、アクセスログ",
+        "暗号ライブラリ統合（Ada/SPARK primitive + 外部ライブラリの隔離利用方針確定）",
+        "AMD SVM 対応: NPT、GMET、AMD 固有のパーティション管理",
+        "AMD 翻訳整合性経路: NPT write-protect + ページテーブル更新トラップ + シャドウ翻訳"
+      ],
+      "verification": [
+        "Identity Key Service から鍵素材が外部に漏洩しないことの実証",
+        "Storage Key Service のレート制限が機能することの実証",
+        "AMD 翻訳整合性: PFN 差替え、PTE 改竄、TLB invalidate race、マルチコア更新競合テスト",
+        "暗号操作の定数時間性の実測"
+      ]
+    },
+    {
+      "phase": 4,
+      "title": "bhyve 統合 + Kernel State Integrity Service 拡張（4ヶ月）",
+      "goal": "仮想マシンホスティングと保護対象拡張。",
+      "deliverables": [
+        "vmm.ko の VMCALL 化: VM 作成/破棄/実行/メモリ登録/割込み注入",
+        "VM exit ルーティング: ファストパス（EPT 違反、CR/MSR）とスローパス（I/O、割込み）",
+        "guest memory 所有権モデル: マイクロハイパーバイザーが最終割当権を保持",
+        "IOMMU ドメイン管理: passthrough デバイスの DMA 分離",
+        "Tier B 拡張: pf/ipfw ルール、p_textvp"
+      ],
+      "verification": [
+        "bhyve VM が正常に起動・動作することの実証",
+        "VM エスケープ後に信頼サービスメモリにアクセスできないことの実証",
+        "guest memory ゼロ化の実証",
+        "passthrough デバイスの DMA が信頼サービスメモリに到達しないことの実証",
+        "pf ルール改竄試行が検出されることの実証"
+      ]
+    },
+    {
+      "phase": 5,
+      "title": "Update Verification Service + HLAT 統合（3ヶ月）",
+      "goal": "搬送手段非依存の更新検証と Intel HLAT 統合。",
+      "deliverables": [
+        "Update Verification Service パーティション（Ada/SPARK）",
+        "署名付きマニフェストの検証: フォーマット、署名、世代番号、依存関係、失効",
+        "ロールバック防止: TPM NV 領域または同等の version store",
+        "Intel HLAT 統合: カーネルテキスト領域の翻訳整合性",
+        "A/B パーティショニング（マイクロハイパーバイザーの安全な更新）"
+      ],
+      "verification": [
+        "ロールバック攻撃（古いバージョンへの差替え）が検出されることの実証",
+        "署名不正の成果物が拒否されることの実証",
+        "HLAT 有効時に PFN スワップ攻撃が防止されることの実証",
+        "更新失敗時のフォールバック動作の実証"
+      ]
+    },
+    {
+      "phase": 6,
+      "title": "品質保証と継続改善（継続）",
+      "goal": "形式検証完了、セキュリティ監査、認証準備。",
+      "deliverables": [],
+      "verification": [
+        "マイクロハイパーバイザーの GNATprove 証明完了",
+        "全 hypercall パーサ、IPC パーサ、更新パーサの継続的 fuzzing",
+        "中核分岐の MC/DC カバレッジ達成",
+        "再現可能ビルド + SBOM + 署名付き provenance の確立",
+        "独立セキュリティ監査の実施",
+        "AMD 翻訳整合性の最終立証",
+        "本番宣言前の Appendix F 立証課題の完了"
+      ]
+    }
+  ],
+  "layouts": [
+    {
+      "name": "fbvbs_log_record_v1",
+      "fields": [
+        {
+          "c_type": "uint64_t",
+          "name": "sequence",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "boot_id_hi",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "boot_id_lo",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "timestamp_counter",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "cpu_id",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "source_component",
+          "array_length": null
+        },
+        {
+          "c_type": "uint16_t",
+          "name": "severity",
+          "array_length": null
+        },
+        {
+          "c_type": "uint16_t",
+          "name": "event_code",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "payload_length",
+          "array_length": null
+        },
+        {
+          "c_type": "uint8_t",
+          "name": "payload",
+          "array_length": 220
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "crc32c",
+          "array_length": null
+        }
+      ],
+      "size_bytes": 272
+    },
+    {
+      "name": "fbvbs_log_ring_header_v1",
+      "fields": [
+        {
+          "c_type": "uint32_t",
+          "name": "abi_version",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "total_size",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "record_size",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "write_offset",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "max_readable_sequence",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "boot_id_hi",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "boot_id_lo",
+          "array_length": null
+        }
+      ],
+      "size_bytes": 40
+    },
+    {
+      "name": "fbvbs_command_page_v1",
+      "fields": [
+        {
+          "c_type": "uint32_t",
+          "name": "abi_version",
+          "array_length": null
+        },
+        {
+          "c_type": "uint16_t",
+          "name": "call_id",
+          "array_length": null
+        },
+        {
+          "c_type": "uint16_t",
+          "name": "flags",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "input_length",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "output_length_max",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "caller_sequence",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "caller_nonce",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "command_state",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "actual_output_length",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "output_page_gpa",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "reserved0",
+          "array_length": null
+        },
+        {
+          "c_type": "uint8_t",
+          "name": "body",
+          "array_length": 4040
+        }
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "name": "fbvbs_bootstrap_page_v1",
+      "fields": [
+        {
+          "c_type": "uint32_t",
+          "name": "abi_version",
+          "array_length": null
+        },
+        {
+          "c_type": "uint32_t",
+          "name": "vcpu_count",
+          "array_length": null
+        },
+        {
+          "c_type": "uint64_t",
+          "name": "command_page_gpa",
+          "array_length": 252
+        }
+      ],
+      "size_bytes": 2024
+    }
+  ],
+  "command_flags": [
+    {
+      "name": "FBVBS_CMD_FLAG_SEPARATE_OUTPUT",
+      "value": "bit 0",
+      "section": "D.1"
+    },
+    {
+      "name": "予約",
+      "value": "1-15",
+      "section": "D.1"
+    }
+  ],
+  "command_states": [
+    {
+      "name": "EMPTY",
+      "value": "0",
+      "section": "D.2"
+    },
+    {
+      "name": "READY",
+      "value": "1",
+      "section": "D.2"
+    },
+    {
+      "name": "EXECUTING",
+      "value": "2",
+      "section": "D.2"
+    },
+    {
+      "name": "COMPLETED",
+      "value": "3",
+      "section": "D.2"
+    },
+    {
+      "name": "FAILED",
+      "value": "4",
+      "section": "D.2"
+    }
+  ],
+  "frozen_enumerations": [
+    {
+      "name": "PARTITION_KIND_TRUSTED_SERVICE",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "PARTITION_KIND_FREEBSD_HOST",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "PARTITION_KIND_GUEST_VM",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_NONE",
+      "value": "0",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_KCI",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_KSI",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_IKS",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_SKS",
+      "value": "4",
+      "section": "L.1.B"
+    },
+    {
+      "name": "SERVICE_KIND_UVS",
+      "value": "5",
+      "section": "L.1.B"
+    },
+    {
+      "name": "PARTITION_ID_MICROHYPERVISOR",
+      "value": "0",
+      "section": "L.1.B"
+    },
+    {
+      "name": "PARTITION_FLAG_AUTOSTART",
+      "value": "0x0001 （ABI v1 では予約。0 でなければならない）",
+      "section": "L.1.B"
+    },
+    {
+      "name": "MEM_PERM_R",
+      "value": "0x0001",
+      "section": "L.1.B"
+    },
+    {
+      "name": "MEM_PERM_W",
+      "value": "0x0002",
+      "section": "L.1.B"
+    },
+    {
+      "name": "MEM_PERM_X",
+      "value": "0x0004",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_UCRED",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_PRISON",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_SECURELEVEL",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_MAC",
+      "value": "4",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_CAPSICUM",
+      "value": "5",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_FIREWALL",
+      "value": "6",
+      "section": "L.1.B"
+    },
+    {
+      "name": "KSI_CLASS_P_TEXTVP",
+      "value": "7",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_KEY_ED25519",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_KEY_ECDSA_P256",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_KEY_RSA3072",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_KEY_X25519",
+      "value": "4",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_KEY_ECDH_P256",
+      "value": "5",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_OP_SIGN",
+      "value": "0x0001",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_OP_KEY_EXCHANGE",
+      "value": "0x0002",
+      "section": "L.1.B"
+    },
+    {
+      "name": "IKS_OP_DERIVE",
+      "value": "0x0004",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CR_NUMBER_CR0",
+      "value": "0",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CR_NUMBER_CR3",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CR_NUMBER_CR4",
+      "value": "4",
+      "section": "L.1.B"
+    },
+    {
+      "name": "UVS_OBJECT_KEY",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "UVS_OBJECT_ARTIFACT",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_FLAG_X2APIC",
+      "value": "0x0001",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_FLAG_NESTED_VIRT_DISABLED",
+      "value": "0x0002",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_RUN_FLAG_NONE",
+      "value": "0x0000",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_RIP",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_RSP",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_RFLAGS",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_CR0",
+      "value": "4",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_CR3",
+      "value": "5",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_REG_CR4",
+      "value": "6",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_DELIVERY_FIXED",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "VM_DELIVERY_NMI",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CR_ACCESS_READ",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CR_ACCESS_WRITE",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "FAULT_CODE_PARTITION_INTERNAL",
+      "value": "1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "FAULT_CODE_MEASUREMENT_FAILURE",
+      "value": "2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "FAULT_CODE_VM_EXIT_UNCLASSIFIED",
+      "value": "3",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CAP_BITMAP0_MBEC_OR_GMET",
+      "value": "bit 0",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CAP_BITMAP0_HLAT",
+      "value": "bit 1",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CAP_BITMAP0_CET",
+      "value": "bit 2",
+      "section": "L.1.B"
+    },
+    {
+      "name": "CAP_BITMAP0_AESNI",
+      "value": "bit 3",
+      "section": "L.1.B"
+    }
+  ],
+  "additional_fixed_rules": [
+    {
+      "name": "capability_mask",
+      "value": "`bit 0=partition manage`, `bit 1=memory map`, `bit 2=memory permission set`, `bit 3=shared memory register`, `bit 4=KCI access`, `bit 5=KSI access`, `bit 6=IKS access`, `bit 7=SKS access`, `bit 8=UVS access`, `bit 9=VM manage`, `bit 10=audit/diag`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "recovery_flags",
+      "value": "`bit 0=restore persistent state`, `bit 1=clear volatile caches`, `bit 2=enable extended remeasure checks`。ABI v1 では remeasure 自体は常に必須であり、bit2 は追加検査を有効化するだけで、省略可能な remeasure を意味してはならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "partition state numeric assignment",
+      "value": "`Created=1`, `Measured=2`, `Loaded=3`, `Runnable=4`, `Running=5`, `Quiesced=6`, `Faulted=7`, `Destroyed=8`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "credential operation class",
+      "value": "`1=exec credential elevation`, `2=setuid-family`, `3=setgid-family`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "credential id mask",
+      "value": "`bit 0=ruid valid`, `bit 1=euid valid`, `bit 2=suid valid`, `bit 3=rgid valid`, `bit 4=egid valid`, `bit 5=sgid valid`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "measurement_epoch",
+      "value": "`PARTITION_MEASURE` または remeasure を伴う `PARTITION_RECOVER` 成功ごとに 1 以上で単調増加する 64-bit 値。未測定 `Created` 状態では 0、destroy tombstone でも直前値を保持する",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "service_kind",
+      "value": "`PARTITION_KIND_TRUSTED_SERVICE` では、測定前は `SERVICE_KIND_NONE`、測定後は対応 `SERVICE_KIND_*` を返す。`PARTITION_KIND_FREEBSD_HOST` と `PARTITION_KIND_GUEST_VM` では常に `SERVICE_KIND_NONE` を返す",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "verdict",
+      "value": "`0=denied`, `1=approved`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "failure_bitmap",
+      "value": "`bit 0=signature`, `bit 1=revocation`, `bit 2=generation`, `bit 3=rollback`, `bit 4=dependency`, `bit 5=snapshot`, `bit 6=freshness`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "exit_reason",
+      "value": "`1=PIO`, `2=MMIO`, `3=external interrupt`, `4=EPT/NPT violation`, `5=control register access`, `6=MSR access`, `7=halt`, `8=shutdown`, `9=unclassified fault`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "vcpu state numeric assignment",
+      "value": "`Created=1`, `Runnable=2`, `Running=3`, `Blocked=4`, `Faulted=5`, `Destroyed=6`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "memory_limit_bytes",
+      "value": "当該 partition に現在 map 済みの page-aligned guest-physical bytes の総量上限。loaded executable segment、`MEMORY_MAP`/`VM_MAP_MEMORY` による map、bootstrap metadata page、各 vCPU command page、partition 自身へ map された shared page を含む。未 map object 予約容量は含まない。新規 map、load、自動 page 割当がこの上限を超える場合、当該操作は `RESOURCE_EXHAUSTED` で失敗しなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "EPT/NPT access_bits",
+      "value": "`bit 0=read`, `bit 1=write`, `bit 2=execute`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "boolean/enable fields",
+      "value": "ABI v1 では `0=false`, `1=true` とし、他値は `INVALID_PARAMETER`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "hash algorithm",
+      "value": "ABI v1 で `payload_hash`, `artifact_hash`, `measured_hash` はすべて raw SHA-384 48-byte とする。固定長配列に格納する場合、残余バイトは 0 でなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "PARTITION_CREATE.flags",
+      "value": "ABI v1 では 0 のみ有効。非ゼロは `INVALID_PARAMETER`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "MEMORY_ALLOCATE_OBJECT.object_flags",
+      "value": "ABI v1 では `0x0000=private`, `0x0001=shareable`, `0x0002=guest-memory`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "VM_FLAG_X2APIC",
+      "value": "guest x2APIC 公開を要求する。未対応プラットフォームでは `NOT_SUPPORTED_ON_PLATFORM`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "VM_FLAG_NESTED_VIRT_DISABLED",
+      "value": "nested virtualization を明示的に無効化する。ABI v1 既定でも無効だが、設定値の明示を許す",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "vm_flags",
+      "value": "ABI v1 では `VM_FLAG_X2APIC` と `VM_FLAG_NESTED_VIRT_DISABLED` 以外の bit は予約であり、0 でなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "run_flags",
+      "value": "ABI v1 では `VM_RUN_FLAG_NONE` のみ有効",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "allowed_ops",
+      "value": "ABI v1 では `IKS_OP_SIGN`, `IKS_OP_KEY_EXCHANGE`, `IKS_OP_DERIVE` の OR のみ有効。その他 bit は予約であり 0 でなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "entry_ip",
+      "value": "初期 guest virtual instruction pointer。0 は manifest 記録値を使う要求を意味し、非ゼロは manifest 記録値と一致しなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "vcpu_id",
+      "value": "`0..vcpu_count-1` の密な整数。VM 作成後は recovery を含めて再利用・再番号付けしてはならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "PIO/MMIO width",
+      "value": "`1=8-bit`, `2=16-bit`, `4=32-bit`, `8=64-bit`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "DIAG_GET_PARTITION_LIST.entries",
+      "value": "`count` 個の `struct { uint64_t partition_id; uint32_t state; uint16_t kind; uint16_t service_kind; }` を連続格納",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "capability_bitmap1",
+      "value": "ABI v1 では全ビット予約。0 を返さなければならない",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "source_component",
+      "value": "`1=microhypervisor`, `2=Kernel Code Integrity Service`, `3=Kernel State Integrity Service`, `4=Identity Key Service`, `5=Storage Key Service`, `6=Update Verification Service`, `7=FreeBSD front-end`, `8=bhyve/vmm path`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "severity",
+      "value": "`0=debug`, `1=info`, `2=notice`, `3=warning`, `4=error`, `5=critical`, `6=alert`",
+      "section": "L.1.B.additional"
+    },
+    {
+      "name": "event_code",
+      "value": "`1=boot complete`, `2=partition fault`, `3=policy deny`, `4=signature reject`, `5=rollback detect`, `6=DMA deny`, `7=VM exit fail-closed`, `8=service restart`",
+      "section": "L.1.B.additional"
+    }
+  ],
+  "object_namespaces": [
+    {
+      "name": "image_object_id",
+      "issuer": "boot artifact registry",
+      "consumer": "`PARTITION_CREATE`, `PARTITION_MEASURE`, `PARTITION_LOAD_IMAGE`",
+      "lifetime": "対応成果物が boot 中有効な間"
+    },
+    {
+      "name": "manifest_object_id",
+      "issuer": "boot artifact registry",
+      "consumer": "`PARTITION_MEASURE`, `KCI_VERIFY_MODULE`",
+      "lifetime": "対応マニフェストが boot 中有効な間"
+    },
+    {
+      "name": "module_object_id",
+      "issuer": "boot artifact registry",
+      "consumer": "`KCI_VERIFY_MODULE`",
+      "lifetime": "検証対象モジュール成果物が boot 中有効な間"
+    },
+    {
+      "name": "measurement_digest_id",
+      "issuer": "partition manager",
+      "consumer": "`PARTITION_MEASURE` 応答受領側の監査・相関処理",
+      "lifetime": "同一 boot 中有効"
+    },
+    {
+      "name": "verified_manifest_set_id",
+      "issuer": "Update Verification Service",
+      "consumer": "`UVS_VERIFY_ARTIFACT`",
+      "lifetime": "同一 boot 中、失効または再起動まで"
+    },
+    {
+      "name": "memory_object_id",
+      "issuer": "microhypervisor memory-object allocator",
+      "consumer": "`MEMORY_MAP`, `MEMORY_REGISTER_SHARED`, `VM_MAP_MEMORY`, `MEMORY_RELEASE_OBJECT`",
+      "lifetime": "解放または再起動まで"
+    },
+    {
+      "name": "shared_object_id",
+      "issuer": "`MEMORY_REGISTER_SHARED`",
+      "consumer": "caller 監査用および別出力ページ管理、`MEMORY_UNREGISTER_SHARED`",
+      "lifetime": "共有解除または再起動まで"
+    },
+    {
+      "name": "object_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "KSI register 系 call",
+      "lifetime": "guest-physical object が有効な間"
+    },
+    {
+      "name": "pointer_object_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_REGISTER_POINTER`",
+      "lifetime": "guest-physical pointer object が有効な間"
+    },
+    {
+      "name": "target_set_id",
+      "issuer": "Kernel State Integrity Service",
+      "consumer": "`KSI_REGISTER_POINTER`",
+      "lifetime": "KSI 再初期化または再起動まで"
+    },
+    {
+      "name": "caller_ucred_object_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_VALIDATE_SETUID`",
+      "lifetime": "guest-physical ucred object が有効な間"
+    },
+    {
+      "name": "jail_context_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_VALIDATE_SETUID`",
+      "lifetime": "guest-physical jail-related object が有効な間"
+    },
+    {
+      "name": "mac_context_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_VALIDATE_SETUID`",
+      "lifetime": "guest-physical MAC context object が有効な間"
+    },
+    {
+      "name": "prison_object_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_ALLOCATE_UCRED`",
+      "lifetime": "guest-physical prison object が有効な間"
+    },
+    {
+      "name": "template_ucred_object_id",
+      "issuer": "FreeBSD front-end",
+      "consumer": "`KSI_ALLOCATE_UCRED`",
+      "lifetime": "guest-physical template ucred object が有効な間"
+    },
+    {
+      "name": "ucred_object_id",
+      "issuer": "Kernel State Integrity Service",
+      "consumer": "`KSI_ALLOCATE_UCRED` 応答受領側",
+      "lifetime": "guest-physical ucred object が有効な間"
+    },
+    {
+      "name": "key_handle, derived_key_handle, derived_secret_handle",
+      "issuer": "Identity Key Service",
+      "consumer": "IKS 系 call",
+      "lifetime": "明示破棄またはサービス再起動まで"
+    },
+    {
+      "name": "dek_handle",
+      "issuer": "Storage Key Service",
+      "consumer": "SKS 系 call",
+      "lifetime": "明示破棄またはサービス再起動まで"
+    },
+    {
+      "name": "device_id",
+      "issuer": "platform device registry",
+      "consumer": "`VM_ASSIGN_DEVICE`, `VM_RELEASE_DEVICE`",
+      "lifetime": "同一 boot 中、物理デバイスが利用可能な間"
+    }
+  ],
+  "payload_rules": [
+    {
+      "name": "KSI_MODIFY_TIER_B.patch",
+      "value": "`struct { uint32_t write_offset; uint32_t write_length; uint8_t replacement[4000]; }`。`patch_length` は `8 + write_length` と一致しなければならない",
+      "section": "L.1.D"
+    },
+    {
+      "name": "IKS_SIGN.signature",
+      "value": "`ED25519` は 64-byte raw、`ECDSA_P256` は 64-byte raw `r||s` big-endian、`RSA3072` は RSASSA-PSS-SHA384 の 384-byte signature",
+      "section": "L.1.D"
+    },
+    {
+      "name": "IKS_KEY_EXCHANGE.peer_public_key",
+      "value": "`X25519` は 32-byte raw、`ECDH_P256` は SEC1 uncompressed 65-byte",
+      "section": "L.1.D"
+    },
+    {
+      "name": "IKS_KEY_EXCHANGE.derive_flags",
+      "value": "ABI v1 では 0 のみ有効",
+      "section": "L.1.D"
+    },
+    {
+      "name": "IKS_DERIVE.params",
+      "value": "`struct { uint32_t kdf_id; uint32_t salt_length; uint32_t info_length; uint32_t reserved0; uint8_t bytes[3976]; }`。`kdf_id=1` は HKDF-SHA256、`bytes = salt || info`",
+      "section": "L.1.D"
+    },
+    {
+      "name": "IKS_IMPORT_KEY.key_material_page_gpa",
+      "value": "`ED25519` は 32-byte raw secret scalar、`ECDSA_P256` は SEC1 DER-encoded EC private key、`RSA3072` は PKCS#8 DER private key、`X25519` は 32-byte raw secret scalar、`ECDH_P256` は SEC1 DER-encoded EC private key",
+      "section": "L.1.D"
+    },
+    {
+      "name": "SKS_*_BATCH.io_descriptor_page_gpa",
+      "value": "4096-byte page containing `descriptor_count` 個の `struct { uint64_t source_gpa; uint64_t destination_gpa; uint64_t logical_block_index; uint32_t byte_length; uint32_t reserved0; }`",
+      "section": "L.1.D"
+    },
+    {
+      "name": "SKS_IMPORT_DEK.key_material_page_gpa",
+      "value": "先頭 `key_length` byte に raw DEK を格納し、残余は 0 とする",
+      "section": "L.1.D"
+    },
+    {
+      "name": "VM_RUN.exit_payload",
+      "value": "`exit_reason` ごとに L.1.F の固定サブ構造を用いる",
+      "section": "L.1.D"
+    },
+    {
+      "name": "UVS_VERIFY_MANIFEST_SET.manifest_set_page_gpa",
+      "value": "`count/reserved0/manifest_gpa[count]` 形式の metadata set index page を格納する page",
+      "section": "L.1.D"
+    }
+  ],
+  "manifest_rules": [
+    "ABI v1 では、bootable executable artifact を `hypervisor`, `trusted-service`, `freebsd-kernel`, `guest-firmware`, `guest-boot-image` の五種類に限定する。これらは `entry_ip` を必須とし、後述の固定 loader 規約に従ってロードされなければならない。`freebsd-module` は署名検証対象の code artifact ではあるが bootable executable artifact ではなく、`entry_ip` は存在してはならない。`component_type=trusted-service` の manifest には、`service_kind`, `memory_limit_bytes`, `capability_mask`, `vcpu_count`, `initial_sp`, `autostart` を追加必須 key とする。`autostart` は boolean とし、`true` のときのみ boot 時自動生成・自動起動対象となる。`vcpu_count` は 1 以上 252 以下の unsigned integer、`memory_limit_bytes` と `capability_mask` と `initial_sp` は unsigned 64-bit integer とする。",
+    "各 key の許可値と符号化規則は次のとおり固定する。artifact-carrying manifest における `component_type` は `hypervisor`, `trusted-service`, `freebsd-kernel`, `freebsd-module`, `guest-firmware`, `guest-boot-image`, `setuid-db`, `policy-fragment` のいずれかの text。`target_cpu_vendor` は `intel`, `amd`, `any` のいずれか。`required_features` は text 配列であり、各要素は `hlat`, `mbec`, `gmet`, `sev-snp`, `iommu`, `cet`, `aesni` のいずれか。`dependencies` は配列であり、各要素は `struct { text component_type; bytes payload_hash; int minimum_generation; }` に対応する CBOR map。`revocation_reference` は UTF-8 text で、失効リスト識別子を表す。`role` は `root`, `targets`, `snapshot`, `timestamp`, `revocation` のいずれか。`snapshot_id` は 32-byte bytes、artifact-carrying manifest の `payload_hash` は SHA-384 の 48-byte bytesとする。bootable executable artifact manifest の `entry_ip` は unsigned 64-bit integer とする。`component_type=trusted-service` のときは追加 key `service_kind` を必須とし、その値は `kci`, `ksi`, `iks`, `sks`, `uvs` のいずれかの text でなければならない。さらに `memory_limit_bytes`, `capability_mask`, `vcpu_count`, `initial_sp`, `autostart` を必須とする。`caller_class` は `fbvbs.ko` または `vmm.ko` の text とし、`allowed_callsites` は unsigned 64-bit integer 配列で、各要素は 해당 artifact の load base からの callsite offset を表す。trusted time source はマイクロハイパーバイザー起動時に確立された monotonic secure clock とし、`timestamp` と `expires_at` は Unix epoch seconds としてこの clock に対して評価する。ABI v1 では許容 clock skew は 300 秒、信頼時刻が利用不能な場合は `FRESHNESS_FAILED` とする。offline 構成でも secure clock が利用可能でありさえすれば検証してよい。"
+  ],
+  "loader_rules": [
+    "受理形式は `ET_EXEC` または `ET_DYN` の ELF64 のみとする",
+    "`PT_LOAD` segment だけをロード対象とし、`PT_INTERP`、動的リンカ要求、実行時再配置、圧縮、自己展開ローダ、実装依存 fixup を禁止する",
+    "各 `PT_LOAD` segment は `p_vaddr` に従って page-align で配置し、file 部分をコピーし、`p_memsz - p_filesz` を 0 で初期化する",
+    "segment の permission は `p_flags` から `R/W/X` を機械的に導出し、追加実装裁量を与えてはならない",
+    "重複 segment、非 canonical 仮想アドレス、page size 不整合、manifest `payload_size` 不一致、manifest `payload_hash` 不一致は `MEASUREMENT_FAILED` または `INVALID_PARAMETER` とする",
+    "`entry_ip` は ELF header `e_entry` と一致しなければならず、`PARTITION_LOAD_IMAGE.entry_ip!=0` の場合はその値とも一致しなければならない",
+    "`initial_sp` は guest VM では caller 指定値から与え、trusted-service では manifest `initial_sp` からのみ与える。`PARTITION_LOAD_IMAGE.initial_sp` は guest VM では非ゼロ必須、trusted-service では 0 または manifest 値との一致のみを許容し、loader が暗黙既定 stack を生成してはならない"
+  ],
+  "vm_exit_layouts": [
+    {
+      "name": "1=PIO",
+      "value": "`struct { uint16_t port; uint8_t width; uint8_t is_write; uint32_t count; uint64_t value; }`。ABI v1 では `count` は常に 1 とし、string/repeated PIO は対象外",
+      "section": "L.1.F"
+    },
+    {
+      "name": "2=MMIO",
+      "value": "`struct { uint64_t guest_physical_address; uint8_t width; uint8_t is_write; uint16_t reserved0; uint32_t reserved1; uint64_t value; }`",
+      "section": "L.1.F"
+    },
+    {
+      "name": "3=external interrupt",
+      "value": "`struct { uint32_t vector; uint32_t reserved0; }`",
+      "section": "L.1.F"
+    },
+    {
+      "name": "4=EPT/NPT violation",
+      "value": "`struct { uint64_t guest_physical_address; uint32_t access_bits; uint32_t reserved0; }`",
+      "section": "L.1.F"
+    },
+    {
+      "name": "5=control register access",
+      "value": "`struct { uint32_t cr_number; uint32_t access_type; uint64_t value; }`",
+      "section": "L.1.F"
+    },
+    {
+      "name": "6=MSR access",
+      "value": "`struct { uint32_t msr; uint32_t is_write; uint64_t value; }`",
+      "section": "L.1.F"
+    },
+    {
+      "name": "7=halt",
+      "value": "空",
+      "section": "L.1.F"
+    },
+    {
+      "name": "8=shutdown",
+      "value": "空",
+      "section": "L.1.F"
+    },
+    {
+      "name": "9=unclassified fault",
+      "value": "`struct { uint32_t fault_code; uint32_t reserved0; uint64_t detail0; uint64_t detail1; }`",
+      "section": "L.1.F"
+    }
+  ],
+  "call_categories": [
+    {
+      "category": "0x0xxx",
+      "range_text": "0x0000-0x0FFF",
+      "purpose": "パーティション管理"
+    },
+    {
+      "category": "0x1xxx",
+      "range_text": "0x1000-0x1FFF",
+      "purpose": "メモリ管理"
+    },
+    {
+      "category": "0x2xxx",
+      "range_text": "0x2000-0x2FFF",
+      "purpose": "Kernel Code Integrity Service"
+    },
+    {
+      "category": "0x3xxx",
+      "range_text": "0x3000-0x3FFF",
+      "purpose": "Kernel State Integrity Service"
+    },
+    {
+      "category": "0x4xxx",
+      "range_text": "0x4000-0x4FFF",
+      "purpose": "Identity Key Service"
+    },
+    {
+      "category": "0x5xxx",
+      "range_text": "0x5000-0x5FFF",
+      "purpose": "Storage Key Service"
+    },
+    {
+      "category": "0x6xxx",
+      "range_text": "0x6000-0x6FFF",
+      "purpose": "Update Verification Service"
+    },
+    {
+      "category": "0x7xxx",
+      "range_text": "0x7000-0x7FFF",
+      "purpose": "bhyve VM 管理"
+    },
+    {
+      "category": "0x8xxx",
+      "range_text": "0x8000-0x8FFF",
+      "purpose": "監査・診断"
+    },
+    {
+      "category": "0x9xxx",
+      "range_text": "0x9000-0x9FFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xAxxx",
+      "range_text": "0xA000-0xAFFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xBxxx",
+      "range_text": "0xB000-0xBFFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xCxxx",
+      "range_text": "0xC000-0xCFFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xDxxx",
+      "range_text": "0xD000-0xDFFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xExxx",
+      "range_text": "0xE000-0xEFFF",
+      "purpose": "予約（将来拡張）"
+    },
+    {
+      "category": "0xFxxx",
+      "range_text": "0xF000-0xFFFF",
+      "purpose": "予約（将来拡張）"
+    }
+  ],
+  "hypercalls": [
+    {
+      "call_id": "0x0001",
+      "name": "PARTITION_CREATE",
+      "caller": "FreeBSD",
+      "request": "`struct { uint16_t kind; uint16_t flags; uint32_t vcpu_count; uint64_t memory_limit_bytes; uint64_t capability_mask; uint64_t image_object_id; }`",
+      "response": "`struct { uint64_t partition_id; }`",
+      "semantics": "`image_object_id` は将来測定・ロードされる対象成果物を指す予約束縛であり、`PARTITION_MEASURE` と `PARTITION_LOAD_IMAGE` は同一 `image_object_id` を使わなければならない。`kind=PARTITION_KIND_GUEST_VM` および `kind=PARTITION_KIND_FREEBSD_HOST` は無効であり、guest VM は `VM_CREATE`、FreeBSD host はブート時の固定 system partition とする。`kind=PARTITION_KIND_TRUSTED_SERVICE` では caller は trusted-service image artifact を指す `image_object_id` を必須指定しなければならず、対応 manifest は artifact catalog の `related_index` 規則から一意に導出される。`vcpu_count` は 1 以上 252 以下でなければならず、導出された対応 manifest の `vcpu_count`, `memory_limit_bytes`, `capability_mask` とすべて一致しなければならない。不一致は `INVALID_PARAMETER` または `MEASUREMENT_FAILED` とする。成功時状態は `Created`",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "PERMISSION_DENIED",
+        "NOT_FOUND",
+        "RESOURCE_EXHAUSTED",
+        "ALREADY_EXISTS",
+        "DEPENDENCY_UNSATISFIED",
+        "BUFFER_TOO_SMALL",
+        "MEASUREMENT_FAILED"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0002",
+      "name": "PARTITION_DESTROY",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "空",
+      "semantics": "`Running` 状態では内部 quiesce 完了後に破棄。`PARTITION_KIND_GUEST_VM` に対しては無効であり `INVALID_PARAMETER` とする。成功時状態は `Destroyed`",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY",
+        "TIMEOUT",
+        "INTERNAL_CORRUPTION"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0003",
+      "name": "PARTITION_GET_STATUS",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "`struct { uint32_t state; uint32_t reserved0; uint64_t measurement_epoch; }`",
+      "semantics": "状態照会のみ",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0004",
+      "name": "PARTITION_QUIESCE",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "空",
+      "semantics": "`Running` または `Runnable` から `Quiesced` へ",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY",
+        "TIMEOUT"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0005",
+      "name": "PARTITION_RESUME",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "空",
+      "semantics": "`Quiesced` から `Runnable` へのみ有効。`Faulted` 回復には使わない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0006",
+      "name": "PARTITION_MEASURE",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; uint64_t image_object_id; uint64_t manifest_object_id; }`",
+      "response": "`struct { uint64_t measurement_digest_id; }`",
+      "semantics": "`Created` から `Measured`。成果物とマニフェストは既検証でなければならず、後続 `PARTITION_LOAD_IMAGE` の `image_object_id` はここで測定したものと一致しなければならない。`kind=PARTITION_KIND_TRUSTED_SERVICE` では `manifest_object_id` は `PARTITION_CREATE.image_object_id` から artifact catalog の `related_index` 規則で導出される manifest と一致しなければならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "MEASUREMENT_FAILED",
+        "SIGNATURE_INVALID",
+        "REVOKED",
+        "GENERATION_MISMATCH",
+        "ROLLBACK_DETECTED",
+        "DEPENDENCY_UNSATISFIED",
+        "SNAPSHOT_INCONSISTENT",
+        "FRESHNESS_FAILED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0007",
+      "name": "PARTITION_LOAD_IMAGE",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; uint64_t image_object_id; uint64_t entry_ip; uint64_t initial_sp; }`",
+      "response": "空",
+      "semantics": "`Measured` から `Loaded`。`image_object_id` は直前に測定済みの object と一致しなければならない。bootable executable artifact の配置は Appendix L.1.E の固定 ELF64 loader 規約に従う。`entry_ip=0` の場合は manifest 記録値を用い、`entry_ip!=0` の場合は manifest 記録値および ELF `e_entry` と一致しなければならない。guest VM では `initial_sp` は非ゼロでなければならない。trusted-service では `initial_sp=0` または manifest `initial_sp` との一致のみを許容する。不一致は `MEASUREMENT_FAILED` または `INVALID_PARAMETER`",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "MEASUREMENT_FAILED",
+        "RESOURCE_EXHAUSTED",
+        "DEPENDENCY_UNSATISFIED"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0008",
+      "name": "PARTITION_START",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "空",
+      "semantics": "`Loaded` から `Runnable`。初回実行そのものは hypervisor scheduler が行う",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x0009",
+      "name": "PARTITION_RECOVER",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; uint64_t recovery_flags; }`",
+      "response": "空",
+      "semantics": "`Faulted` から `Runnable`。再測定、ゼロ化、必要状態復元を伴う",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "MEASUREMENT_FAILED",
+        "RESOURCE_BUSY",
+        "TIMEOUT",
+        "INTERNAL_CORRUPTION"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x000A",
+      "name": "PARTITION_GET_FAULT_INFO",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; }`",
+      "response": "`struct { uint32_t fault_code; uint32_t source_component; uint64_t fault_detail0; uint64_t fault_detail1; }`",
+      "semantics": "`Faulted` 状態の診断情報を返す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.3. パーティション管理（0x0xxx）"
+    },
+    {
+      "call_id": "0x1000",
+      "name": "MEMORY_ALLOCATE_OBJECT",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t size; uint32_t object_flags; uint32_t reserved0; }`",
+      "response": "`struct { uint64_t memory_object_id; }`",
+      "semantics": "共有または guest memory 用 object を割当てる",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1001",
+      "name": "MEMORY_MAP",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; uint64_t memory_object_id; uint64_t guest_physical_address; uint64_t size; uint32_t permissions; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "caller は memory object を指定するだけであり、machine frame の最終選択は hypervisor が行う",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1002",
+      "name": "MEMORY_UNMAP",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t partition_id; uint64_t guest_physical_address; uint64_t size; }`",
+      "response": "空",
+      "semantics": "指定範囲の map を解除",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1003",
+      "name": "MEMORY_SET_PERMISSION",
+      "caller": "信頼サービス",
+      "request": "`struct { uint64_t target_partition_id; uint64_t guest_physical_address; uint64_t size; uint32_t permissions; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "capability に基づく権限変更。FreeBSD は呼び出してはならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "INVALID_STATE"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1004",
+      "name": "MEMORY_REGISTER_SHARED",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t memory_object_id; uint64_t size; uint64_t peer_partition_id; uint32_t peer_permissions; uint32_t reserved0; }`",
+      "response": "`struct { uint64_t shared_object_id; }`",
+      "semantics": "双方に明示 capability が必要",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "ALREADY_EXISTS",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1005",
+      "name": "MEMORY_RELEASE_OBJECT",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t memory_object_id; }`",
+      "response": "空",
+      "semantics": "object がどの partition にも map されず、shared registration も持たないときにのみ解放可",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x1006",
+      "name": "MEMORY_UNREGISTER_SHARED",
+      "caller": "FreeBSD",
+      "request": "`struct { uint64_t shared_object_id; }`",
+      "response": "空",
+      "semantics": "対応 shared registration を解除する。関連 map または出力参照が残る間は解放してはならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.4. メモリ管理（0x1xxx）"
+    },
+    {
+      "call_id": "0x2001",
+      "name": "KCI_VERIFY_MODULE",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t module_object_id; uint64_t manifest_object_id; uint64_t generation; }`",
+      "response": "`struct { uint32_t verdict; uint32_t reserved0; }`",
+      "semantics": "承認時のみ後続 `KCI_SET_WX` が許可される。`generation` は対象 manifest の `generation` 値と一致しなければならない。ABI v1 では `freebsd-module` manifest に `entry_ip` を持たせてはならず、検証対象は module artifact bytes と manifest metadata の一致のみである。失敗時応答本文は 0 長とする。ABI v1 では `status=OK` かつ `verdict=1` のみを承認とし、拒否は必ず non-OK status で表す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "SIGNATURE_INVALID",
+        "REVOKED",
+        "GENERATION_MISMATCH",
+        "ROLLBACK_DETECTED",
+        "DEPENDENCY_UNSATISFIED",
+        "SNAPSHOT_INCONSISTENT",
+        "FRESHNESS_FAILED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.5. Kernel Code Integrity Service（0x2xxx）"
+    },
+    {
+      "call_id": "0x2002",
+      "name": "KCI_SET_WX",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t module_object_id; uint64_t guest_physical_address; uint64_t file_offset; uint64_t size; uint32_t permissions; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "検証済みコードページに限る。`module_object_id` は直前に `KCI_VERIFY_MODULE` で承認済みのものと一致しなければならない。KCI は `file_offset..file_offset+size` の artifact bytes を `guest_physical_address..+size` に配置された bytes と照合し、一致時のみ execute 権限を付与してよい",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "INVALID_STATE",
+        "NOT_FOUND",
+        "MEASUREMENT_FAILED"
+      ],
+      "section": "L.5. Kernel Code Integrity Service（0x2xxx）"
+    },
+    {
+      "call_id": "0x2003",
+      "name": "KCI_PIN_CR",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint32_t cr_number; uint32_t reserved0; uint64_t pin_mask; }`",
+      "response": "空",
+      "semantics": "許可 CR のみ。`pin_mask` は指定 CR の監視対象 bit を 1 で表す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "NOT_SUPPORTED_ON_PLATFORM"
+      ],
+      "section": "L.5. Kernel Code Integrity Service（0x2xxx）"
+    },
+    {
+      "call_id": "0x2004",
+      "name": "KCI_INTERCEPT_MSR",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint32_t msr_address; uint32_t enable; }`",
+      "response": "空",
+      "semantics": "ポリシー許可済み MSR のみ",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "NOT_SUPPORTED_ON_PLATFORM"
+      ],
+      "section": "L.5. Kernel Code Integrity Service（0x2xxx）"
+    },
+    {
+      "call_id": "0x3000",
+      "name": "KSI_CREATE_TARGET_SET",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint32_t target_count; uint32_t reserved0; uint64_t target_object_ids[502]; }`",
+      "response": "`struct { uint64_t target_set_id; }`",
+      "semantics": "pointer 遷移先として許可される object 集合を生成",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "RESOURCE_EXHAUSTED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3001",
+      "name": "KSI_REGISTER_TIER_A",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t object_id; uint64_t guest_physical_address; uint64_t size; }`",
+      "response": "空",
+      "semantics": "以後 write-enable 不可",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "ALREADY_EXISTS",
+        "PERMISSION_DENIED"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3002",
+      "name": "KSI_REGISTER_TIER_B",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t object_id; uint64_t guest_physical_address; uint64_t size; uint32_t protection_class; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "Tier B shadow 管理対象に登録。`protection_class` は `KSI_CLASS_UCRED`、`KSI_CLASS_PRISON`、`KSI_CLASS_SECURELEVEL`、`KSI_CLASS_MAC`、`KSI_CLASS_CAPSICUM`、`KSI_CLASS_FIREWALL`、`KSI_CLASS_P_TEXTVP` のいずれか",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "ALREADY_EXISTS",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3003",
+      "name": "KSI_MODIFY_TIER_B",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t object_id; uint32_t patch_length; uint32_t reserved0; uint8_t patch[4008]; }`",
+      "response": "空",
+      "semantics": "callsite は hypervisor 観測 RIP で検証。caller body 内の RIP は存在しない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "CALLSITE_REJECTED",
+        "POLICY_DENIED",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3004",
+      "name": "KSI_REGISTER_POINTER",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t pointer_object_id; uint64_t target_set_id; }`",
+      "response": "空",
+      "semantics": "許可ターゲット集合へのみ遷移可能にする",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "ALREADY_EXISTS",
+        "RESOURCE_EXHAUSTED"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3005",
+      "name": "KSI_VALIDATE_SETUID",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t fsid; uint64_t fileid; uint8_t measured_hash[64]; uint32_t operation_class; uint32_t valid_mask; uint32_t requested_ruid; uint32_t requested_euid; uint32_t requested_suid; uint32_t requested_rgid; uint32_t requested_egid; uint32_t requested_sgid; uint64_t caller_ucred_object_id; uint64_t jail_context_id; uint64_t mac_context_id; }`",
+      "response": "`struct { uint32_t verdict; uint32_t reserved0; }`",
+      "semantics": "パスは認可主キーに使わない。`measured_hash` は先頭 48 byte に raw SHA-384 を格納し、残余 16 byte は 0 とする。ファイルを伴わない `setuid(2)`/`setgid(2)` 系では `fsid=0`, `fileid=0`, `measured_hash` 全体 0 を用いる。`operation_class` は `credential operation class` に従い、`valid_mask` は要求後状態として意味を持つ ID スロットを示す。ABI v1 では `status=OK` かつ `verdict=1` のみを承認とし、拒否は必ず non-OK status で表す。失敗時応答本文は 0 長とする",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "SIGNATURE_INVALID",
+        "GENERATION_MISMATCH",
+        "REVOKED",
+        "POLICY_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3006",
+      "name": "KSI_ALLOCATE_UCRED",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint32_t uid; uint32_t gid; uint64_t prison_object_id; uint64_t template_ucred_object_id; }`",
+      "response": "`struct { uint64_t ucred_object_id; }`",
+      "semantics": "管理下 ucred を割当てて即 Tier B 保護を適用",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "RESOURCE_EXHAUSTED",
+        "POLICY_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3007",
+      "name": "KSI_REPLACE_TIER_B_OBJECT",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t old_object_id; uint64_t new_object_id; uint64_t pointer_object_id; uint32_t replace_flags; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "新規保護済み object へ原子的に pointer を切替え、旧 object を retire 候補にする。大規模 rule set の page replacement 用",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "POLICY_DENIED",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x3008",
+      "name": "KSI_UNREGISTER_OBJECT",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t object_id; }`",
+      "response": "空",
+      "semantics": "retire 済み object を保護集合から外す。参照が残る間は解放不可",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.6. Kernel State Integrity Service（0x3xxx）"
+    },
+    {
+      "call_id": "0x4001",
+      "name": "IKS_IMPORT_KEY",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_material_page_gpa; uint32_t key_type; uint32_t allowed_ops; uint32_t key_length; uint32_t reserved0; }`",
+      "response": "`struct { uint64_t key_handle; }`",
+      "semantics": "import 後に共有ページ上の鍵素材をゼロクリア",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.7. Identity Key Service（0x4xxx）"
+    },
+    {
+      "call_id": "0x4002",
+      "name": "IKS_SIGN",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_handle; uint32_t hash_length; uint32_t reserved0; uint8_t hash[64]; }`",
+      "response": "`struct { uint32_t signature_length; uint32_t reserved0; uint8_t signature[4000]; }`",
+      "semantics": "鍵用途制約に従う。ABI v1 では `hash_length` は 48 のみ有効であり、raw SHA-384 を意味する。残余 16 byte は 0 でなければならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "POLICY_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.7. Identity Key Service（0x4xxx）"
+    },
+    {
+      "call_id": "0x4003",
+      "name": "IKS_KEY_EXCHANGE",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_handle; uint32_t peer_public_key_length; uint32_t derive_flags; uint8_t peer_public_key[3992]; }`",
+      "response": "`struct { uint64_t derived_secret_handle; }`",
+      "semantics": "生の共有秘密は返さず、不透明ハンドルのみ返す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "POLICY_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.7. Identity Key Service（0x4xxx）"
+    },
+    {
+      "call_id": "0x4004",
+      "name": "IKS_DERIVE",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_handle; uint32_t parameter_length; uint32_t reserved0; uint8_t params[3992]; }`",
+      "response": "`struct { uint64_t derived_key_handle; }`",
+      "semantics": "導出鍵も不透明ハンドルとして返す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "POLICY_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.7. Identity Key Service（0x4xxx）"
+    },
+    {
+      "call_id": "0x4005",
+      "name": "IKS_DESTROY_KEY",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_handle; }`",
+      "response": "空",
+      "semantics": "二重破棄は `NOT_FOUND`",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND"
+      ],
+      "section": "L.7. Identity Key Service（0x4xxx）"
+    },
+    {
+      "call_id": "0x5001",
+      "name": "SKS_IMPORT_DEK",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t key_material_page_gpa; uint64_t volume_id; uint32_t key_length; uint32_t reserved0; }`",
+      "response": "`struct { uint64_t dek_handle; }`",
+      "semantics": "import 後に共有ページをゼロクリア",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.8. Storage Key Service（0x5xxx）"
+    },
+    {
+      "call_id": "0x5002",
+      "name": "SKS_DECRYPT_BATCH",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t dek_handle; uint64_t io_descriptor_page_gpa; uint32_t descriptor_count; uint32_t reserved0; }`",
+      "response": "`struct { uint32_t completed_count; uint32_t reserved0; }`",
+      "semantics": "出力は別共有ページのみ。レート制限対象",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "RESOURCE_BUSY",
+        "RETRY_LATER",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.8. Storage Key Service（0x5xxx）"
+    },
+    {
+      "call_id": "0x5003",
+      "name": "SKS_ENCRYPT_BATCH",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t dek_handle; uint64_t io_descriptor_page_gpa; uint32_t descriptor_count; uint32_t reserved0; }`",
+      "response": "`struct { uint32_t completed_count; uint32_t reserved0; }`",
+      "semantics": "上と同じ",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "RESOURCE_BUSY",
+        "RETRY_LATER",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.8. Storage Key Service（0x5xxx）"
+    },
+    {
+      "call_id": "0x5004",
+      "name": "SKS_DESTROY_DEK",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t dek_handle; }`",
+      "response": "空",
+      "semantics": "アンマウント時に破棄",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND"
+      ],
+      "section": "L.8. Storage Key Service（0x5xxx）"
+    },
+    {
+      "call_id": "0x6001",
+      "name": "UVS_VERIFY_MANIFEST_SET",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t root_manifest_gpa; uint32_t root_manifest_length; uint32_t manifest_count; uint64_t manifest_set_page_gpa; }`",
+      "response": "`struct { uint32_t verdict; uint32_t failure_bitmap; uint64_t verified_manifest_set_id; }`",
+      "semantics": "freshness、freeze、mix-and-match、snapshot 一貫性、role separation を含めて metadata set 全体を評価する。ABI v1 では `status=OK` かつ `verdict=1` のみを承認とし、拒否は必ず non-OK status で表す。失敗時応答本文も同一構造を用い、`verdict=0`, `verified_manifest_set_id=0` とし、`actual_output_length=16` を返す",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "SIGNATURE_INVALID",
+        "REVOKED",
+        "GENERATION_MISMATCH",
+        "ROLLBACK_DETECTED",
+        "DEPENDENCY_UNSATISFIED",
+        "SNAPSHOT_INCONSISTENT",
+        "FRESHNESS_FAILED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.9. Update Verification Service（0x6xxx）"
+    },
+    {
+      "call_id": "0x6002",
+      "name": "UVS_VERIFY_ARTIFACT",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint8_t artifact_hash[64]; uint64_t verified_manifest_set_id; uint64_t manifest_object_id; }`",
+      "response": "`struct { uint32_t verdict; uint32_t reserved0; }`",
+      "semantics": "manifest set と artifact の一致確認。`manifest_object_id` は verified manifest set 内の単一 manifest を一意に指し、その manifest が指定 `artifact_hash` と一致するときにのみ承認してよい。`artifact_hash` は先頭 48 byte に raw SHA-384 を格納し、残余 16 byte は 0 とする。ABI v1 では `status=OK` かつ `verdict=1` のみを承認とし、拒否は必ず non-OK status で表す。失敗時応答本文は 0 長とする",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "SIGNATURE_INVALID",
+        "REVOKED",
+        "GENERATION_MISMATCH",
+        "ROLLBACK_DETECTED",
+        "DEPENDENCY_UNSATISFIED",
+        "SNAPSHOT_INCONSISTENT",
+        "FRESHNESS_FAILED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.9. Update Verification Service（0x6xxx）"
+    },
+    {
+      "call_id": "0x6003",
+      "name": "UVS_CHECK_REVOCATION",
+      "caller": "fbvbs.ko",
+      "request": "`struct { uint64_t object_id; uint32_t object_type; uint32_t reserved0; }`",
+      "response": "`struct { uint32_t revoked; uint32_t reserved0; }`",
+      "semantics": "鍵または成果物の失効確認。成功時 `status=OK` で `revoked` は 0 または 1。ABI v1 では `REVOKED` を本 call の返却 status として用いてはならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.9. Update Verification Service（0x6xxx）"
+    },
+    {
+      "call_id": "0x7001",
+      "name": "VM_CREATE",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t memory_limit_bytes; uint32_t vcpu_count; uint32_t vm_flags; }`",
+      "response": "`struct { uint64_t vm_partition_id; }`",
+      "semantics": "成功時 `Created` 状態の VM パーティションを返す。`vcpu_count` は 1 以上 252 以下でなければならない。`memory_limit_bytes` は Appendix L.1.B の定義に従う map 済み総バイト上限であり、bootstrap metadata page と `vcpu_count` 枚の command page を収容できる値でなければならない。caller は続けて `PARTITION_MEASURE`、`PARTITION_LOAD_IMAGE`、`PARTITION_START` を実行しなければならない",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7002",
+      "name": "VM_DESTROY",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; }`",
+      "response": "空",
+      "semantics": "guest memory ゼロ化、IOMMU domain 解除。`Created`, `Measured`, `Loaded`, `Runnable`, `Running`, `Quiesced`, `Faulted` から有効",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY",
+        "TIMEOUT"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7003",
+      "name": "VM_RUN",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint32_t vcpu_id; uint32_t run_flags; }`",
+      "response": "`struct { uint32_t exit_reason; uint32_t exit_length; uint8_t exit_payload[4032]; }`",
+      "semantics": "`Runnable` の vCPU に限る。復帰後の vCPU 状態は Section 35.1 の固定 exit-to-state 規則に従う。未分類 exit は fail-closed",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY",
+        "TIMEOUT",
+        "INTERNAL_CORRUPTION",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7004",
+      "name": "VM_SET_REGISTER",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint32_t vcpu_id; uint32_t register_id; uint64_t value; }`",
+      "response": "空",
+      "semantics": "実行中 vCPU には適用しない。ABI v1 では `VM_REG_RIP`, `VM_REG_RSP`, `VM_REG_RFLAGS`, `VM_REG_CR0`, `VM_REG_CR4` のみ caller 設定可であり、`VM_REG_CR3` は `PERMISSION_DENIED` とする",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "PERMISSION_DENIED"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7005",
+      "name": "VM_GET_REGISTER",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint32_t vcpu_id; uint32_t register_id; }`",
+      "response": "`struct { uint64_t value; }`",
+      "semantics": "実行中 vCPU には適用しない。`VM_REG_CR3` は読取りのみ許可",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7006",
+      "name": "VM_MAP_MEMORY",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint64_t memory_object_id; uint64_t guest_physical_address; uint64_t size; uint32_t permissions; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "frame 最終選択権は hypervisor にある。`Created`, `Measured`, `Loaded`, `Runnable`, `Quiesced` で有効、`Running` と `Faulted` では無効",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_EXHAUSTED",
+        "PERMISSION_DENIED"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7007",
+      "name": "VM_INJECT_INTERRUPT",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint32_t vcpu_id; uint32_t vector; uint32_t delivery_mode; uint32_t reserved0; }`",
+      "response": "空",
+      "semantics": "注入可能状態でのみ有効",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7008",
+      "name": "VM_ASSIGN_DEVICE",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint64_t device_id; }`",
+      "response": "空",
+      "semantics": "IOMMU group、ACS、interrupt remapping、reset 能力を満たす場合のみ。`device_id` は platform device registry が列挙した opaque ID。`Created`, `Measured`, `Loaded`, `Runnable`, `Quiesced` で有効、`Running` と `Faulted` では無効",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "POLICY_DENIED",
+        "NOT_SUPPORTED_ON_PLATFORM",
+        "RESOURCE_BUSY"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x7009",
+      "name": "VM_RELEASE_DEVICE",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint64_t device_id; }`",
+      "response": "空",
+      "semantics": "Function Level Reset または同等手順を実行。`Created`, `Measured`, `Loaded`, `Runnable`, `Quiesced`, `Faulted` で有効、`Running` では無効",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "INVALID_STATE",
+        "RESOURCE_BUSY",
+        "TIMEOUT"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x700A",
+      "name": "VM_GET_VCPU_STATUS",
+      "caller": "vmm.ko",
+      "request": "`struct { uint64_t vm_partition_id; uint32_t vcpu_id; uint32_t reserved0; }`",
+      "response": "`struct { uint32_t vcpu_state; uint32_t reserved0; }`",
+      "semantics": "現在の外部可視 vCPU 状態を返す。`Blocked` は外部イベントまたは割込み注入により再開可能な待機状態を意味する",
+      "allowed_errors": [
+        "INVALID_PARAMETER",
+        "INVALID_CALLER",
+        "NOT_FOUND",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.10. bhyve VM 管理（0x7xxx）"
+    },
+    {
+      "call_id": "0x8001",
+      "name": "AUDIT_GET_MIRROR_INFO",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint64_t ring_gpa; uint32_t ring_size; uint32_t record_size; }`",
+      "semantics": "read-only ミラー情報",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    },
+    {
+      "call_id": "0x8002",
+      "name": "AUDIT_GET_BOOT_ID",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint64_t boot_id_hi; uint64_t boot_id_lo; }`",
+      "semantics": "現在 boot 識別子",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    },
+    {
+      "call_id": "0x8003",
+      "name": "DIAG_GET_PARTITION_LIST",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint32_t count; uint32_t reserved0; uint8_t entries[4032]; }`",
+      "semantics": "出力は `count` 個の `struct { uint64_t partition_id; uint32_t state; uint16_t kind; uint16_t service_kind; }` を連続格納する固定列形式",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    },
+    {
+      "call_id": "0x8004",
+      "name": "DIAG_GET_CAPABILITIES",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint64_t capability_bitmap0; uint64_t capability_bitmap1; }`",
+      "semantics": "MBEC/GMET、HLAT、CET、AES-NI 等",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    },
+    {
+      "call_id": "0x8005",
+      "name": "DIAG_GET_ARTIFACT_LIST",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint32_t count; uint32_t reserved0; uint8_t entries[4032]; }`",
+      "semantics": "`fbvbs_artifact_catalog_v1` と同形式の固定 artifact catalog を返す",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    },
+    {
+      "call_id": "0x8006",
+      "name": "DIAG_GET_DEVICE_LIST",
+      "caller": "fbvbs.ko",
+      "request": "空",
+      "response": "`struct { uint32_t count; uint32_t reserved0; uint8_t entries[4032]; }`",
+      "semantics": "`fbvbs_device_catalog_v1` と同形式の固定 device catalog を返す",
+      "allowed_errors": [
+        "INVALID_CALLER",
+        "PERMISSION_DENIED",
+        "BUFFER_TOO_SMALL"
+      ],
+      "section": "L.11. 監査・診断（0x8xxx）"
+    }
+  ],
+  "error_codes": [
+    {
+      "name": "OK",
+      "value": "0",
+      "section": "L.12"
+    },
+    {
+      "name": "INVALID_PARAMETER",
+      "value": "1",
+      "section": "L.12"
+    },
+    {
+      "name": "INVALID_CALLER",
+      "value": "2",
+      "section": "L.12"
+    },
+    {
+      "name": "PERMISSION_DENIED",
+      "value": "3",
+      "section": "L.12"
+    },
+    {
+      "name": "RESOURCE_BUSY",
+      "value": "4",
+      "section": "L.12"
+    },
+    {
+      "name": "NOT_SUPPORTED_ON_PLATFORM",
+      "value": "5",
+      "section": "L.12"
+    },
+    {
+      "name": "MEASUREMENT_FAILED",
+      "value": "6",
+      "section": "L.12"
+    },
+    {
+      "name": "SIGNATURE_INVALID",
+      "value": "7",
+      "section": "L.12"
+    },
+    {
+      "name": "ROLLBACK_DETECTED",
+      "value": "8",
+      "section": "L.12"
+    },
+    {
+      "name": "RETRY_LATER",
+      "value": "9",
+      "section": "L.12"
+    },
+    {
+      "name": "REVOKED",
+      "value": "10",
+      "section": "L.12"
+    },
+    {
+      "name": "GENERATION_MISMATCH",
+      "value": "11",
+      "section": "L.12"
+    },
+    {
+      "name": "DEPENDENCY_UNSATISFIED",
+      "value": "12",
+      "section": "L.12"
+    },
+    {
+      "name": "CALLSITE_REJECTED",
+      "value": "13",
+      "section": "L.12"
+    },
+    {
+      "name": "POLICY_DENIED",
+      "value": "14",
+      "section": "L.12"
+    },
+    {
+      "name": "INTERNAL_CORRUPTION",
+      "value": "15",
+      "section": "L.12"
+    },
+    {
+      "name": "INVALID_STATE",
+      "value": "16",
+      "section": "L.12"
+    },
+    {
+      "name": "NOT_FOUND",
+      "value": "17",
+      "section": "L.12"
+    },
+    {
+      "name": "ALREADY_EXISTS",
+      "value": "18",
+      "section": "L.12"
+    },
+    {
+      "name": "RESOURCE_EXHAUSTED",
+      "value": "19",
+      "section": "L.12"
+    },
+    {
+      "name": "BUFFER_TOO_SMALL",
+      "value": "20",
+      "section": "L.12"
+    },
+    {
+      "name": "ABI_VERSION_UNSUPPORTED",
+      "value": "21",
+      "section": "L.12"
+    },
+    {
+      "name": "SNAPSHOT_INCONSISTENT",
+      "value": "22",
+      "section": "L.12"
+    },
+    {
+      "name": "FRESHNESS_FAILED",
+      "value": "23",
+      "section": "L.12"
+    },
+    {
+      "name": "REPLAY_DETECTED",
+      "value": "24",
+      "section": "L.12"
+    },
+    {
+      "name": "TIMEOUT",
+      "value": "25",
+      "section": "L.12"
+    }
+  ]
+}

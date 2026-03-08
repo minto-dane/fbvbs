@@ -1,0 +1,101 @@
+[
+  {
+    "current_states": [
+      "なし"
+    ],
+    "trigger": "PARTITION_CREATE または VM_CREATE",
+    "next_state": "Created",
+    "required_condition": "資源確保成功",
+    "notes": "`VM_CREATE` は guest VM のみ"
+  },
+  {
+    "current_states": [
+      "Created"
+    ],
+    "trigger": "PARTITION_MEASURE",
+    "next_state": "Measured",
+    "required_condition": "指定成果物が検証済み",
+    "notes": "イメージとマニフェストの測定値を記録"
+  },
+  {
+    "current_states": [
+      "Measured"
+    ],
+    "trigger": "PARTITION_LOAD_IMAGE",
+    "next_state": "Loaded",
+    "required_condition": "ロード先メモリ確保成功",
+    "notes": "コードと初期データを配置"
+  },
+  {
+    "current_states": [
+      "Loaded"
+    ],
+    "trigger": "PARTITION_START",
+    "next_state": "Runnable",
+    "required_condition": "初期 CPU 状態構築成功",
+    "notes": "実行可能だが未実行"
+  },
+  {
+    "current_states": [
+      "Runnable"
+    ],
+    "trigger": "スケジューラ選択",
+    "next_state": "Running",
+    "required_condition": "vCPU 割当可能",
+    "notes": "マイクロハイパーバイザー内部遷移"
+  },
+  {
+    "current_states": [
+      "Running",
+      "Runnable"
+    ],
+    "trigger": "PARTITION_QUIESCE",
+    "next_state": "Quiesced",
+    "required_condition": "vCPU 停止成功または未実行化成功",
+    "notes": "実行一時停止または実行開始前停止"
+  },
+  {
+    "current_states": [
+      "Quiesced"
+    ],
+    "trigger": "PARTITION_RESUME",
+    "next_state": "Runnable",
+    "required_condition": "中断条件消滅",
+    "notes": "`Faulted` からの回復には使わない"
+  },
+  {
+    "current_states": [
+      "Running",
+      "Runnable",
+      "Quiesced"
+    ],
+    "trigger": "致命障害検出",
+    "next_state": "Faulted",
+    "required_condition": "なし",
+    "notes": "一次監査ログ必須"
+  },
+  {
+    "current_states": [
+      "Faulted"
+    ],
+    "trigger": "PARTITION_RECOVER",
+    "next_state": "Runnable",
+    "required_condition": "再測定、ゼロ化、必要状態復元成功",
+    "notes": "回復失敗時は `Faulted` 維持"
+  },
+  {
+    "current_states": [
+      "Created",
+      "Measured",
+      "Loaded",
+      "Runnable",
+      "Running",
+      "Quiesced",
+      "Faulted"
+    ],
+    "trigger": "PARTITION_DESTROY",
+    "next_state": "Destroyed",
+    "required_condition": "資源回収とゼロ化成功",
+    "notes": "`Running` からの破棄要求は内部的に quiesce 後に処理"
+  }
+]

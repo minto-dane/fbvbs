@@ -1,0 +1,126 @@
+[
+  {
+    "phase": 0,
+    "title": "マイクロハイパーバイザー基盤（4ヶ月）",
+    "goal": "FreeBSD を deprivileged host として起動し、最低1つの信頼サービスパーティションを稼働させる。",
+    "deliverables": [
+      "Ada/SPARK マイクロハイパーバイザー: パーティション管理、第二レベルページング、IPC、VMCALL ハンドリング、一次監査ログ（UART）",
+      "Intel VT-x 対応（AMD は Phase 3）",
+      "最小限のブートシーケンス: UEFI → マイクロハイパーバイザー → 空の信頼サービスパーティション → FreeBSD パーティション",
+      "FreeBSD が VMX non-root で正常起動することの実証"
+    ],
+    "verification": [
+      "FreeBSD が信頼サービスパーティションのメモリにアクセスできないことの実証",
+      "IPC ラウンドトリップ時間の計測",
+      "GNATprove によるパーティション管理ロジックの実行時例外不在証明"
+    ]
+  },
+  {
+    "phase": 1,
+    "title": "Kernel Code Integrity Service（3ヶ月）",
+    "goal": "W^X 強制と KLD 署名検証。",
+    "deliverables": [
+      "Kernel Code Integrity Service パーティション（Ada/SPARK）",
+      "fbvbs.ko 基盤（Rust）: VMCALL ラッパー、KLD ロードフック",
+      "FreeBSD カーネル .text の W^X 設定",
+      "MBEC/GMET を用いたユーザー/スーパーバイザー実行分離",
+      "CR ピニング（CR0.WP, CR4.SMEP/SMAP）",
+      "KLD 署名検証パイプライン"
+    ],
+    "verification": [
+      "カーネルコードページへの書込み試行が第二レベルページング違反を引き起こすことの実証",
+      "未署名 KLD のロード拒否の実証",
+      "CR 変更試行がインターセプトされることの実証"
+    ]
+  },
+  {
+    "phase": 2,
+    "title": "Kernel State Integrity Service（3ヶ月）",
+    "goal": "Tier A/B 保護と Setuid 検証。",
+    "deliverables": [
+      "Kernel State Integrity Service パーティション（Ada/SPARK）",
+      "Tier A 保護: sysent, IDT, GDT, .rodata, vop_vector, cdevsw, filterops",
+      "Tier B 保護: ucred + ポインタチェーン, prison + ポインタチェーン, securelevel, MAC, Capsicum",
+      "Setuid 検証ロジックと許可 DB ローダ",
+      "shadow copy 更新機構",
+      "マルチコア安全性（write-enable 区間の他コアブロック）"
+    ],
+    "verification": [
+      "Tier A 構造体への書込み試行が違反を引き起こすことの実証",
+      "Tier B 構造体への直接書込み試行が違反を引き起こすことの実証",
+      "ポインタ差替え試行が検出されることの実証",
+      "Setuid 検証: 許可済みバイナリの exec が成功し、未許可バイナリの exec が拒否されることの実証",
+      "マルチコア競合テスト"
+    ]
+  },
+  {
+    "phase": 3,
+    "title": "Identity Key Service + Storage Key Service + AMD 対応（4ヶ月）",
+    "goal": "鍵隔離と AMD プラットフォーム対応。",
+    "deliverables": [
+      "Identity Key Service パーティション（Ada/SPARK）: IMPORT_KEY, SIGN, KEY_EXCHANGE, DERIVE, DESTROY",
+      "Storage Key Service パーティション（Ada/SPARK）: ディスク鍵管理、レート制限、アクセスログ",
+      "暗号ライブラリ統合（Ada/SPARK primitive + 外部ライブラリの隔離利用方針確定）",
+      "AMD SVM 対応: NPT、GMET、AMD 固有のパーティション管理",
+      "AMD 翻訳整合性経路: NPT write-protect + ページテーブル更新トラップ + シャドウ翻訳"
+    ],
+    "verification": [
+      "Identity Key Service から鍵素材が外部に漏洩しないことの実証",
+      "Storage Key Service のレート制限が機能することの実証",
+      "AMD 翻訳整合性: PFN 差替え、PTE 改竄、TLB invalidate race、マルチコア更新競合テスト",
+      "暗号操作の定数時間性の実測"
+    ]
+  },
+  {
+    "phase": 4,
+    "title": "bhyve 統合 + Kernel State Integrity Service 拡張（4ヶ月）",
+    "goal": "仮想マシンホスティングと保護対象拡張。",
+    "deliverables": [
+      "vmm.ko の VMCALL 化: VM 作成/破棄/実行/メモリ登録/割込み注入",
+      "VM exit ルーティング: ファストパス（EPT 違反、CR/MSR）とスローパス（I/O、割込み）",
+      "guest memory 所有権モデル: マイクロハイパーバイザーが最終割当権を保持",
+      "IOMMU ドメイン管理: passthrough デバイスの DMA 分離",
+      "Tier B 拡張: pf/ipfw ルール、p_textvp"
+    ],
+    "verification": [
+      "bhyve VM が正常に起動・動作することの実証",
+      "VM エスケープ後に信頼サービスメモリにアクセスできないことの実証",
+      "guest memory ゼロ化の実証",
+      "passthrough デバイスの DMA が信頼サービスメモリに到達しないことの実証",
+      "pf ルール改竄試行が検出されることの実証"
+    ]
+  },
+  {
+    "phase": 5,
+    "title": "Update Verification Service + HLAT 統合（3ヶ月）",
+    "goal": "搬送手段非依存の更新検証と Intel HLAT 統合。",
+    "deliverables": [
+      "Update Verification Service パーティション（Ada/SPARK）",
+      "署名付きマニフェストの検証: フォーマット、署名、世代番号、依存関係、失効",
+      "ロールバック防止: TPM NV 領域または同等の version store",
+      "Intel HLAT 統合: カーネルテキスト領域の翻訳整合性",
+      "A/B パーティショニング（マイクロハイパーバイザーの安全な更新）"
+    ],
+    "verification": [
+      "ロールバック攻撃（古いバージョンへの差替え）が検出されることの実証",
+      "署名不正の成果物が拒否されることの実証",
+      "HLAT 有効時に PFN スワップ攻撃が防止されることの実証",
+      "更新失敗時のフォールバック動作の実証"
+    ]
+  },
+  {
+    "phase": 6,
+    "title": "品質保証と継続改善（継続）",
+    "goal": "形式検証完了、セキュリティ監査、認証準備。",
+    "deliverables": [],
+    "verification": [
+      "マイクロハイパーバイザーの GNATprove 証明完了",
+      "全 hypercall パーサ、IPC パーサ、更新パーサの継続的 fuzzing",
+      "中核分岐の MC/DC カバレッジ達成",
+      "再現可能ビルド + SBOM + 署名付き provenance の確立",
+      "独立セキュリティ監査の実施",
+      "AMD 翻訳整合性の最終立証",
+      "本番宣言前の Appendix F 立証課題の完了"
+    ]
+  }
+]

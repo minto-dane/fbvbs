@@ -1,0 +1,132 @@
+{
+  "baseline": [
+    {
+      "table": "baseline",
+      "operation": "通常 syscall（getpid 等）",
+      "cost": "~100-300ns",
+      "ipc_count": null,
+      "rationale": "最軽量 syscall"
+    },
+    {
+      "table": "baseline",
+      "operation": "execve",
+      "cost": "~1-5ms",
+      "ipc_count": null,
+      "rationale": "ファイル読込、ELF パース、マッピング"
+    },
+    {
+      "table": "baseline",
+      "operation": "open/close",
+      "cost": "~1-10µs",
+      "ipc_count": null,
+      "rationale": "VFS 層の処理"
+    },
+    {
+      "table": "baseline",
+      "operation": "fork",
+      "cost": "~100µs-1ms",
+      "ipc_count": null,
+      "rationale": "ページテーブルコピー"
+    },
+    {
+      "table": "baseline",
+      "operation": "TLS ハンドシェイク",
+      "cost": "~1-10ms",
+      "ipc_count": null,
+      "rationale": "鍵交換 + 署名"
+    },
+    {
+      "table": "baseline",
+      "operation": "ZFS 128KB sequential read",
+      "cost": "~50-200µs",
+      "ipc_count": null,
+      "rationale": "ディスク I/O 含む"
+    },
+    {
+      "table": "baseline",
+      "operation": "VM exit（I/O）",
+      "cost": "~1-3µs",
+      "ipc_count": null,
+      "rationale": "VMCS 保存/復元"
+    }
+  ],
+  "targets": [
+    {
+      "table": "target",
+      "operation": "**通常 syscall（FBVBS 非関与）**",
+      "cost": "実質ゼロに近いことを目標",
+      "ipc_count": "0",
+      "rationale": "FBVBS は通常 syscall に介入しない。追加コストは第二レベルページング由来の小さな TLB 影響に限ることを目標とする"
+    },
+    {
+      "table": "target",
+      "operation": "**Tier B 読取り（ucred 参照等）**",
+      "cost": "追加 IPC なし（実質ゼロに近いことを目標）",
+      "ipc_count": "0",
+      "rationale": "Tier B は第二レベルページングで read-only。CPU は直接メモリ読取りし、VMCALL を要求しない"
+    },
+    {
+      "table": "target",
+      "operation": "**Tier B 変更（ucred 更新、Jail 変更等）**",
+      "cost": "数µs〜十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "VMCALL → マイクロハイパーバイザー → Kernel State Integrity Service → shadow copy 更新 → ページ write-enable/copy/read-only サイクル → 返却"
+    },
+    {
+      "table": "target",
+      "operation": "**Setuid exec 検証**",
+      "cost": "十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "execve のベースコストに対して小さい割合に抑えることを目標とする。ハッシュ照合はメモリ内 DB ルックアップ"
+    },
+    {
+      "table": "target",
+      "operation": "**KLD ロード（署名検証）**",
+      "cost": "100ms〜サブ秒級を許容",
+      "ipc_count": "2",
+      "rationale": "署名検証（暗号演算）+ 世代番号検証 + EPT 設定。低頻度操作のため許容"
+    },
+    {
+      "table": "target",
+      "operation": "**TLS 署名（Identity Key Service）**",
+      "cost": "数µs〜十数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "VMCALL → Identity Key Service → 署名演算 → 返却。TLS ハンドシェイク全体に対して小さい割合に抑えることを目標とする"
+    },
+    {
+      "table": "target",
+      "operation": "**ZFS I/O（Storage Key Service、バッチ）**",
+      "cost": "< 10% を目標",
+      "ipc_count": "1/バッチ",
+      "rationale": "VMCALL コストを I/O コストで償却するにはバッチ化が必要であり、バッチサイズ調整で追加コストを抑える"
+    },
+    {
+      "table": "target",
+      "operation": "**bhyve VM exit（ファストパス: EPT 違反等）**",
+      "cost": "サブµs級を目標",
+      "ipc_count": "0",
+      "rationale": "マイクロハイパーバイザー内で完結。FreeBSD への転送なし"
+    },
+    {
+      "table": "target",
+      "operation": "**bhyve VM exit（スローパス: I/O エミュレーション）**",
+      "cost": "数µs級を目標",
+      "ipc_count": "1",
+      "rationale": "マイクロハイパーバイザー → FreeBSD 転送 → デバイスモデル処理 → VMCALL → 再開。高頻度 exit では無視できないため、分類とバッチ化が重要"
+    },
+    {
+      "table": "target",
+      "operation": "**一次監査ログ書込み**",
+      "cost": "サブµs〜数µs/レコードを目標",
+      "ipc_count": "0",
+      "rationale": "マイクロハイパーバイザー内のリングバッファ書込み + UART 出力（非同期）。通常操作には影響しない（セキュリティイベント時のみ）"
+    },
+    {
+      "table": "target",
+      "operation": "**ミラーログ読取り（FreeBSD 側）**",
+      "cost": "追加 IPC なし（実質ゼロに近いことを目標）",
+      "ipc_count": "0",
+      "rationale": "共有リングバッファの直接読取り"
+    }
+  ]
+}

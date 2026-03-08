@@ -1,0 +1,44 @@
+[
+  {
+    "service": "Kernel Code Integrity Service",
+    "stopped_function": "新規 KLD の署名検証と execute 権限付与。新規の CR/MSR インターセプト設定",
+    "preserved_protection": "既存コードページの W^X（第二レベルページングが維持）。既設定の CR ピニング（マイクロハイパーバイザーが維持）",
+    "freebsd_impact": "新規 KLD ロード不可。既存カーネルとモジュールは正常動作継続",
+    "recovery": "パーティション再起動。再起動後にイメージ再検証。既存 W^X 設定は破壊されないため、再起動中の追加リスクは「新規 KLD が検証なしで実行される」可能性のみ。ただし既定方針で未署名 KLD は execute 不可であるため、このリスクはサービス停止中の KLD ロード試行を FreeBSD 側で保留することで緩和される"
+  },
+  {
+    "service": "Kernel State Integrity Service",
+    "stopped_function": "Tier B の新規変更承認（ucred 変更、Setuid 検証、Jail パラメータ変更等）",
+    "preserved_protection": "既存の Tier A read-only 保護。既存の Tier B read-only 保護（変更ができなくなるだけで、既設定値は維持）",
+    "freebsd_impact": "setuid exec がブロックされる。Jail 作成/変更がブロックされる。securelevel 変更がブロックされる。通常の read 操作（ucred 参照等）は影響なし",
+    "recovery": "パーティション再起動。保護テーブルを永続メモリから復元。復元中の Tier B 保護は第二レベルページングが維持するため、既存値は安全"
+  },
+  {
+    "service": "Identity Key Service",
+    "stopped_function": "新規鍵インポート、署名操作、鍵交換操作",
+    "preserved_protection": "他サービスのメモリ分離。他サービスの機能",
+    "freebsd_impact": "TLS ハンドシェイク不可。SSH ホスト認証不可。IPsec IKE 再ネゴシエーション不可。既存セッション（セッション鍵が FreeBSD 側にあるもの）は継続",
+    "recovery": "パーティション再起動。鍵素材を安全なストレージ（TPM シール等）から再ロード"
+  },
+  {
+    "service": "Storage Key Service",
+    "stopped_function": "新規ボリュームマウント（鍵アンロック）。進行中の暗号操作",
+    "preserved_protection": "他サービスのメモリ分離。鍵素材はサービスパーティション内に残留（再起動まで抽出不可）",
+    "freebsd_impact": "マウント済みボリュームの I/O が停止。新規マウント不可",
+    "recovery": "パーティション再起動。鍵素材を再ロード。マウント済みボリュームは再マウントが必要"
+  },
+  {
+    "service": "Update Verification Service",
+    "stopped_function": "成果物の署名/世代番号/依存関係検証",
+    "preserved_protection": "他サービスのメモリ分離。既に検証済みでロード済みの成果物は影響なし",
+    "freebsd_impact": "新規アップデートの適用不可。KLD の新規ロード不可（Kernel Code Integrity Service が Update Verification Service に依存する場合）",
+    "recovery": "パーティション再起動。検証状態を再構築"
+  },
+  {
+    "service": "マイクロハイパーバイザー自体",
+    "stopped_function": "**全保護が崩壊**",
+    "preserved_protection": "なし",
+    "freebsd_impact": "**全システム停止**",
+    "recovery": "システム再起動のみ。マイクロハイパーバイザーの障害は設計の最悪シナリオであり、形式検証の最大の動機"
+  }
+]
