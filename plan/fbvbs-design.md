@@ -1,5 +1,5 @@
 # FBVBS: FreeBSD Virtualization-Based Security
-## Architecture, Requirements, and Assurance Specification v7.0
+## Architecture, Requirements, and Assurance Specification
 
 **対象 OS:** FreeBSD 15 系フォーク  
 **対象 CPU:** x86_64  
