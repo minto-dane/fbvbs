@@ -1,0 +1,123 @@
+[
+  {
+    "id": "expand-ada-authority",
+    "status": "done",
+    "title": "Expand Ada authoritative implementation",
+    "description": "Ada/SPARK packages and the Ada executable now serve as the authoritative implementation path for boot, catalog, logging, command, partition, platform, UVS, crypto-service, and VM policy semantics."
+  },
+  {
+    "id": "codify-leaf-c-boundary",
+    "status": "done",
+    "title": "Define leaf C boundary",
+    "description": "Document the exact VMX/SVM wrapper and tiny hardware-boundary functions that may remain in C."
+  },
+  {
+    "id": "prepare-c-assurance-pipeline",
+    "status": "done",
+    "title": "Prepare C assurance pipeline",
+    "description": "Define MISRA C compliance checks, static-analysis tooling, and formal-verification evidence requirements for retained C leaf code.",
+    "depends_on": [
+      "codify-leaf-c-boundary"
+    ]
+  },
+  {
+    "id": "split-vmx-policy-from-leaf-wrappers",
+    "status": "done",
+    "title": "Split VMX policy from leaf wrappers",
+    "description": "Move VM run-loop and exit-policy semantics out of legacy C vmx.c so only tiny hardware-boundary wrappers remain as candidates for retained C.",
+    "depends_on": [
+      "codify-leaf-c-boundary",
+      "prepare-c-assurance-pipeline"
+    ]
+  },
+  {
+    "id": "move-vm-policy-into-ada",
+    "status": "done",
+    "title": "Move VM policy into Ada",
+    "description": "Ada/SPARK now authoritatively owns VM execution policy, state transitions, and exit ABI code/length shaping; the remaining C vm_policy.c is explicitly a temporary mirror and no longer the authoritative policy source.",
+    "depends_on": [
+      "split-vmx-policy-from-leaf-wrappers"
+    ]
+  },
+  {
+    "id": "implement-hypercall-dispatcher",
+    "status": "done",
+    "title": "Implement Ada hypercall dispatcher",
+    "description": "Added an Ada/SPARK dispatcher that routes selected frozen ABI call IDs through command sequencing, host callsite validation, logging, UVS, KCI, partition lifecycle, VM interrupt injection, VM run, and audit boot-id retrieval."
+  },
+  {
+    "id": "model-memory-policy",
+    "status": "done",
+    "title": "Model Ada memory policy",
+    "description": "Added Ada/SPARK memory-object allocation/release, mapping-budget checks, permission validation, and W^X enforcement semantics with executable acceptance coverage.",
+    "depends_on": [
+      "implement-hypercall-dispatcher"
+    ]
+  },
+  {
+    "id": "model-ksi-shadow-policy",
+    "status": "done",
+    "title": "Model KSI shadow policy",
+    "description": "Added Ada/SPARK modeling for Tier B shadow-copy preparation, observed-RIP validation, paused-writer sequencing, short write-enable windows, and atomic replacement commits."
+  },
+  {
+    "id": "extend-diagnostic-models",
+    "status": "done",
+    "title": "Extend diagnostic models",
+    "description": "Added Ada/SPARK diagnostic modeling and dispatcher coverage for capability, partition, artifact, and device queries so more frozen ABI introspection leaves the legacy C path."
+  },
+  {
+    "id": "expand-memory-dispatch-surface",
+    "status": "done",
+    "title": "Expand memory dispatch surface",
+    "description": "Selected MEMORY_ALLOCATE_OBJECT, MEMORY_MAP, MEMORY_SET_PERMISSION, MEMORY_RELEASE_OBJECT, and VM_MAP_MEMORY semantics now route through the Ada/SPARK dispatcher and memory policy so less ABI traffic depends on the legacy C path."
+  },
+  {
+    "id": "extend-control-dispatch",
+    "status": "done",
+    "title": "Extend control dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes selected KCI control calls (`KCI_SET_WX`, `KCI_PIN_CR`, and `KCI_INTERCEPT_MSR`) in addition to module verification so more frozen-ABI control traffic leaves the legacy C path."
+  },
+  {
+    "id": "extend-partition-audit-dispatch",
+    "status": "done",
+    "title": "Extend partition and audit dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes `PARTITION_GET_STATUS`, `PARTITION_QUIESCE`, `PARTITION_RESUME`, and `AUDIT_GET_MIRROR_INFO`, along with modeled partition-status and mirror-info results."
+  },
+  {
+    "id": "extend-vcpu-status-dispatch",
+    "status": "done",
+    "title": "Extend vCPU status dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes `VM_GET_VCPU_STATUS` so more vmm-facing VM control traffic leaves the legacy C path."
+  },
+  {
+    "id": "extend-memory-sharing-dispatch",
+    "status": "done",
+    "title": "Extend memory sharing dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes `MEMORY_UNMAP`, `MEMORY_REGISTER_SHARED`, and `MEMORY_UNREGISTER_SHARED`, with modeled shared-object and unmap semantics."
+  },
+  {
+    "id": "extend-vm-register-device-dispatch",
+    "status": "done",
+    "title": "Extend VM register dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes `VM_SET_REGISTER` and `VM_GET_REGISTER`, with modeled register permissions and frozen register IDs."
+  },
+  {
+    "id": "extend-crypto-dispatch",
+    "status": "done",
+    "title": "Extend crypto-service dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes selected KSI, IKS, and SKS hypercalls so more security-service ABI traffic leaves the legacy C path."
+  },
+  {
+    "id": "extend-partition-lifecycle-dispatch",
+    "status": "done",
+    "title": "Extend partition lifecycle dispatch",
+    "description": "Ada/SPARK dispatcher coverage now includes `PARTITION_CREATE`, `PARTITION_DESTROY`, and `PARTITION_GET_FAULT_INFO`, with modeled trusted-service creation, tombstone destroy state, and stored fault-info results."
+  },
+  {
+    "id": "tier-a-plumbing",
+    "status": "done",
+    "title": "Retire Tier A plumbing",
+    "description": "The earlier Tier A plumbing item has been retired as superseded by the user-directed Ada/SPARK-first architecture pivot and leaf-C-only boundary."
+  }
+]

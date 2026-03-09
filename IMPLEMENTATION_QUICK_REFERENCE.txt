@@ -1,0 +1,93 @@
+FBVBS IMPLEMENTATION - QUICK REFERENCE
+================================================================================
+
+STATUS AT A GLANCE
+  Overall Completion: 94% (48/51 hypercalls)
+  Fully Complete Increments: 1, 2, 6
+  Partial Increments: 3 (5/6), 4 (8/9), 5 (5/6)
+  Code: 2,864 LoC Ada/SPARK (all authoritative)
+
+THREE MISSING HYPERCALLS
+  1. Call_VM_Map_Memory       [Increment 5] - Line 274 in fbvbs-hypercall_dispatcher.adb
+  2. Call_KSI_Register_Tier_B [Increment 3] - Line 351 in fbvbs-hypercall_dispatcher.adb
+  3. Call_SKS_Encrypt_Batch   [Increment 4] - Line 515 in fbvbs-hypercall_dispatcher.adb
+
+IMPLEMENTATION DETAILS
+
+INCREMENT 1 - Microhypervisor Foundation (基盤)
+  Status: ✅ COMPLETE (23/23)
+  Hypercalls: Partition (10) + Memory (7) + Audit/Diag (6)
+  Ada Modules: partitions (410 LoC), memory (178 LoC), dispatcher (727 LoC),
+               commands (141 LoC), logging, diagnostics
+  Evidence: All cases 166-328 in dispatcher fully implemented
+
+INCREMENT 2 - Kernel Code Integrity Service
+  Status: ✅ COMPLETE (4/4)
+  Hypercalls: Verify_Module, Set_WX, Pin_CR, Intercept_MSR
+  Ada Module: fbvbs-kci.adb (119 LoC)
+  Evidence: All cases 543-596 in dispatcher
+
+INCREMENT 3 - Kernel State Integrity Service
+  Status: ⚠️ PARTIAL (5/6 = 83%)
+  Implemented: Create_Target_Set, Register_Tier_A, Register_Pointer,
+               Validate_Setuid, Replace_Tier_B_Object
+  MISSING: Register_Tier_B (currently aliased with Tier_A)
+  Ada Modules: fbvbs-ksi.adb (173 LoC), fbvbs-ksi_shadow.adb (105 LoC)
+  Line 351: when FBVBS.ABI.Call_KSI_Register_Tier_A | FBVBS.ABI.Call_KSI_Register_Tier_B =>
+  Gap: Needs separate Tier_B case with shadow copy validation
+
+INCREMENT 4 - Identity/Storage Key Services
+  Status: ⚠️ PARTIAL (8/9 = 89%)
+  IKS Complete: Import_Key, Sign (Ed25519/ECDSA_P256/RSA3072), Key_Exchange,
+                Derive, Destroy_Key (5/5)
+  SKS: Import_DEK, Decrypt_Batch, Destroy_DEK (3/4) 
+  MISSING: Encrypt_Batch (currently aliased with Decrypt_Batch)
+  Ada Modules: fbvbs-iks.adb (120 LoC), fbvbs-sks.adb (71 LoC)
+  Line 515: when FBVBS.ABI.Call_SKS_Decrypt_Batch | FBVBS.ABI.Call_SKS_Encrypt_Batch =>
+  Gap: Likely complete via symmetric Process_Batch; verify design intent
+
+INCREMENT 5 - bhyve Integration
+  Status: ⚠️ PARTIAL (5/6 = 83%)
+  Implemented: Run, Set_Register, Get_Register, Inject_Interrupt, Get_VCPU_Status
+  MISSING: VM_Map_Memory (currently aliased with Memory_Map)
+  Ada Modules: fbvbs-vmx.adb (219 LoC), fbvbs-vm_policy.adb (88 LoC)
+  Line 274: when FBVBS.ABI.Call_Memory_Map | FBVBS.ABI.Call_VM_Map_Memory =>
+  Gap: Needs VM partition kind check + guest memory ownership validation
+
+INCREMENT 6 - Update Verification Service
+  Status: ✅ COMPLETE (3/3)
+  Hypercalls: Verify_Manifest_Set, Verify_Artifact, Check_Revocation
+  Ada Module: fbvbs-uvs.adb (155 LoC)
+  Evidence: All cases 122-164 in dispatcher
+
+INCREMENT 7 - Quality Assurance
+  Status: 🔄 PENDING (deferred to QA phase)
+  Planned: GNATprove, MC/DC coverage, security audit, reproducible build
+
+KEY FILES
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-hypercall_dispatcher.adb (727 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-partitions.adb (410 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-memory.adb (178 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-ksi.adb (173 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-ksi_shadow.adb (105 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-vmx.adb (219 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-commands.adb (141 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-uvs.adb (155 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-iks.adb (120 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-kci.adb (119 LoC)
+  /home/nia/opencode/fbvbs/hypervisor/ada/src/fbvbs-sks.adb (71 LoC)
+  Plus 8 more Ada .ads spec files with SPARK_Mode contracts
+
+RECOMMENDED IMPLEMENTATION ORDER
+  1. Call_VM_Map_Memory (Increment 5)     - 30 min, 20-40 LoC, HIGH value
+  2. Call_KSI_Register_Tier_B (Inc 3)     - 1 hr,  30-50 LoC, MEDIUM value
+  3. Call_SKS_Encrypt_Batch (Inc 4)       - 15 min, 5-10 LoC, verification only
+
+TOTAL ESTIMATED EFFORT: 2-3 hours for 100% completion (51/51 hypercalls)
+
+TESTING COMMAND
+  cd /home/nia/opencode/fbvbs
+  python3 -m unittest discover -s tests -v
+  cd hypervisor/ada && gprbuild -P fbvbs_hypervisor.gpr
+
+================================================================================

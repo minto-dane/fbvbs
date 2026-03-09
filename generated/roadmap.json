@@ -1,11 +1,11 @@
 [
   {
-    "phase": 0,
-    "title": "マイクロハイパーバイザー基盤（4ヶ月）",
+    "increment": 1,
+    "title": "マイクロハイパーバイザー基盤",
     "goal": "FreeBSD を deprivileged host として起動し、最低1つの信頼サービスパーティションを稼働させる。",
     "deliverables": [
       "Ada/SPARK マイクロハイパーバイザー: パーティション管理、第二レベルページング、IPC、VMCALL ハンドリング、一次監査ログ（UART）",
-      "Intel VT-x 対応（AMD は Phase 3）",
+      "Intel VT-x 対応（AMD は Increment 4）",
       "最小限のブートシーケンス: UEFI → マイクロハイパーバイザー → 空の信頼サービスパーティション → FreeBSD パーティション",
       "FreeBSD が VMX non-root で正常起動することの実証"
     ],
@@ -16,8 +16,8 @@
     ]
   },
   {
-    "phase": 1,
-    "title": "Kernel Code Integrity Service（3ヶ月）",
+    "increment": 2,
+    "title": "Kernel Code Integrity Service",
     "goal": "W^X 強制と KLD 署名検証。",
     "deliverables": [
       "Kernel Code Integrity Service パーティション（Ada/SPARK）",
@@ -34,8 +34,8 @@
     ]
   },
   {
-    "phase": 2,
-    "title": "Kernel State Integrity Service（3ヶ月）",
+    "increment": 3,
+    "title": "Kernel State Integrity Service",
     "goal": "Tier A/B 保護と Setuid 検証。",
     "deliverables": [
       "Kernel State Integrity Service パーティション（Ada/SPARK）",
@@ -54,8 +54,8 @@
     ]
   },
   {
-    "phase": 3,
-    "title": "Identity Key Service + Storage Key Service + AMD 対応（4ヶ月）",
+    "increment": 4,
+    "title": "Identity Key Service + Storage Key Service + AMD 対応",
     "goal": "鍵隔離と AMD プラットフォーム対応。",
     "deliverables": [
       "Identity Key Service パーティション（Ada/SPARK）: IMPORT_KEY, SIGN, KEY_EXCHANGE, DERIVE, DESTROY",
@@ -72,8 +72,8 @@
     ]
   },
   {
-    "phase": 4,
-    "title": "bhyve 統合 + Kernel State Integrity Service 拡張（4ヶ月）",
+    "increment": 5,
+    "title": "bhyve 統合 + Kernel State Integrity Service 拡張",
     "goal": "仮想マシンホスティングと保護対象拡張。",
     "deliverables": [
       "vmm.ko の VMCALL 化: VM 作成/破棄/実行/メモリ登録/割込み注入",
@@ -91,8 +91,8 @@
     ]
   },
   {
-    "phase": 5,
-    "title": "Update Verification Service + HLAT 統合（3ヶ月）",
+    "increment": 6,
+    "title": "Update Verification Service + HLAT 統合",
     "goal": "搬送手段非依存の更新検証と Intel HLAT 統合。",
     "deliverables": [
       "Update Verification Service パーティション（Ada/SPARK）",
@@ -109,8 +109,8 @@
     ]
   },
   {
-    "phase": 6,
-    "title": "品質保証と継続改善（継続）",
+    "increment": 7,
+    "title": "品質保証と継続改善",
     "goal": "形式検証完了、セキュリティ監査、認証準備。",
     "deliverables": [],
     "verification": [

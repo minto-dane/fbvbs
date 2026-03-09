@@ -4,7 +4,7 @@
     "structure": "sysent[]（syscall テーブル）",
     "attack_effect": "syscall フック。攻撃者が任意のカーネル関数を syscall エントリに差し替え可能",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "コンパイル時定義。ランタイム変更の正当理由なし"
   },
   {
@@ -12,7 +12,7 @@
     "structure": "IDT（Interrupt Descriptor Table）",
     "attack_effect": "割り込みハイジャック。例外・割り込みハンドラを攻撃者制御コードに誘導",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "ブート時設定後不変"
   },
   {
@@ -20,7 +20,7 @@
     "structure": "GDT（Global Descriptor Table）",
     "attack_effect": "セグメント記述子改竄。特権レベル境界の破壊",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "ブート時設定後不変"
   },
   {
@@ -28,7 +28,7 @@
     "structure": "カーネル .rodata セクション",
     "attack_effect": "定数改竄。文字列テーブル、エラーメッセージ、設定定数の書換え",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "定義上不変"
   },
   {
@@ -36,7 +36,7 @@
     "structure": "vop_vector（VFS 操作テーブル）",
     "attack_effect": "ファイル操作リダイレクト。open/read/write を攻撃者制御関数に誘導",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "コンパイル時定義。`.rodata` に配置されるべき"
   },
   {
@@ -44,7 +44,7 @@
     "structure": "cdevsw（キャラクタデバイス操作テーブル）",
     "attack_effect": "デバイス操作リダイレクト",
     "change_frequency": "ゼロ（ドライバロード後）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "KLD ロード時に登録後不変"
   },
   {
@@ -52,7 +52,7 @@
     "structure": "filterops（kqueue フィルタ操作テーブル）",
     "attack_effect": "イベント操作リダイレクト",
     "change_frequency": "ゼロ",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "コンパイル時定義"
   },
   {
@@ -60,7 +60,7 @@
     "structure": "カーネルテキスト領域の PTE（AMD のみ、静的コアカーネル範囲）",
     "attack_effect": "PFN スワップ。カーネルコードが指す物理ページを攻撃者制御ページに差替え",
     "change_frequency": "ゼロ",
-    "phase": "3",
+    "implementation_increment": "4",
     "rationale": "Intel は HLAT で保護。AMD は HLAT 相当の単一機構がないため、静的コアカーネル範囲の PTE 自体を不変化"
   },
   {
@@ -68,7 +68,7 @@
     "structure": "struct ucred（資格情報）",
     "attack_effect": "権限昇格。uid/gid 変更で root 取得",
     "change_frequency": "低（setuid/crget 時）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "権限昇格防止の核心"
   },
   {
@@ -76,7 +76,7 @@
     "structure": "td->td_ucred 等の ucred ポインタ",
     "attack_effect": "ポインタ差替え。偽 ucred への誘導で間接的権限昇格",
     "change_frequency": "低",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "ucred 本体を保護してもポインタが自由なら迂回可能"
   },
   {
@@ -84,7 +84,7 @@
     "structure": "struct prison（Jail メタデータ）",
     "attack_effect": "Jail エスケープ。`pr_allow` 変更で全操作許可、`pr_path` 変更で chroot 脱出",
     "change_frequency": "極低（Jail 作成/破棄時）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "Jail 境界は FreeBSD の主要分離機構"
   },
   {
@@ -92,7 +92,7 @@
     "structure": "prison ポインタ（p->p_ucred->cr_prison 等）",
     "attack_effect": "Jail ポインタ差替え。`prison0`（ホスト Jail）への誘導で Jail 脱出",
     "change_frequency": "極低",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "prison 本体保護の補完"
   },
   {
@@ -100,7 +100,7 @@
     "structure": "securelevel 変数",
     "attack_effect": "securelevel 迂回。不変ファイル変更、raw デバイスアクセス、ファイアウォール変更が可能に",
     "change_frequency": "極低（手動変更のみ）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "FreeBSD 固有の重要セキュリティ機構"
   },
   {
@@ -108,7 +108,7 @@
     "structure": "MAC ポリシー構造体（mac_policy_list 等）",
     "attack_effect": "MAC 無効化。強制アクセス制御の全ポリシーを無効化",
     "change_frequency": "極低（ポリシーロード時）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "MAC Framework は FreeBSD の主要セキュリティ層"
   },
   {
@@ -116,7 +116,7 @@
     "structure": "Capsicum capability mode フラグ（p_flag 内 P_CAPSICUM 等）",
     "attack_effect": "サンドボックス脱出。capability mode からの離脱でグローバル名前空間アクセス復帰",
     "change_frequency": "極低（`cap_enter` は一方通行）",
-    "phase": "2",
+    "implementation_increment": "3",
     "rationale": "Capsicum はアプリケーション分離の基盤"
   },
   {
@@ -124,7 +124,7 @@
     "structure": "pf ルール構造体（pf_krule 等）",
     "attack_effect": "ファイアウォール無効化。全ポートの開放、アクセス制限の解除",
     "change_frequency": "極低（管理者が `pfctl` で変更時のみ）",
-    "phase": "4",
+    "implementation_increment": "5",
     "rationale": "サーバー環境のネットワーク境界"
   },
   {
@@ -132,7 +132,7 @@
     "structure": "ipfw ルール構造体",
     "attack_effect": "同上",
     "change_frequency": "極低",
-    "phase": "4",
+    "implementation_increment": "5",
     "rationale": "同上"
   },
   {
@@ -140,7 +140,7 @@
     "structure": "p_textvp（実行バイナリ vnode ポインタ）",
     "attack_effect": "Setuid 検証の基盤改竄。攻撃者が `p_textvp` を許可済みバイナリの vnode に差替えれば、Setuid 検証を迂回可能",
     "change_frequency": "極低（exec 時のみ）",
-    "phase": "4",
+    "implementation_increment": "5",
     "rationale": "Setuid 検証が依拠する識別情報"
   },
   {
@@ -148,7 +148,7 @@
     "structure": "struct filedesc（fd テーブル）",
     "attack_effect": "他プロセスの open 済み fd を差込み、ucred チェックなしで読書き",
     "change_frequency": "極高（全 open/close/dup）",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "変更頻度が高すぎて第二レベルページング保護は性能破綻"
   },
   {
@@ -156,7 +156,7 @@
     "structure": "struct file（個別ファイル記述子）",
     "attack_effect": "`f_ops` 差替え等",
     "change_frequency": "高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "同上"
   },
   {
@@ -164,7 +164,7 @@
     "structure": "struct socket",
     "attack_effect": "ソケットハイジャック",
     "change_frequency": "高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "同上"
   },
   {
@@ -172,7 +172,7 @@
     "structure": "struct inpcb",
     "attack_effect": "接続パラメータ改竄",
     "change_frequency": "高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "同上"
   },
   {
@@ -180,7 +180,7 @@
     "structure": "ルーティングテーブル（動的環境）",
     "attack_effect": "トラフィックリダイレクト",
     "change_frequency": "中〜高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "動的ルーティング環境では正当変更が高頻度"
   },
   {
@@ -188,7 +188,7 @@
     "structure": "スレッドスケジューリング構造体",
     "attack_effect": "スケジューリング操作",
     "change_frequency": "極高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "カーネルの最高頻度操作"
   },
   {
@@ -196,7 +196,7 @@
     "structure": "ネットワークバッファ（mbuf 等）",
     "attack_effect": "通信データ傍受/改竄",
     "change_frequency": "極高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "データパス上のバッファ"
   },
   {
@@ -204,7 +204,7 @@
     "structure": "VFS キャッシュ",
     "attack_effect": "ファイルデータの一時的改竄",
     "change_frequency": "高",
-    "phase": null,
+    "implementation_increment": null,
     "rationale": "キャッシュの性質上、頻繁な更新が不可避"
   }
 ]

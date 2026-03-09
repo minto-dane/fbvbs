@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
                     "requirement_subsections": len(spec.requirement_defaults),
                     "partition_transitions": len(spec.partition_transitions),
                     "protected_structures": len(spec.protected_structures),
-                    "roadmap_phases": len(spec.roadmap_phases),
+                    "roadmap_increments": len(spec.roadmap_increments),
                     "hypercalls": len(spec.hypercalls),
                     "layouts": len(spec.layouts),
                     "validation_errors": len(errors),

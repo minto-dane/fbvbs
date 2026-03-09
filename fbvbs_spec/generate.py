@@ -31,7 +31,7 @@ def generate_outputs(source_path: str | Path, output_dir: str | Path) -> FrozenS
             "targets": [asdict(item) for item in spec.performance_targets],
         },
     )
-    write_json(output_path / "roadmap.json", [asdict(item) for item in spec.roadmap_phases])
+    write_json(output_path / "roadmap.json", [asdict(item) for item in spec.roadmap_increments])
     write_json(output_path / "partition_state_machine.json", [asdict(item) for item in spec.partition_transitions])
     write_csv_requirements(output_path / "requirements.csv", spec)
     (output_path / "partition_state_machine.dot").write_text(render_partition_fsm_dot(spec), encoding="utf-8")
@@ -134,6 +134,8 @@ def render_c_header(spec: FrozenSpec) -> str:
     lines.append("")
     lines.extend(render_c_defines(spec.command_states))
     lines.append("")
+    lines.extend(render_c_hypercall_defines(spec))
+    lines.append("")
     lines.extend(render_c_defines(spec.frozen_enumerations))
     lines.append("")
     lines.extend(render_c_defines(spec.error_codes))
@@ -155,6 +157,8 @@ def render_rust_bindings(spec: FrozenSpec) -> str:
     lines.extend(render_rust_consts(spec.command_flags))
     lines.append("")
     lines.extend(render_rust_consts(spec.command_states))
+    lines.append("")
+    lines.extend(render_rust_hypercall_consts(spec))
     lines.append("")
     lines.extend(render_rust_consts(spec.frozen_enumerations))
     lines.append("")
@@ -194,6 +198,10 @@ def sanitize_constant_name(name: str) -> str:
     return sanitized.upper()
 
 
+def sanitize_hypercall_name(name: str) -> str:
+    return f"FBVBS_CALL_{sanitize_constant_name(name)}"
+
+
 def coerce_numeric_literal(value: str) -> str | None:
     stripped = value.strip()
     bit_match = re.fullmatch(r"bit\s+(\d+)", stripped)
@@ -211,6 +219,20 @@ def render_c_struct(layout: CStructLayout) -> list[str]:
     lines.append("};")
     if layout.size_bytes is not None:
         lines.append(f"#define {sanitize_constant_name(layout.name + '_size')} {layout.size_bytes}")
+    return lines
+
+
+def render_c_hypercall_defines(spec: FrozenSpec) -> list[str]:
+    lines: list[str] = []
+    for hypercall in spec.hypercalls:
+        lines.append(f"#define {sanitize_hypercall_name(hypercall.name)} {hypercall.call_id}")
+    return lines
+
+
+def render_rust_hypercall_consts(spec: FrozenSpec) -> list[str]:
+    lines: list[str] = []
+    for hypercall in spec.hypercalls:
+        lines.append(f"pub const {sanitize_hypercall_name(hypercall.name)}: u64 = {hypercall.call_id};")
     return lines
 
 

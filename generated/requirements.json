@@ -489,7 +489,7 @@
     "requirement_id": "FBVBS-REQ-0201",
     "number": 201,
     "subsection": "G.3. Microhypervisor and Partition Requirements",
-    "text": "新規 TCB ロジックは原則として Ada/SPARK で実装しなければならない。例外を設ける場合は境界、理由、安全性契約を文書化しなければならない。",
+    "text": "新規 TCB ロジックは Ada/SPARK で実装しなければならない。C を含む例外を設ける場合は、境界、理由、安全性契約、適用サブセット、未定義動作不在の根拠、ならびに形式的解析または同等証拠を文書化しなければならない。",
     "verification_phrase": "code review と proof artifact review",
     "verification_labels": [
       "code review",

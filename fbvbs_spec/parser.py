@@ -17,7 +17,7 @@ from .models import (
     ProtectedStructure,
     Requirement,
     RequirementDefaults,
-    RoadmapPhase,
+    RoadmapIncrement,
     ServiceFailureImpact,
     StructField,
 )
@@ -62,7 +62,7 @@ def parse_spec_document(source_path: str | Path) -> FrozenSpec:
     protected_structures = parse_protected_structures(lines)
     service_failures = parse_service_failures(lines)
     performance_reference, performance_targets = parse_performance_budget(lines)
-    roadmap_phases = parse_roadmap(lines)
+    roadmap_increments = parse_roadmap(lines)
     layouts = parse_layouts(lines)
     command_flags = parse_named_values_table(
         section_text(lines, "## D.1. Command Flags", "## D.2. Command States"),
@@ -107,7 +107,7 @@ def parse_spec_document(source_path: str | Path) -> FrozenSpec:
         service_failures=service_failures,
         performance_reference=performance_reference,
         performance_targets=performance_targets,
-        roadmap_phases=roadmap_phases,
+        roadmap_increments=roadmap_increments,
         layouts=layouts,
         command_flags=command_flags,
         command_states=command_states,
@@ -260,7 +260,7 @@ def parse_protected_structures(lines: list[str]) -> tuple[ProtectedStructure, ..
                     structure=clean_code(row["構造体"]),
                     attack_effect=row["改竄時の攻撃効果"].strip(),
                     change_frequency=row["変更頻度"].strip(),
-                    phase=row.get("Phase", "").strip() or None,
+                    implementation_increment=row.get("実装インクリメント", "").strip() or None,
                     rationale=(row.get("根拠") or row.get("非保護の理由") or "").strip(),
                 )
             )
@@ -307,14 +307,14 @@ def parse_performance_budget(lines: list[str]) -> tuple[tuple[PerformanceEntry, 
     return baseline_entries, target_entries
 
 
-def parse_roadmap(lines: list[str]) -> tuple[RoadmapPhase, ...]:
+def parse_roadmap(lines: list[str]) -> tuple[RoadmapIncrement, ...]:
     section = section_text(lines, "# Appendix K. Implementation Roadmap", "# Appendix L. Frozen Hypercall ABI Catalog")
-    indices = [index for index, line in enumerate(section) if line.startswith("### Phase ")]
-    phases: list[RoadmapPhase] = []
+    indices = [index for index, line in enumerate(section) if line.startswith("### Increment ")]
+    increments: list[RoadmapIncrement] = []
     for offset, start_index in enumerate(indices):
         end_index = indices[offset + 1] if offset + 1 < len(indices) else len(section)
         block = section[start_index:end_index]
-        heading_match = re.match(r"### Phase (?P<phase>\d+): (?P<title>.+)$", block[0].strip())
+        heading_match = re.match(r"### Increment (?P<increment>\d+): (?P<title>.+)$", block[0].strip())
         if heading_match is None:
             raise ValueError(f"unable to parse roadmap heading: {block[0]}")
         goal = ""
@@ -334,16 +334,16 @@ def parse_roadmap(lines: list[str]) -> tuple[RoadmapPhase, ...]:
                 current_list.append(stripped.removeprefix("- ").strip())
             elif stripped.startswith("### "):
                 break
-        phases.append(
-            RoadmapPhase(
-                phase=int(heading_match.group("phase")),
+        increments.append(
+            RoadmapIncrement(
+                increment=int(heading_match.group("increment")),
                 title=heading_match.group("title").strip(),
                 goal=goal,
                 deliverables=tuple(deliverables),
                 verification=tuple(verification),
             )
         )
-    return tuple(phases)
+    return tuple(increments)
 
 
 def parse_layouts(lines: list[str]) -> tuple[CStructLayout, ...]:

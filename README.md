@@ -14,6 +14,7 @@ This repository now turns `plan/fbvbs-design.md` into machine-readable, validate
 - `plan/fbvbs-design.md`: normative source document
 - `fbvbs_spec/`: parser, validator, generator, and CLI
 - `generated/`: checked-in derived artifacts produced from the design document
+- `hypervisor/`: Ada/SPARK-first hypervisor implementation and assurance workspace; any remaining C is migration-only and non-authoritative
 - `tests/`: regression coverage for the executable-spec pipeline
 
 ## Usage
@@ -36,12 +37,35 @@ Show a quick summary:
 python3 -m fbvbs_spec summary --source plan/fbvbs-design.md
 ```
 
-Run tests:
+Run spec-tool tests:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
+Run the retained-C warning and compiler static-analysis gate:
+
+```bash
+make -C hypervisor analyze
+```
+
+Build and run the Ada/SPARK hypervisor executable checks:
+
+```bash
+gprbuild -P hypervisor/ada/fbvbs_hypervisor.gpr
+(
+  cd hypervisor/ada
+  ./fbvbs_hypervisor_main
+)
+(
+  cd hypervisor/ada
+  alr build
+  ./fbvbs_hypervisor_main
+)
+```
+
+The Ada/SPARK implementation path is the primary acceptance target. Python in this repository is used for spec parsing/generation/validation tooling; it is not the hypervisor runtime itself. Any remaining C is temporary migration code outside the authoritative implementation path unless and until it satisfies the spec's explicit exception rules for MISRA C compliance, static analysis, and formal verification. The current repository-enforced C baseline includes warnings-as-errors plus a compiler `-fanalyzer` pass via `make -C hypervisor analyze`, while VM exit state transitions, ABI exit-code/length shaping, a selected hypercall-dispatch path, Ada-side memory/W^X plus unmap/shared-registration policy, selected KCI control calls (`KCI_VERIFY_MODULE`, `KCI_SET_WX`, `KCI_PIN_CR`, `KCI_INTERCEPT_MSR`), selected KSI/IKS/SKS crypto-service dispatch, partition create/destroy/status/quiesce/resume/fault-info control, audit mirror-info queries, `VM_GET_VCPU_STATUS`, `VM_SET_REGISTER`, `VM_GET_REGISTER`, KSI Tier B shadow-update sequencing, and selected diagnostic query modeling are now implemented authoritatively in Ada/SPARK.
+
 ## Notes
 
-The design document remains the source of truth. Generated artifacts are reproducible and are intended to unblock future Ada/SPARK, Rust, assembly, and FreeBSD integration work with precise contracts instead of manual transcription.
+The design document remains the source of truth. Generated artifacts are reproducible, and repository changes should converge on an Ada/SPARK-first implementation; any remaining C during migration should be treated as temporary, explicitly bounded, non-authoritative, and subject to MISRA/static-analysis/formal-verification requirements before it can re-enter the trusted path.

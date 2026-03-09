@@ -46,7 +46,7 @@ class ProtectedStructure:
     structure: str
     attack_effect: str
     change_frequency: str
-    phase: str | None
+    implementation_increment: str | None
     rationale: str
 
 
@@ -69,8 +69,8 @@ class PerformanceEntry:
 
 
 @dataclass(frozen=True)
-class RoadmapPhase:
-    phase: int
+class RoadmapIncrement:
+    increment: int
     title: str
     goal: str
     deliverables: tuple[str, ...]
@@ -146,7 +146,7 @@ class FrozenSpec:
     service_failures: tuple[ServiceFailureImpact, ...]
     performance_reference: tuple[PerformanceEntry, ...]
     performance_targets: tuple[PerformanceEntry, ...]
-    roadmap_phases: tuple[RoadmapPhase, ...]
+    roadmap_increments: tuple[RoadmapIncrement, ...]
     layouts: tuple[CStructLayout, ...]
     command_flags: tuple[NamedValue, ...]
     command_states: tuple[NamedValue, ...]

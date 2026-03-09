@@ -71,6 +71,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertIn("struct fbvbs_command_page_v1", header_text)
             self.assertIn("#define OK 0", header_text)
             self.assertIn("#define FBVBS_CMD_FLAG_SEPARATE_OUTPUT (1ULL << 0)", header_text)
+            self.assertIn("#define FBVBS_CALL_PARTITION_CREATE 0x0001", header_text)
 
 
 if __name__ == "__main__":
