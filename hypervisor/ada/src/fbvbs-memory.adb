@@ -4,6 +4,7 @@ package body FBVBS.Memory
   with SPARK_Mode
 is
    use type FBVBS.ABI.Partition_Kind;
+   use type FBVBS.ABI.Partition_State;
 
    function Has_All_Bits (Value : FBVBS.ABI.U64; Mask : FBVBS.ABI.U64) return Boolean is
      ((Value and Mask) = Mask);
@@ -20,6 +21,13 @@ is
           ((Permissions and FBVBS.ABI.Memory_Permission_Write) = 0
            or else (Permissions and FBVBS.ABI.Memory_Permission_Execute) = 0);
    end Valid_Permissions;
+
+   function Valid_VM_Map_State (State : FBVBS.ABI.Partition_State) return Boolean is
+     (State = FBVBS.ABI.Created
+      or else State = FBVBS.ABI.Measured
+      or else State = FBVBS.ABI.Loaded
+      or else State = FBVBS.ABI.Runnable
+      or else State = FBVBS.ABI.Quiesced);
 
    procedure Initialize_Object (Object : out FBVBS.ABI.Memory_Object_Record) is
    begin
@@ -133,15 +141,29 @@ is
          Status := FBVBS.ABI.Not_Found;
       elsif Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
          Status := FBVBS.ABI.Invalid_Parameter;
+      elsif not Valid_VM_Map_State (Partition.State) then
+         Status := FBVBS.ABI.Invalid_State;
+      elsif Memory_Object_Id = 0
+        or else Guest_Physical_Address = 0
+        or else (Guest_Physical_Address mod FBVBS.ABI.Page_Size) /= 0
+        or else Size = 0
+        or else (Size mod FBVBS.ABI.Page_Size) /= 0
+      then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif not Object.Allocated or else Memory_Object_Id /= Object.Memory_Object_Id then
+         Status := FBVBS.ABI.Not_Found;
+      elsif Object.Object_Flags /= FBVBS.ABI.Memory_Object_Flag_Guest_Memory then
+         Status := FBVBS.ABI.Permission_Denied;
+      elsif Size > Object.Size then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif not Valid_Permissions (Permissions) then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.Mapped_Bytes + Size > Partition.Memory_Limit_Bytes then
+         Status := FBVBS.ABI.Resource_Exhausted;
       else
-         Map_Object
-           (Partition              => Partition,
-            Object                 => Object,
-            Memory_Object_Id       => Memory_Object_Id,
-            Guest_Physical_Address => Guest_Physical_Address,
-            Size                   => Size,
-            Permissions            => Permissions,
-            Status                 => Status);
+         Partition.Mapped_Bytes := Partition.Mapped_Bytes + Size;
+         Object.Map_Count := Object.Map_Count + 1;
+         Status := FBVBS.ABI.OK;
       end if;
    end Map_VM_Object;
 

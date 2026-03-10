@@ -126,7 +126,7 @@ is
             Object_Id              => Object_Id,
             Guest_Physical_Address => Guest_Physical_Address,
             Size                   => Size,
-            Target_Set_Id          => 0);
+            Target_Set_Id          => State.Target_Set_Id);
          Status := FBVBS.ABI.OK;
       end if;
    end Register_Object;
@@ -196,7 +196,9 @@ is
       Status                 : out FBVBS.ABI.Status_Code)
    is
    begin
-      if not Valid_Object_Reference (Object_Id, Guest_Physical_Address, Size) then
+      if not State.In_Use or else State.Target_Set_Id = 0 then
+         Status := FBVBS.ABI.Not_Found;
+      elsif not Valid_Object_Reference (Object_Id, Guest_Physical_Address, Size) then
          Status := FBVBS.ABI.Invalid_Parameter;
       else
          Register_Object
@@ -228,7 +230,9 @@ is
       Status                 : out FBVBS.ABI.Status_Code)
    is
    begin
-      if not Valid_Object_Reference (Object_Id, Guest_Physical_Address, Size)
+      if not State.In_Use or else State.Target_Set_Id = 0 then
+         Status := FBVBS.ABI.Not_Found;
+      elsif not Valid_Object_Reference (Object_Id, Guest_Physical_Address, Size)
         or else not Valid_Protection_Class (Protection_Class)
       then
          Status := FBVBS.ABI.Invalid_Parameter;
@@ -315,7 +319,9 @@ is
       pragma Unreferenced (Requested_UID, Requested_GID);
       Ucred_Object_Id := 0;
 
-      if Prison_Object_Id = 0 or else Prison_Slot < 0 then
+      if not State.In_Use or else State.Target_Set_Id = 0 then
+         Status := FBVBS.ABI.Not_Found;
+      elsif Prison_Object_Id = 0 or else Prison_Slot < 0 then
          Status := FBVBS.ABI.Not_Found;
       elsif Template_Ucred_Object_Id /= 0 and then Template_Slot < 0 then
          Status := FBVBS.ABI.Not_Found;
@@ -338,7 +344,7 @@ is
             Object_Id              => Ucred_Object_Id,
             Guest_Physical_Address => Ucred_Object_Id,
             Size                   => FBVBS.ABI.Page_Size,
-            Target_Set_Id          => 0);
+            Target_Set_Id          => State.Target_Set_Id);
          State.Next_KSI_Object_Id := State.Next_KSI_Object_Id + FBVBS.ABI.Page_Size;
          Status := FBVBS.ABI.OK;
       end if;

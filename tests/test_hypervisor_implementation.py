@@ -22,6 +22,58 @@ class HypervisorImplementationTests(unittest.TestCase):
         if result.returncode != 0:
             self.fail(result.stdout + "\n" + result.stderr)
 
+    def test_c_default_boundary_is_leaf_only(self) -> None:
+        makefile = (HYPERVISOR_DIR / "Makefile").read_text(encoding="utf-8")
+
+        self.assertIn("LEAF_SOURCES := src/vmx.c", makefile)
+        self.assertNotIn("src/command.c", makefile)
+        self.assertNotIn("src/partition.c", makefile)
+        self.assertNotIn("src/security.c", makefile)
+        self.assertNotIn("src/vm_policy.c", makefile)
+        self.assertIn("tests/test_leaf_boundary.c", makefile)
+        self.assertIn("check-retained-c", makefile)
+        self.assertIn("proof:", makefile)
+
+    def test_c_leaf_boundary_uses_dedicated_leaf_header(self) -> None:
+        leaf_header = (HYPERVISOR_DIR / "include" / "fbvbs_leaf_vmx.h").read_text(encoding="utf-8")
+        legacy_header = (HYPERVISOR_DIR / "include" / "fbvbs_hypervisor.h").read_text(encoding="utf-8")
+        vmx_source = (HYPERVISOR_DIR / "src" / "vmx.c").read_text(encoding="utf-8")
+        leaf_test = (HYPERVISOR_DIR / "tests" / "test_leaf_boundary.c").read_text(encoding="utf-8")
+
+        self.assertIn("#include \"fbvbs_leaf_vmx.h\"", vmx_source)
+        self.assertIn("#include \"../include/fbvbs_leaf_vmx.h\"", leaf_test)
+        self.assertIn("struct fbvbs_vmx_leaf_exit", leaf_header)
+        self.assertIn("int fbvbs_vmx_leaf_run_vcpu(", leaf_header)
+        self.assertNotIn("struct fbvbs_partition", leaf_header)
+        self.assertIn("#include \"fbvbs_leaf_vmx.h\"", legacy_header)
+        self.assertNotIn("int fbvbs_vmx_probe(", legacy_header)
+        self.assertNotIn("struct fbvbs_vmx_leaf_exit {", legacy_header)
+        self.assertIn("_Static_assert(sizeof(struct fbvbs_vcpu) == 64U", leaf_header)
+        self.assertIn("_Static_assert(sizeof(struct fbvbs_vmx_leaf_exit) == 32U", leaf_header)
+
+    def test_c_leaf_boundary_has_compliance_and_proof_artifacts(self) -> None:
+        compliance_doc = (HYPERVISOR_DIR / "compliance" / "retained_c_leaf_boundary.md").read_text(encoding="utf-8")
+        subset_check = (HYPERVISOR_DIR / "tools" / "check_retained_c_subset.py").read_text(encoding="utf-8")
+        proof_script = (HYPERVISOR_DIR / "tools" / "prove_leaf_vmx_contracts.py").read_text(encoding="utf-8")
+
+        self.assertIn("MISRA-oriented", compliance_doc)
+        self.assertIn("bounded exhaustive proof-style contract comparison", compliance_doc)
+        self.assertIn("FBVBS-REQ-0201", compliance_doc)
+        self.assertIn("FBVBS-REQ-1000", compliance_doc)
+        self.assertIn("retained-C subset checks passed", subset_check)
+        self.assertIn("bounded VMX contract proof passed", proof_script)
+
+    def test_c_leaf_contract_proof_passes(self) -> None:
+        result = subprocess.run(
+            ["make", "-C", str(HYPERVISOR_DIR), "proof"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.fail(result.stdout + "\n" + result.stderr)
+
     def test_ada_main_builds_and_runs_with_gprbuild(self) -> None:
         result = subprocess.run(
             ["gprbuild", "-P", "fbvbs_hypervisor.gpr"],

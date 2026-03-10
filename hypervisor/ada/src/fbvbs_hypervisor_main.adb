@@ -519,6 +519,14 @@ begin
 
     FBVBS.KSI.Initialize (Target_Set);
     FBVBS.KSI_Shadow.Initialize (Shadow_State);
+    FBVBS.KSI.Register_Tier_B_Object
+      (State                  => Target_Set,
+       Object_Id              => 16#11000#,
+       Guest_Physical_Address => 16#11000#,
+       Size                   => FBVBS.ABI.Page_Size,
+       Protection_Class       => FBVBS.ABI.KSI_Class_UCRED,
+       Status                 => Status);
+    pragma Assert (Status = FBVBS.ABI.Not_Found);
     FBVBS.KSI.Create_Target_Set
      (Target_Set,
       16#300000#,
@@ -535,6 +543,7 @@ begin
       Protection_Class       => FBVBS.ABI.KSI_Class_UCRED,
       Status                 => Status);
    pragma Assert (Status = FBVBS.ABI.OK);
+   pragma Assert (Target_Set.Objects (0).Target_Set_Id = Target_Set.Target_Set_Id);
     FBVBS.KSI.Register_Tier_B_Object
       (State                  => Target_Set,
        Object_Id              => 16#13000#,
@@ -1722,6 +1731,7 @@ begin
          Dispatch_Request.Caller_Sequence := 18;
          Dispatch_Request.Caller_Nonce := 16#B2#;
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         Dispatch_Target.Capability_Mask := 0;
          Dispatch_Request.Memory_Object_Id := 16#8800#;
          Dispatch_Request.Guest_Physical_Address := 16#3000#;
          Dispatch_Request.Size := 4096;
@@ -3469,6 +3479,68 @@ begin
 
         FBVBS.Memory.Release_Object (Memory_Object, Status);
         pragma Assert (Status = FBVBS.ABI.Resource_Busy);
+
+        declare
+           VM_Map_Partition : FBVBS.ABI.Partition_Descriptor :=
+             (In_Use             => True,
+              Partition_Id       => 16#56#,
+              Kind               => FBVBS.ABI.Partition_Guest_VM,
+              State              => FBVBS.ABI.Created,
+              Measurement_Epoch  => 0,
+              Service_Kind       => FBVBS.ABI.Service_None,
+              Memory_Limit_Bytes => 8192,
+              Capability_Mask    => 0,
+              Mapped_Bytes       => 0,
+              Last_Fault_Code    => 0,
+              Last_Source_Component => 0,
+              Last_Fault_Detail0 => 0,
+              Last_Fault_Detail1 => 0,
+              VM_Flags              => 0,
+              Assigned_Device_Count => 0,
+              Assigned_Devices      => (others => 0));
+        begin
+           FBVBS.Memory.Map_VM_Object
+             (Partition              => VM_Map_Partition,
+              Object                 => Memory_Object,
+              Memory_Object_Id       => 16#9000#,
+              Guest_Physical_Address => 16#5000#,
+              Size                   => 4096,
+              Permissions            => FBVBS.ABI.Memory_Permission_Read,
+              Status                 => Status);
+           pragma Assert (Status = FBVBS.ABI.OK);
+           pragma Assert (VM_Map_Partition.Mapped_Bytes = 4096);
+
+           VM_Map_Partition.State := FBVBS.ABI.Running;
+           FBVBS.Memory.Map_VM_Object
+             (Partition              => VM_Map_Partition,
+              Object                 => Memory_Object,
+              Memory_Object_Id       => 16#9000#,
+              Guest_Physical_Address => 16#6000#,
+              Size                   => 4096,
+              Permissions            => FBVBS.ABI.Memory_Permission_Read,
+              Status                 => Status);
+           pragma Assert (Status = FBVBS.ABI.Invalid_State);
+
+           VM_Map_Partition.State := FBVBS.ABI.Created;
+           Memory_Object.Object_Flags := FBVBS.ABI.Memory_Object_Flag_Private;
+           FBVBS.Memory.Map_VM_Object
+             (Partition              => VM_Map_Partition,
+              Object                 => Memory_Object,
+              Memory_Object_Id       => 16#9000#,
+              Guest_Physical_Address => 16#7000#,
+              Size                   => 4096,
+              Permissions            => FBVBS.ABI.Memory_Permission_Read,
+              Status                 => Status);
+           pragma Assert (Status = FBVBS.ABI.Permission_Denied);
+           Memory_Object.Object_Flags := FBVBS.ABI.Memory_Object_Flag_Guest_Memory;
+
+           FBVBS.Memory.Unmap_Object
+             (Partition => VM_Map_Partition,
+              Object    => Memory_Object,
+              Size      => 4096,
+              Status    => Status);
+           pragma Assert (Status = FBVBS.ABI.OK);
+        end;
 
         FBVBS.Memory.Set_Permissions
           (Partition   => Memory_Partition,

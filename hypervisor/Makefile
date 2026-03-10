@@ -4,37 +4,37 @@ LD ?= ld
 BUILD_DIR := build
 INCLUDES := -Iinclude -I../generated/bindings
 COMMON_WARNINGS := -Wall -Wextra -Werror -Wpedantic -Wconversion -Wsign-conversion -Wstrict-prototypes -Wmissing-prototypes -Wshadow -Wundef -std=c11
-COMMON_SOURCES := \
-	src/kernel.c \
-	src/partition.c \
-	src/command.c \
-	src/security.c \
-	src/log.c \
-	src/memory.c \
-	src/vm_policy.c \
-	src/vmx.c
+LEAF_SOURCES := src/vmx.c
+RETAINED_C_CHECK := python3 tools/check_retained_c_subset.py
+RETAINED_C_PROOF := python3 tools/prove_leaf_vmx_contracts.py
 
 HOST_CFLAGS := $(COMMON_WARNINGS) -O2 $(INCLUDES)
-BARE_CFLAGS := $(COMMON_WARNINGS) -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone $(INCLUDES)
 ANALYZER_CFLAGS := $(HOST_CFLAGS) -fanalyzer
-ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(COMMON_SOURCES))
+ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(LEAF_SOURCES))
 
-HOST_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/host_%.o,$(COMMON_SOURCES))
-BARE_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/bare_%.o,$(COMMON_SOURCES))
+HOST_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/host_%.o,$(LEAF_SOURCES))
 
-TEST_BIN := $(BUILD_DIR)/fbvbs_hypervisor_tests
-KERNEL_BIN := $(BUILD_DIR)/fbvbs_hypervisor.elf
-BOOT_OBJECT := $(BUILD_DIR)/boot.o
+TEST_BIN := $(BUILD_DIR)/fbvbs_leaf_boundary_tests
 GENERATED_HEADER := ../generated/bindings/fbvbs_abi_v1.h
 
-.PHONY: all clean test analyze
+.PHONY: all clean test analyze proof check-retained-c
 
-all: $(GENERATED_HEADER) $(KERNEL_BIN) $(TEST_BIN)
+all: $(GENERATED_HEADER) $(TEST_BIN)
 
 test: $(GENERATED_HEADER) $(TEST_BIN)
+	$(RETAINED_C_CHECK)
 	$(TEST_BIN)
+	$(RETAINED_C_PROOF)
 
 analyze: $(GENERATED_HEADER) $(ANALYZER_OBJECTS)
+	$(RETAINED_C_CHECK)
+
+proof: $(GENERATED_HEADER)
+	$(RETAINED_C_CHECK)
+	$(RETAINED_C_PROOF)
+
+check-retained-c: $(GENERATED_HEADER)
+	$(RETAINED_C_CHECK)
 
 clean:
 	rm -rf $(BUILD_DIR)
@@ -48,17 +48,8 @@ $(GENERATED_HEADER):
 $(BUILD_DIR)/host_%.o: src/%.c $(GENERATED_HEADER) | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/bare_%.o: src/%.c $(GENERATED_HEADER) | $(BUILD_DIR)
-	$(CC) $(BARE_CFLAGS) -c $< -o $@
-
 $(BUILD_DIR)/analyze_%.o: src/%.c $(GENERATED_HEADER) | $(BUILD_DIR)
 	$(CC) $(ANALYZER_CFLAGS) -c $< -o $@
 
-$(BOOT_OBJECT): src/boot.S | $(BUILD_DIR)
-	$(CC) -c -x assembler-with-cpp $< -o $@
-
-$(TEST_BIN): $(HOST_OBJECTS) tests/test_hypervisor.c
+$(TEST_BIN): $(HOST_OBJECTS) tests/test_leaf_boundary.c
 	$(CC) $(HOST_CFLAGS) $^ -o $@
-
-$(KERNEL_BIN): $(BARE_OBJECTS) $(BOOT_OBJECT) linker.ld
-	$(LD) -T linker.ld -o $@ $(BOOT_OBJECT) $(BARE_OBJECTS)

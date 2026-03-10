@@ -49,6 +49,12 @@ Run the retained-C warning and compiler static-analysis gate:
 make -C hypervisor analyze
 ```
 
+Run the retained-C bounded proof artifact:
+
+```bash
+make -C hypervisor proof
+```
+
 Build and run the Ada/SPARK hypervisor executable checks:
 
 ```bash
@@ -64,7 +70,7 @@ gprbuild -P hypervisor/ada/fbvbs_hypervisor.gpr
 )
 ```
 
-The Ada/SPARK implementation path is the primary acceptance target. Python in this repository is used for spec parsing/generation/validation tooling; it is not the hypervisor runtime itself. Any remaining C is temporary migration code outside the authoritative implementation path unless and until it satisfies the spec's explicit exception rules for MISRA C compliance, static analysis, and formal verification. The current repository-enforced C baseline includes warnings-as-errors plus a compiler `-fanalyzer` pass via `make -C hypervisor analyze`, while VM exit state transitions, ABI exit-code/length shaping, a selected hypercall-dispatch path, Ada-side memory/W^X plus unmap/shared-registration policy, selected KCI control calls (`KCI_VERIFY_MODULE`, `KCI_SET_WX`, `KCI_PIN_CR`, `KCI_INTERCEPT_MSR`), selected KSI/IKS/SKS crypto-service dispatch, partition create/destroy/status/quiesce/resume/fault-info control, audit mirror-info queries, `VM_GET_VCPU_STATUS`, `VM_SET_REGISTER`, `VM_GET_REGISTER`, KSI Tier B shadow-update sequencing, and selected diagnostic query modeling are now implemented authoritatively in Ada/SPARK.
+The Ada/SPARK implementation path is the primary acceptance target. Python in this repository is used for spec parsing/generation/validation tooling; it is not the hypervisor runtime itself. Any remaining C is temporary migration code outside the authoritative implementation path unless and until it satisfies the spec's explicit exception rules for MISRA C compliance, static analysis, and formal verification. The default repository-enforced C baseline is now the leaf-only `vmx.c` boundary plus its dedicated `include/fbvbs_leaf_vmx.h` interface, checked with warnings-as-errors, a compiler `-fanalyzer` pass via `make -C hypervisor analyze`, a retained-C subset gate, and a bounded proof artifact via `make -C hypervisor proof`, while VM exit state transitions, ABI exit-code/length shaping, a selected hypercall-dispatch path, Ada-side memory/W^X plus unmap/shared-registration policy, selected KCI control calls (`KCI_VERIFY_MODULE`, `KCI_SET_WX`, `KCI_PIN_CR`, `KCI_INTERCEPT_MSR`), selected KSI/IKS/SKS crypto-service dispatch, partition create/destroy/status/quiesce/resume/fault-info control, audit mirror-info queries, `VM_GET_VCPU_STATUS`, `VM_SET_REGISTER`, `VM_GET_REGISTER`, KSI Tier B shadow-update sequencing, and selected diagnostic query modeling are now implemented authoritatively in Ada/SPARK.
 
 ## Notes
 

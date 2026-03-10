@@ -1,11 +1,23 @@
-#include "fbvbs_hypervisor.h"
+#include <stddef.h>
+#include <stdint.h>
+
+#include "fbvbs_leaf_vmx.h"
+
+static void fbvbs_leaf_zero_memory(void *buffer, size_t length) {
+    uint8_t *bytes = (uint8_t *)buffer;
+    size_t index;
+
+    for (index = 0U; index < length; ++index) {
+        bytes[index] = 0U;
+    }
+}
 
 int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     if (caps == NULL) {
         return INVALID_PARAMETER;
     }
 
-    fbvbs_zero_memory(caps, sizeof(*caps));
+    fbvbs_leaf_zero_memory(caps, sizeof(*caps));
 
 #if defined(__x86_64__) || defined(_M_X64)
     caps->vmx_supported = 1U;
@@ -38,7 +50,7 @@ int fbvbs_vmx_leaf_run_vcpu(
     if (intercepted_msr_count != 0U && intercepted_msrs == NULL) {
         return INVALID_PARAMETER;
     }
-    fbvbs_zero_memory(leaf_exit, sizeof(*leaf_exit));
+    fbvbs_leaf_zero_memory(leaf_exit, sizeof(*leaf_exit));
 
     if (vcpu->pending_interrupt_delivery != 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;

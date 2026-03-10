@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "fbvbs_abi.h"
+#include "fbvbs_leaf_vmx.h"
 
 struct fbvbs_trap_registers {
     uint64_t rax;
@@ -14,10 +15,6 @@ struct fbvbs_trap_registers {
     uint64_t rdx;
 };
 
-#define FBVBS_SYNTHETIC_EXIT_RIP_PIO 0x00000000FFF00001ULL
-#define FBVBS_SYNTHETIC_EXIT_RIP_MMIO 0x00000000FFF00002ULL
-#define FBVBS_SYNTHETIC_EXIT_RIP_SHUTDOWN 0x00000000FFF00003ULL
-#define FBVBS_SYNTHETIC_EXIT_RIP_FAULT 0x00000000FFF00004ULL
 #define FBVBS_MAX_HOST_CALLSITE_ENTRIES 4U
 #define FBVBS_MAX_HOST_CALLSITE_TABLES 2U
 #define FBVBS_MAX_MANIFEST_PROFILES 10U
@@ -25,19 +22,6 @@ struct fbvbs_trap_registers {
 #define FBVBS_MANIFEST_COMPONENT_GUEST_BOOT 2U
 #define FBVBS_MANIFEST_COMPONENT_FREEBSD_KERNEL 3U
 #define FBVBS_MANIFEST_COMPONENT_FREEBSD_MODULE 4U
-
-struct fbvbs_vcpu {
-    uint32_t state;
-    uint32_t pending_interrupt_vector;
-    uint64_t rip;
-    uint64_t rsp;
-    uint64_t rflags;
-    uint64_t cr0;
-    uint64_t cr3;
-    uint64_t cr4;
-    uint32_t pending_interrupt_delivery;
-    uint32_t reserved0;
-};
 
 struct fbvbs_memory_mapping {
     bool active;
@@ -129,26 +113,6 @@ struct fbvbs_manifest_profile {
     uint64_t initial_sp;
     uint64_t load_base;
     uint64_t allowed_callsite_offsets[FBVBS_MAX_HOST_CALLSITE_ENTRIES];
-};
-
-struct fbvbs_vmx_capabilities {
-    uint32_t vmx_supported;
-    uint32_t hlat_available;
-    uint32_t iommu_available;
-    uint32_t mbec_available;
-    uint32_t cet_available;
-    uint32_t aesni_available;
-};
-
-struct fbvbs_vmx_leaf_exit {
-    uint32_t exit_reason;
-    uint32_t cr_number;
-    uint32_t msr_address;
-    uint16_t port;
-    uint8_t access_size;
-    uint8_t is_write;
-    uint64_t value;
-    uint64_t guest_physical_address;
 };
 
 struct fbvbs_memory_object {
@@ -368,17 +332,6 @@ int fbvbs_ingest_boot_catalog(
     uint32_t profile_count
 );
 
-int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps);
-int fbvbs_vmx_leaf_run_vcpu(
-    const struct fbvbs_vmx_capabilities *caps,
-    const struct fbvbs_vcpu *vcpu,
-    uint64_t pinned_cr0_mask,
-    uint64_t pinned_cr4_mask,
-    const uint32_t *intercepted_msrs,
-    uint32_t intercepted_msr_count,
-    uint64_t mapped_bytes,
-    struct fbvbs_vmx_leaf_exit *leaf_exit
-);
 int fbvbs_vmx_run_vcpu(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition,
