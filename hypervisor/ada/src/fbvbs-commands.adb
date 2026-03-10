@@ -23,10 +23,7 @@ is
    begin
       if State = FBVBS.ABI.Command_Executing then
          Status := FBVBS.ABI.Resource_Busy;
-      elsif State /= FBVBS.ABI.Command_Ready
-        and then State /= FBVBS.ABI.Command_Completed
-        and then State /= FBVBS.ABI.Command_Failed
-      then
+      elsif State /= FBVBS.ABI.Command_Ready then
           Status := FBVBS.ABI.Invalid_Parameter;
       elsif Actual_Output_Length /= 0 then
          Status := FBVBS.ABI.Invalid_Parameter;

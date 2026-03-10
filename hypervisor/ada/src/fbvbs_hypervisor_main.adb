@@ -103,6 +103,59 @@ procedure FBVBS_Hypervisor_Main is
      (Object_Id => 16#3700#, Object_Kind => FBVBS.ABI.Artifact_Module, Related_Index => 18);
    VMM_Module_Manifest : constant FBVBS.ABI.Artifact_Catalog_Entry_Record :=
      (Object_Id => 16#2800#, Object_Kind => FBVBS.ABI.Artifact_Manifest, Related_Index => 17);
+
+   procedure Invoke_Dispatch
+     (Tracker             : in out FBVBS.ABI.Command_Tracker_Record;
+      Command_State       : in out FBVBS.ABI.Command_State;
+      Caller              : in out FBVBS.ABI.Partition_Descriptor;
+      Target_Partition    : in out FBVBS.ABI.Partition_Descriptor;
+      Host_Profile        : FBVBS.ABI.Host_Callsite_Profile_Record;
+      Caps                : FBVBS.ABI.Platform_Capabilities;
+      Domain              : FBVBS.ABI.IOMMU_Domain_Record;
+      Artifact            : FBVBS.ABI.Artifact_Catalog_Entry_Record;
+      Log_State           : in out FBVBS.ABI.Log_State_Record;
+      Verify_State        : in out FBVBS.ABI.Verification_Record;
+      Manifest_State      : in out FBVBS.ABI.Manifest_Set_Record;
+      VCPU                : in out FBVBS.ABI.VCPU_Record;
+      Memory_Object       : in out FBVBS.ABI.Memory_Object_Record;
+      Next_Object_Id      : in out FBVBS.ABI.Handle;
+      Next_Partition_Id   : in out FBVBS.ABI.Handle;
+      Target_Set_State    : in out FBVBS.ABI.Target_Set_Record;
+      Key_State           : in out FBVBS.ABI.Key_Record;
+      Dek_State           : in out FBVBS.ABI.Dek_Record;
+      Next_Target_Set_Id  : in out FBVBS.ABI.Handle;
+      Next_Key_Handle     : in out FBVBS.ABI.Handle;
+      Next_Dek_Handle     : in out FBVBS.ABI.Handle;
+      Request             : FBVBS.ABI.Dispatch_Request_Record;
+      Result              : out FBVBS.ABI.Dispatch_Result_Record)
+   is
+   begin
+      Command_State := FBVBS.ABI.Command_Ready;
+      FBVBS.Hypercall_Dispatcher.Dispatch
+        (Tracker          => Tracker,
+         Command_State    => Command_State,
+         Caller           => Caller,
+         Target_Partition => Target_Partition,
+         Host_Profile     => Host_Profile,
+         Caps             => Caps,
+         Domain           => Domain,
+         Artifact         => Artifact,
+         Log_State        => Log_State,
+         Verify_State     => Verify_State,
+         Manifest_State   => Manifest_State,
+         VCPU             => VCPU,
+         Memory_Object    => Memory_Object,
+         Next_Object_Id   => Next_Object_Id,
+         Next_Partition_Id => Next_Partition_Id,
+         Target_Set_State => Target_Set_State,
+         Key_State        => Key_State,
+         Dek_State        => Dek_State,
+         Next_Target_Set_Id => Next_Target_Set_Id,
+         Next_Key_Handle    => Next_Key_Handle,
+         Next_Dek_Handle    => Next_Dek_Handle,
+         Request          => Request,
+         Result           => Result);
+   end Invoke_Dispatch;
 begin
     FBVBS.Partitions.Initialize (Host_Partition);
     FBVBS.Partitions.Bootstrap_FreeBSD_Host (Host_Partition, Status);
@@ -780,7 +833,9 @@ begin
    pragma Assert (Status = FBVBS.ABI.OK);
    FBVBS.Commands.Finish_Dispatch (Command_State, FBVBS.ABI.OK, 0);
    pragma Assert (Command_State = FBVBS.ABI.Command_Completed);
-    Command_State := FBVBS.ABI.Command_Ready;
+   FBVBS.Commands.Begin_Dispatch (Command_Tracker, Command_State, 0, 2, 16#AB#, Status);
+   pragma Assert (Status = FBVBS.ABI.Invalid_Parameter);
+   Command_State := FBVBS.ABI.Command_Ready;
     FBVBS.Commands.Begin_Dispatch (Command_Tracker, Command_State, 0, 1, 16#BB#, Status);
     pragma Assert (Status = FBVBS.ABI.Replay_Detected);
      FBVBS.Commands.Validate_Separate_Output
@@ -801,6 +856,153 @@ begin
         Required_Length           => 8,
         Status                    => Status);
      pragma Assert (Status = FBVBS.ABI.OK);
+
+     declare
+        Reject_Tracker : FBVBS.ABI.Command_Tracker_Record;
+        Reject_State   : FBVBS.ABI.Command_State := FBVBS.ABI.Command_Ready;
+        Reject_Target  : FBVBS.ABI.Partition_Descriptor;
+        Reject_Caller  : FBVBS.ABI.Partition_Descriptor;
+        Reject_Log     : FBVBS.ABI.Log_State_Record;
+        Reject_Verify  : FBVBS.ABI.Verification_Record;
+        Reject_Manifest : FBVBS.ABI.Manifest_Set_Record;
+        Reject_VCPU    : FBVBS.ABI.VCPU_Record;
+        Reject_Memory  : FBVBS.ABI.Memory_Object_Record;
+        Reject_Domain  : FBVBS.ABI.IOMMU_Domain_Record :=
+          (In_Use => False, Domain_Id => 0, Owner_Partition_Id => 0, Attached_Device_Count => 0);
+        Reject_Artifact : FBVBS.ABI.Artifact_Catalog_Entry_Record :=
+          (Object_Id => 0, Object_Kind => FBVBS.ABI.Artifact_None, Related_Index => 0);
+        Reject_Target_Set_State : FBVBS.ABI.Target_Set_Record;
+        Reject_Key_State : FBVBS.ABI.Key_Record;
+        Reject_Dek_State : FBVBS.ABI.Dek_Record;
+        Reject_Next_Object_Id : FBVBS.ABI.Handle := 1;
+        Reject_Next_Partition_Id : FBVBS.ABI.Handle := 16#6100#;
+        Reject_Next_Target_Set_Id : FBVBS.ABI.Handle := 1;
+        Reject_Next_Key_Handle : FBVBS.ABI.Handle := 1;
+        Reject_Next_Dek_Handle : FBVBS.ABI.Handle := 1;
+        Reject_Request : FBVBS.ABI.Dispatch_Request_Record;
+        Reject_Result  : FBVBS.ABI.Dispatch_Result_Record;
+     begin
+        FBVBS.Commands.Initialize (Reject_Tracker);
+        FBVBS.KCI.Initialize (Reject_Verify);
+        FBVBS.UVS.Initialize (Reject_Manifest);
+        FBVBS.Partitions.Initialize (Reject_Target);
+        FBVBS.Partitions.Create (Reject_Target, 16#60#, Status);
+        pragma Assert (Status = FBVBS.ABI.OK);
+        Reject_Target.Capability_Mask := FBVBS.ABI.Capability_Memory_Set_Permission;
+        Reject_Caller :=
+          (In_Use             => True,
+           Partition_Id       => 16#61#,
+           Kind               => FBVBS.ABI.Partition_Trusted_Service,
+           State              => FBVBS.ABI.Runnable,
+           Measurement_Epoch  => 1,
+           Service_Kind       => FBVBS.ABI.Service_UVS,
+           Memory_Limit_Bytes => 0,
+           Capability_Mask    => 0,
+           Mapped_Bytes       => 0,
+           Last_Fault_Code    => 0,
+           Last_Source_Component => 0,
+           Last_Fault_Detail0 => 0,
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
+        FBVBS.VMX.Initialize (Reject_VCPU);
+        FBVBS.Memory.Initialize_Object (Reject_Memory);
+        FBVBS.KSI.Initialize (Reject_Target_Set_State);
+        FBVBS.IKS.Initialize (Reject_Key_State);
+        FBVBS.SKS.Initialize (Reject_Dek_State);
+
+        Reject_Request := (others => <>);
+        Reject_Request.Call_Id := FBVBS.ABI.Call_Memory_Set_Permission;
+        Reject_Request.Caller_Sequence := 1;
+        Reject_Request.Caller_Nonce := 16#D1#;
+        Reject_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
+        Reject_Request.Permissions := FBVBS.ABI.Memory_Permission_Read;
+        Invoke_Dispatch
+          (Reject_Tracker,
+           Reject_State,
+           Host_Partition,
+           Reject_Target,
+           FBVBS_Host_Profile,
+           Caps,
+           Reject_Domain,
+           Reject_Artifact,
+           Reject_Log,
+           Reject_Verify,
+           Reject_Manifest,
+           Reject_VCPU,
+           Reject_Memory,
+           Reject_Next_Object_Id,
+           Reject_Next_Partition_Id,
+           Reject_Target_Set_State,
+           Reject_Key_State,
+           Reject_Dek_State,
+           Reject_Next_Target_Set_Id,
+           Reject_Next_Key_Handle,
+           Reject_Next_Dek_Handle,
+           Reject_Request,
+           Reject_Result);
+        pragma Assert (Reject_Result.Hypercall_Status = FBVBS.ABI.Invalid_Caller);
+
+        Reject_Request.Caller_Sequence := 2;
+        Reject_Request.Caller_Nonce := 16#D2#;
+        Invoke_Dispatch
+          (Reject_Tracker,
+           Reject_State,
+           Reject_Caller,
+           Reject_Target,
+           FBVBS_Host_Profile,
+           Caps,
+           Reject_Domain,
+           Reject_Artifact,
+           Reject_Log,
+           Reject_Verify,
+           Reject_Manifest,
+           Reject_VCPU,
+           Reject_Memory,
+           Reject_Next_Object_Id,
+           Reject_Next_Partition_Id,
+           Reject_Target_Set_State,
+           Reject_Key_State,
+           Reject_Dek_State,
+           Reject_Next_Target_Set_Id,
+           Reject_Next_Key_Handle,
+           Reject_Next_Dek_Handle,
+           Reject_Request,
+           Reject_Result);
+        pragma Assert (Reject_Result.Hypercall_Status = FBVBS.ABI.OK);
+
+        Reject_Request := (others => <>);
+        Reject_Request.Call_Id := 16#FFFF#;
+        Reject_Request.Caller_Sequence := 3;
+        Reject_Request.Caller_Nonce := 16#D3#;
+        Reject_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
+        Invoke_Dispatch
+          (Reject_Tracker,
+           Reject_State,
+           Host_Partition,
+           Reject_Target,
+           FBVBS_Host_Profile,
+           Caps,
+           Reject_Domain,
+           Reject_Artifact,
+           Reject_Log,
+           Reject_Verify,
+           Reject_Manifest,
+           Reject_VCPU,
+           Reject_Memory,
+           Reject_Next_Object_Id,
+           Reject_Next_Partition_Id,
+           Reject_Target_Set_State,
+           Reject_Key_State,
+           Reject_Dek_State,
+           Reject_Next_Target_Set_Id,
+           Reject_Next_Key_Handle,
+           Reject_Next_Dek_Handle,
+           Reject_Request,
+           Reject_Result);
+        pragma Assert (Reject_Result.Hypercall_Status = FBVBS.ABI.Not_Supported_On_Platform);
+     end;
 
      declare
         Dispatch_Tracker  : FBVBS.ABI.Command_Tracker_Record;
@@ -936,7 +1138,7 @@ begin
         Dispatch_Request.Dependencies_Satisfied := True;
         Dispatch_Request.Snapshot_Consistent := True;
         Dispatch_Request.Freshness_Valid := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Tracker          => Dispatch_Tracker,
            Command_State    => Dispatch_State,
            Caller           => Host_Partition,
@@ -974,7 +1176,7 @@ begin
         Dispatch_Request.Manifest_Object_Id := 16#2000#;
         Dispatch_Request.Tail_Zero := True;
         Dispatch_Request.Hash_Matches := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1007,7 +1209,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#A3#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
         Dispatch_Request.Approval_Present := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1042,7 +1244,7 @@ begin
         Dispatch_Request.Module_Object_Id := 16#1000#;
         Dispatch_Request.Manifest_Object_Id := 16#2000#;
         Dispatch_Request.Generation := 1;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1076,7 +1278,7 @@ begin
         Dispatch_Request.Module_Object_Id := 16#1000#;
         Dispatch_Request.Permissions :=
           FBVBS.ABI.Memory_Permission_Read or FBVBS.ABI.Memory_Permission_Execute;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_Service_Caller,
@@ -1108,7 +1310,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#A6#;
         Dispatch_Request.Pin_Register := 0;
         Dispatch_Request.Pin_Mask := 16#8001_0033#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_Service_Caller,
@@ -1141,7 +1343,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#A7#;
         Dispatch_Request.MSR_Address := FBVBS.ABI.KCI_MSR_EFER;
         Dispatch_Request.Enable := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_Service_Caller,
@@ -1179,7 +1381,7 @@ begin
          Dispatch_Request.Caller_Nonce := 16#A8#;
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.Interrupt_Vector := 48;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1214,7 +1416,7 @@ begin
          Dispatch_Request.Has_HLAT := True;
         Dispatch_Request.Mapped_Bytes := 4096;
         Dispatch_Request.VCPU_Id := 0;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1247,7 +1449,7 @@ begin
         Dispatch_Request.Caller_Sequence := 10;
         Dispatch_Request.Caller_Nonce := 16#AA#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1281,7 +1483,7 @@ begin
         Dispatch_Request.Caller_Sequence := 11;
         Dispatch_Request.Caller_Nonce := 16#AB#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1314,7 +1516,7 @@ begin
         Dispatch_Request.Caller_Sequence := 12;
         Dispatch_Request.Caller_Nonce := 16#AC#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1347,7 +1549,7 @@ begin
         Dispatch_Request.Caller_Sequence := 13;
         Dispatch_Request.Caller_Nonce := 16#AD#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1384,7 +1586,7 @@ begin
         Dispatch_Request.Device_Segment := 0;
         Dispatch_Request.Device_Bus := 29;
         Dispatch_Request.Device_Slot_Function := 1;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1420,7 +1622,7 @@ begin
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
         Dispatch_Request.Size := 4096;
         Dispatch_Request.Object_Flags := FBVBS.ABI.Memory_Object_Flag_Guest_Memory;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1457,7 +1659,7 @@ begin
          Dispatch_Request.Size := 4096;
          Dispatch_Request.Permissions :=
            FBVBS.ABI.Memory_Permission_Read or FBVBS.ABI.Memory_Permission_Execute;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1489,7 +1691,7 @@ begin
         Dispatch_Request.Caller_Sequence := 17;
         Dispatch_Request.Caller_Nonce := 16#B1#;
         Dispatch_Request.Permissions := FBVBS.ABI.Memory_Permission_Read or FBVBS.ABI.Memory_Permission_Execute;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_Service_Caller,
@@ -1524,7 +1726,7 @@ begin
          Dispatch_Request.Guest_Physical_Address := 16#3000#;
          Dispatch_Request.Size := 4096;
          Dispatch_Request.Permissions := FBVBS.ABI.Memory_Permission_Read;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1556,7 +1758,7 @@ begin
         Dispatch_Request.Caller_Sequence := 19;
         Dispatch_Request.Caller_Nonce := 16#B3#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1589,7 +1791,7 @@ begin
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
         Dispatch_Request.Peer_Partition_Id := 0;
         Dispatch_Request.Permissions := FBVBS.ABI.Memory_Permission_Read;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1621,7 +1823,7 @@ begin
         Dispatch_Request.Caller_Sequence := 21;
         Dispatch_Request.Caller_Nonce := 16#B5#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1654,7 +1856,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#B6#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
         Dispatch_Request.Size := 4096;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1687,7 +1889,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#B7#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
         Dispatch_Request.Size := 4096;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1719,7 +1921,7 @@ begin
         Dispatch_Request.Caller_Sequence := 24;
         Dispatch_Request.Caller_Nonce := 16#B8#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1757,7 +1959,7 @@ begin
         Dispatch_Request.Caller_Sequence := 25;
         Dispatch_Request.Caller_Nonce := 16#B9#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1789,7 +1991,7 @@ begin
         Dispatch_Request.Caller_Sequence := 26;
         Dispatch_Request.Caller_Nonce := 16#BA#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1821,7 +2023,7 @@ begin
         Dispatch_Request.Caller_Sequence := 27;
         Dispatch_Request.Caller_Nonce := 16#BB#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1855,7 +2057,7 @@ begin
         Dispatch_Request.Caller_Sequence := 28;
         Dispatch_Request.Caller_Nonce := 16#BC#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1887,7 +2089,7 @@ begin
         Dispatch_Request.Caller_Sequence := 29;
         Dispatch_Request.Caller_Nonce := 16#BD#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1919,7 +2121,7 @@ begin
         Dispatch_Request.Caller_Sequence := 30;
         Dispatch_Request.Caller_Nonce := 16#BE#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1951,7 +2153,7 @@ begin
         Dispatch_Request.Caller_Sequence := 31;
         Dispatch_Request.Caller_Nonce := 16#BF#;
         Dispatch_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -1990,7 +2192,7 @@ begin
          Dispatch_Request.Caller_Nonce := 16#C0#;
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.VCPU_Id := 0;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -2025,7 +2227,7 @@ begin
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.Register_Id := FBVBS.ABI.VM_Reg_RIP;
         Dispatch_Request.Register_Value := FBVBS.ABI.Synthetic_Exit_RIP_MMIO;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -2058,7 +2260,7 @@ begin
          Dispatch_Request.Caller_Nonce := 16#C2#;
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.Register_Id := FBVBS.ABI.VM_Reg_RIP;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -2092,7 +2294,7 @@ begin
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.Register_Id := FBVBS.ABI.VM_Reg_CR3;
         Dispatch_Request.Register_Value := 16#1234#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -2124,7 +2326,7 @@ begin
          Dispatch_Request.Caller_Nonce := 16#C4#;
          Dispatch_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          Dispatch_Request.Register_Id := FBVBS.ABI.VM_Reg_CR3;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Host_Partition,
@@ -2158,7 +2360,7 @@ begin
          Dispatch_Request.Target_Count := 2;
          Dispatch_Request.First_Target_Object_Id := 16#11000#;
          Dispatch_Request.Second_Target_Object_Id := 16#13000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2193,7 +2395,7 @@ begin
          Dispatch_Request.Guest_Physical_Address := 16#11000#;
          Dispatch_Request.Size := FBVBS.ABI.Page_Size;
          Dispatch_Request.Protection_Class := FBVBS.ABI.KSI_Class_UCRED;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2227,7 +2429,7 @@ begin
          Dispatch_Request.Guest_Physical_Address := 16#13000#;
          Dispatch_Request.Size := FBVBS.ABI.Page_Size;
          Dispatch_Request.Protection_Class := FBVBS.ABI.KSI_Class_UCRED;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2259,7 +2461,7 @@ begin
          Dispatch_Request.Caller_Nonce := 16#C8#;
          Dispatch_Request.Object_Id := 16#11000#;
          Dispatch_Request.Patch_Length := 64;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2292,7 +2494,7 @@ begin
          Dispatch_Request.Object_Id := 16#12000#;
          Dispatch_Request.Guest_Physical_Address := 16#12000#;
          Dispatch_Request.Size := FBVBS.ABI.Page_Size;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2324,7 +2526,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#CA#;
          Dispatch_Request.Target_Set_Id := 16#9900#;
          Dispatch_Request.Pointer_Object_Id := 16#12000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2358,7 +2560,7 @@ begin
          Dispatch_Request.Guest_Physical_Address := 16#14000#;
          Dispatch_Request.Size := FBVBS.ABI.Page_Size;
          Dispatch_Request.Protection_Class := FBVBS.ABI.KSI_Class_Prison;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2392,7 +2594,7 @@ begin
         Dispatch_Request.Requested_GID := 1000;
         Dispatch_Request.Prison_Object_Id := 16#14000#;
         Dispatch_Request.Template_Ucred_Object_Id := 16#11000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2427,7 +2629,7 @@ begin
         Dispatch_Request.Operation_Class := FBVBS.ABI.KSI_Operation_Setuid_Family;
         Dispatch_Request.Valid_Mask := FBVBS.ABI.KSI_Valid_EUID;
         Dispatch_Request.Caller_Ucred_Object_Id := Dispatch_Ucred_Object_Id;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2461,7 +2663,7 @@ begin
          Dispatch_Request.Object_Id := 16#11000#;
          Dispatch_Request.New_Object_Id := 16#13000#;
          Dispatch_Request.Pointer_Object_Id := 16#12000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2493,7 +2695,7 @@ begin
         Dispatch_Request.Caller_Sequence := 47;
         Dispatch_Request.Caller_Nonce := 16#CF#;
         Dispatch_Request.Object_Id := Dispatch_Ucred_Object_Id;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_KSI_Caller,
@@ -2526,7 +2728,7 @@ begin
         Dispatch_Request.Requested_Key_Kind := FBVBS.ABI.Ed25519;
         Dispatch_Request.Allowed_Ops := FBVBS.ABI.IKS_Op_Sign or FBVBS.ABI.IKS_Op_Derive;
         Dispatch_Request.Key_Length := 32;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2558,7 +2760,7 @@ begin
         Dispatch_Request.Caller_Sequence := 49;
         Dispatch_Request.Caller_Nonce := 16#CC#;
         Dispatch_Request.Key_Handle := 16#A000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2590,7 +2792,7 @@ begin
         Dispatch_Request.Caller_Sequence := 50;
         Dispatch_Request.Caller_Nonce := 16#CD#;
         Dispatch_Request.Key_Handle := 16#A000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2623,7 +2825,7 @@ begin
         Dispatch_Request.Requested_Key_Kind := FBVBS.ABI.X25519;
         Dispatch_Request.Allowed_Ops := FBVBS.ABI.IKS_Op_Key_Exchange or FBVBS.ABI.IKS_Op_Derive;
         Dispatch_Request.Key_Length := 32;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2655,7 +2857,7 @@ begin
         Dispatch_Request.Caller_Sequence := 52;
         Dispatch_Request.Caller_Nonce := 16#CF#;
         Dispatch_Request.Key_Handle := 16#A001#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2687,7 +2889,7 @@ begin
         Dispatch_Request.Caller_Sequence := 53;
         Dispatch_Request.Caller_Nonce := 16#D0#;
         Dispatch_Request.Key_Handle := 16#A001#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_IKS_Caller,
@@ -2720,7 +2922,7 @@ begin
         Dispatch_Request.Caller_Nonce := 16#D1#;
         Dispatch_Request.Volume_Id := 1;
         Dispatch_Request.Key_Length := 32;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_SKS_Caller,
@@ -2754,7 +2956,7 @@ begin
         Dispatch_Request.Dek_Handle := 16#B000#;
         Dispatch_Request.Descriptor_Count := 2;
         Dispatch_Request.Page_Aligned := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_SKS_Caller,
@@ -2788,7 +2990,7 @@ begin
         Dispatch_Request.Dek_Handle := 16#B000#;
         Dispatch_Request.Descriptor_Count := 2;
         Dispatch_Request.Page_Aligned := True;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_SKS_Caller,
@@ -2820,7 +3022,7 @@ begin
         Dispatch_Request.Caller_Sequence := 57;
         Dispatch_Request.Caller_Nonce := 16#D4#;
         Dispatch_Request.Dek_Handle := 16#B000#;
-        FBVBS.Hypercall_Dispatcher.Dispatch
+        Invoke_Dispatch
           (Dispatch_Tracker,
            Dispatch_State,
            Dispatch_SKS_Caller,
@@ -2896,7 +3098,7 @@ begin
          VM_Request.Requested_VCPU_Count := 2;
          VM_Request.Requested_Memory_Limit := FBVBS.ABI.Page_Size * 4;
          VM_Request.VM_Flags := 0;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (VM_Tracker, VM_State, VM_Caller, VM_Target,
             VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
             VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
@@ -2915,7 +3117,7 @@ begin
          VM_Request.Caller_Nonce := 16#02#;
          VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          VM_Request.Device_Id := 16#D100#;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (VM_Tracker, VM_State, VM_Caller, VM_Target,
             VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
             VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
@@ -2933,7 +3135,7 @@ begin
          VM_Request.Caller_Nonce := 16#03#;
          VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          VM_Request.Device_Id := 16#D100#;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (VM_Tracker, VM_State, VM_Caller, VM_Target,
             VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
             VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
@@ -2950,7 +3152,7 @@ begin
          VM_Request.Caller_Nonce := 16#04#;
          VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
          VM_Request.Device_Id := 16#D100#;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (VM_Tracker, VM_State, VM_Caller, VM_Target,
             VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
             VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
@@ -2967,7 +3169,7 @@ begin
          VM_Request.Caller_Sequence := 5;
          VM_Request.Caller_Nonce := 16#05#;
          VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (VM_Tracker, VM_State, VM_Caller, VM_Target,
             VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
             VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
@@ -3037,7 +3239,7 @@ begin
          Lifecycle_Request.Requested_Memory_Limit := 16384;
          Lifecycle_Request.Requested_Capability_Mask := FBVBS.ABI.Capability_Memory_Map;
          Lifecycle_Request.Image_Object_Id := 16#1234#;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (Lifecycle_Tracker,
             Lifecycle_State,
             Lifecycle_Caller,
@@ -3078,7 +3280,7 @@ begin
          Lifecycle_Request.Requested_Memory_Limit := 4096;
          Lifecycle_Request.Requested_Capability_Mask := 0;
          Lifecycle_Request.Image_Object_Id := 16#2345#;
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (Lifecycle_Tracker,
             Lifecycle_State,
             Lifecycle_Caller,
@@ -3110,7 +3312,7 @@ begin
          Lifecycle_Request.Caller_Sequence := 3;
          Lifecycle_Request.Caller_Nonce := 16#E3#;
          Lifecycle_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (Lifecycle_Tracker,
             Lifecycle_State,
             Lifecycle_Caller,
@@ -3142,7 +3344,7 @@ begin
          Lifecycle_Request.Caller_Sequence := 4;
          Lifecycle_Request.Caller_Nonce := 16#E4#;
          Lifecycle_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (Lifecycle_Tracker,
             Lifecycle_State,
             Lifecycle_Caller,
@@ -3191,7 +3393,7 @@ begin
          Lifecycle_Request.Caller_Sequence := 5;
          Lifecycle_Request.Caller_Nonce := 16#E5#;
          Lifecycle_Request.Observed_RIP := FBVBS.ABI.Primary_Callsite (FBVBS_Host_Profile);
-         FBVBS.Hypercall_Dispatcher.Dispatch
+         Invoke_Dispatch
            (Lifecycle_Tracker,
             Lifecycle_State,
             Lifecycle_Caller,

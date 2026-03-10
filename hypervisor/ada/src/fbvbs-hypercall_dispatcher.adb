@@ -389,8 +389,11 @@ is
                end if;
 
             when FBVBS.ABI.Call_Memory_Set_Permission =>
-               FBVBS.Commands.Validate_Caller (Caller, False, FBVBS.ABI.Service_KCI, Status);
-               if Status = FBVBS.ABI.OK then
+               if not Caller.In_Use
+                 or else Caller.Kind /= FBVBS.ABI.Partition_Trusted_Service
+               then
+                  Status := FBVBS.ABI.Invalid_Caller;
+               else
                   FBVBS.Memory.Set_Permissions
                     (Partition   => Target_Partition,
                      Permissions => Request.Permissions,
@@ -895,7 +898,7 @@ is
                end if;
 
             when others =>
-               Status := FBVBS.ABI.Invalid_Parameter;
+               Status := FBVBS.ABI.Not_Supported_On_Platform;
          end case;
 
          Result.Hypercall_Status := Status;
