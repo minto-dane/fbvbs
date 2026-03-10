@@ -17,15 +17,21 @@ package body FBVBS.Hypercall_Dispatcher
 is
    use type FBVBS.ABI.Handle;
    use type FBVBS.ABI.Partition_Kind;
+   use type FBVBS.ABI.Partition_State;
    use type FBVBS.ABI.Status_Code;
    use type FBVBS.ABI.U32;
+   use type FBVBS.ABI.VCPU_State;
 
    function Is_VM_Call (Call_Id : FBVBS.ABI.U32) return Boolean is
-     (Call_Id = FBVBS.ABI.Call_VM_Run
+     (Call_Id = FBVBS.ABI.Call_VM_Create
+      or else Call_Id = FBVBS.ABI.Call_VM_Destroy
+      or else Call_Id = FBVBS.ABI.Call_VM_Run
       or else Call_Id = FBVBS.ABI.Call_VM_Set_Register
       or else Call_Id = FBVBS.ABI.Call_VM_Get_Register
       or else Call_Id = FBVBS.ABI.Call_VM_Map_Memory
       or else Call_Id = FBVBS.ABI.Call_VM_Inject_Interrupt
+      or else Call_Id = FBVBS.ABI.Call_VM_Assign_Device
+      or else Call_Id = FBVBS.ABI.Call_VM_Release_Device
       or else Call_Id = FBVBS.ABI.Call_VM_Get_VCPU_Status);
 
    procedure Dispatch
@@ -305,17 +311,71 @@ is
                       Status                 => Status);
                 end if;
 
+            when FBVBS.ABI.Call_VM_Create =>
+               FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
+               if Status = FBVBS.ABI.OK then
+                  if not Caps.Has_HLAT then
+                     Status := FBVBS.ABI.Not_Supported_On_Platform;
+                  elsif Request.Requested_Kind /= FBVBS.ABI.Partition_None
+                    and then Request.Requested_Kind /= FBVBS.ABI.Partition_Guest_VM
+                  then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     FBVBS.Partitions.Create_VM
+                       (Partition          => Target_Partition,
+                        Partition_Id       => FBVBS.ABI.U64 (Next_Partition_Id),
+                        VCPU_Count         => Request.Requested_VCPU_Count,
+                        Memory_Limit_Bytes => Request.Requested_Memory_Limit,
+                        VM_Flags           => Request.VM_Flags,
+                        Status             => Status);
+                     if Status = FBVBS.ABI.OK then
+                        Result.Partition_Id := Next_Partition_Id;
+                        Result.Actual_Output_Length := 8;
+                        Next_Partition_Id := Next_Partition_Id + 1;
+                     end if;
+                  end if;
+               end if;
+
+            when FBVBS.ABI.Call_VM_Destroy =>
+               FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
+               if Status = FBVBS.ABI.OK then
+                  FBVBS.Partitions.Destroy_VM (Target_Partition, Status);
+               end if;
+
+            when FBVBS.ABI.Call_VM_Assign_Device =>
+               FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
+               if Status = FBVBS.ABI.OK then
+                  FBVBS.Partitions.Assign_Device
+                    (Partition => Target_Partition,
+                     Device_Id => Request.Device_Id,
+                     Has_IOMMU => Caps.Has_IOMMU,
+                     Status    => Status);
+               end if;
+
+            when FBVBS.ABI.Call_VM_Release_Device =>
+               FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
+               if Status = FBVBS.ABI.OK then
+                  FBVBS.Partitions.Release_Device
+                    (Partition => Target_Partition,
+                     Device_Id => Request.Device_Id,
+                     Status    => Status);
+               end if;
+
             when FBVBS.ABI.Call_VM_Map_Memory =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  FBVBS.Memory.Map_VM_Object
-                    (Partition              => Target_Partition,
-                     Object                 => Memory_Object,
-                     Memory_Object_Id       => Request.Memory_Object_Id,
-                     Guest_Physical_Address => Request.Guest_Physical_Address,
-                     Size                   => Request.Size,
-                     Permissions            => Request.Permissions,
-                     Status                 => Status);
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     FBVBS.Memory.Map_VM_Object
+                       (Partition              => Target_Partition,
+                        Object                 => Memory_Object,
+                        Memory_Object_Id       => Request.Memory_Object_Id,
+                        Guest_Physical_Address => Request.Guest_Physical_Address,
+                        Size                   => Request.Size,
+                        Permissions            => Request.Permissions,
+                        Status                 => Status);
+                  end if;
                 end if;
 
             when FBVBS.ABI.Call_Memory_Unmap =>
@@ -690,58 +750,94 @@ is
             when FBVBS.ABI.Call_VM_Inject_Interrupt =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  FBVBS.VMX.Inject_Interrupt
-                    (VCPU   => VCPU,
-                     Vector => Request.Interrupt_Vector,
-                     Status => Status);
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     FBVBS.VMX.Inject_Interrupt
+                       (VCPU   => VCPU,
+                        Vector => Request.Interrupt_Vector,
+                        Status => Status);
+                  end if;
                end if;
 
             when FBVBS.ABI.Call_VM_Run =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  FBVBS.VMX.Run
-                    (VCPU             => VCPU,
-                     Has_HLAT         => Request.Has_HLAT,
-                     Pinned_CR0_Mask  => Verify_State.Pinned_CR0_Mask,
-                     Pinned_CR4_Mask  => Verify_State.Pinned_CR4_Mask,
-                     Intercepted_MSRs =>
-                       (if Verify_State.Intercepted_MSR_Count = 0 then 0 else FBVBS.ABI.KCI_MSR_EFER),
-                     Mapped_Bytes     => Request.Mapped_Bytes,
-                     VCPU_Id          => Request.VCPU_Id,
-                     Result           => Result.VM_Result,
-                     Status           => Status);
-                  Result.Actual_Output_Length :=
-                    FBVBS.VM_Exit_Encoding.Payload_Length (Result.VM_Result.Exit_Reason);
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  elsif Target_Partition.State /= FBVBS.ABI.Runnable then
+                     Status := FBVBS.ABI.Invalid_State;
+                  else
+                     FBVBS.VMX.Run
+                       (VCPU             => VCPU,
+                        Has_HLAT         => Caps.Has_HLAT,
+                        Pinned_CR0_Mask  => Verify_State.Pinned_CR0_Mask,
+                        Pinned_CR4_Mask  => Verify_State.Pinned_CR4_Mask,
+                        Intercepted_MSRs =>
+                          (if Verify_State.Intercepted_MSR_Count = 0 then 0
+                           else FBVBS.ABI.KCI_MSR_EFER),
+                        Mapped_Bytes     => Request.Mapped_Bytes,
+                        VCPU_Id          => Request.VCPU_Id,
+                        Result           => Result.VM_Result,
+                        Status           => Status);
+                     if Status = FBVBS.ABI.OK then
+                        FBVBS.Partitions.Refresh_VM_State
+                          (Partition               => Target_Partition,
+                           Any_Running             =>
+                             VCPU.State = FBVBS.ABI.VCPU_Running,
+                           Any_Runnable_Or_Blocked =>
+                             VCPU.State = FBVBS.ABI.VCPU_Runnable
+                             or else VCPU.State = FBVBS.ABI.VCPU_Blocked,
+                           Any_Faulted             =>
+                             VCPU.State = FBVBS.ABI.VCPU_Faulted,
+                           Status                  => Status);
+                        Status := FBVBS.ABI.OK;
+                     end if;
+                     Result.Actual_Output_Length :=
+                       FBVBS.VM_Exit_Encoding.Payload_Length (Result.VM_Result.Exit_Reason);
+                  end if;
                end if;
 
             when FBVBS.ABI.Call_VM_Set_Register =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  FBVBS.VMX.Set_Register
-                    (VCPU        => VCPU,
-                     Register_Id => Request.Register_Id,
-                     Value       => Request.Register_Value,
-                     Status      => Status);
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     FBVBS.VMX.Set_Register
+                       (VCPU        => VCPU,
+                        Register_Id => Request.Register_Id,
+                        Value       => Request.Register_Value,
+                        Status      => Status);
+                  end if;
                end if;
 
             when FBVBS.ABI.Call_VM_Get_Register =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  FBVBS.VMX.Get_Register
-                    (VCPU        => VCPU,
-                     Register_Id => Request.Register_Id,
-                     Value       => Result.Register_Value,
-                     Status      => Status);
-                  if Status = FBVBS.ABI.OK then
-                     Result.Actual_Output_Length := 8;
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     FBVBS.VMX.Get_Register
+                       (VCPU        => VCPU,
+                        Register_Id => Request.Register_Id,
+                        Value       => Result.Register_Value,
+                        Status      => Status);
+                     if Status = FBVBS.ABI.OK then
+                        Result.Actual_Output_Length := 8;
+                     end if;
                   end if;
                end if;
 
             when FBVBS.ABI.Call_VM_Get_VCPU_Status =>
                FBVBS.Commands.Validate_Caller (Caller, True, FBVBS.ABI.Service_None, Status);
                if Status = FBVBS.ABI.OK then
-                  Result.VCPU_State_Value := VCPU.State;
-                  Result.Actual_Output_Length := 8;
+                  if Target_Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+                     Status := FBVBS.ABI.Invalid_Parameter;
+                  else
+                     Result.VCPU_State_Value := VCPU.State;
+                     Result.Actual_Output_Length := 8;
+                  end if;
                end if;
 
             when FBVBS.ABI.Call_Audit_Get_Mirror_Info =>

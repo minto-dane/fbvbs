@@ -230,4 +230,53 @@ is
                  Partition.State = FBVBS.ABI.Measured and then
                  Partition.Service_Kind = Service_Kind
              else Partition = Partition'Old));
+
+   procedure Create_VM
+     (Partition          : in out FBVBS.ABI.Partition_Descriptor;
+      Partition_Id       : FBVBS.ABI.U64;
+      VCPU_Count         : FBVBS.ABI.U32;
+      Memory_Limit_Bytes : FBVBS.ABI.U64;
+      VM_Flags           : FBVBS.ABI.U32;
+      Status             : out FBVBS.ABI.Status_Code)
+     with
+       Post =>
+         ((if Status = FBVBS.ABI.OK then
+               Partition.In_Use
+               and then Partition.Partition_Id = Partition_Id
+               and then Partition.Kind = FBVBS.ABI.Partition_Guest_VM
+               and then Partition.State = FBVBS.ABI.Created
+           else
+               Partition = Partition'Old));
+
+   procedure Destroy_VM
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Status    : out FBVBS.ABI.Status_Code)
+     with
+       Post =>
+         ((if Status = FBVBS.ABI.OK then
+               Partition.State = FBVBS.ABI.Destroyed
+               and then Partition.Assigned_Device_Count = 0
+           else
+               Partition = Partition'Old));
+
+   procedure Assign_Device
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Device_Id : FBVBS.ABI.Handle;
+      Has_IOMMU : Boolean;
+      Status    : out FBVBS.ABI.Status_Code)
+     with
+       Post =>
+         ((if Status = FBVBS.ABI.OK then
+               Partition.Assigned_Device_Count = Partition.Assigned_Device_Count'Old + 1
+           else
+               Partition = Partition'Old));
+
+   procedure Release_Device
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Device_Id : FBVBS.ABI.Handle;
+      Status    : out FBVBS.ABI.Status_Code)
+     with
+       Post =>
+         ((if Status /= FBVBS.ABI.OK then
+               Partition = Partition'Old));
 end FBVBS.Partitions;

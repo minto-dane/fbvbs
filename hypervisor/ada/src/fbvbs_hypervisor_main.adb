@@ -351,6 +351,89 @@ begin
    FBVBS.Partitions.Recover (Partition, Has_Image => True, Status => Status);
    pragma Assert (Status = FBVBS.ABI.OK);
 
+   --  Direct VM lifecycle and device assignment tests
+   declare
+      VM_Partition : FBVBS.ABI.Partition_Descriptor;
+   begin
+      FBVBS.Partitions.Initialize (VM_Partition);
+
+      --  Create VM with valid parameters
+      FBVBS.Partitions.Create_VM
+        (VM_Partition,
+         Partition_Id       => 16#100#,
+         VCPU_Count         => 2,
+         Memory_Limit_Bytes => FBVBS.ABI.Page_Size * 4,
+         VM_Flags           => 0,
+         Status             => Status);
+      pragma Assert (Status = FBVBS.ABI.OK);
+      pragma Assert (VM_Partition.Kind = FBVBS.ABI.Partition_Guest_VM);
+      pragma Assert (VM_Partition.State = FBVBS.ABI.Created);
+
+      --  Cannot create again while in use
+      FBVBS.Partitions.Create_VM
+        (VM_Partition, 16#101#, 1, FBVBS.ABI.Page_Size * 2, 0, Status);
+      pragma Assert (Status = FBVBS.ABI.Invalid_State);
+
+      --  Assign device requires IOMMU
+      FBVBS.Partitions.Assign_Device
+        (VM_Partition, Device_Id => 16#D001#, Has_IOMMU => False, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.Not_Supported_On_Platform);
+
+      --  Assign device with IOMMU
+      FBVBS.Partitions.Assign_Device
+        (VM_Partition, Device_Id => 16#D001#, Has_IOMMU => True, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.OK);
+      pragma Assert (VM_Partition.Assigned_Device_Count = 1);
+
+      --  Duplicate device
+      FBVBS.Partitions.Assign_Device
+        (VM_Partition, Device_Id => 16#D001#, Has_IOMMU => True, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.Already_Exists);
+
+      --  Second device
+      FBVBS.Partitions.Assign_Device
+        (VM_Partition, Device_Id => 16#D002#, Has_IOMMU => True, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.OK);
+      pragma Assert (VM_Partition.Assigned_Device_Count = 2);
+
+      --  Release first device
+      FBVBS.Partitions.Release_Device
+        (VM_Partition, Device_Id => 16#D001#, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.OK);
+      pragma Assert (VM_Partition.Assigned_Device_Count = 1);
+
+      --  Release non-existent device
+      FBVBS.Partitions.Release_Device
+        (VM_Partition, Device_Id => 16#D099#, Status => Status);
+      pragma Assert (Status = FBVBS.ABI.Not_Found);
+
+      --  Partition_Destroy rejects Guest_VM
+      FBVBS.Partitions.Destroy (VM_Partition, Status);
+      pragma Assert (Status = FBVBS.ABI.Invalid_Parameter);
+
+      --  Destroy_VM succeeds and clears devices
+      FBVBS.Partitions.Destroy_VM (VM_Partition, Status);
+      pragma Assert (Status = FBVBS.ABI.OK);
+      pragma Assert (VM_Partition.State = FBVBS.ABI.Destroyed);
+      pragma Assert (VM_Partition.Assigned_Device_Count = 0);
+
+      --  Invalid vcpu_count
+      FBVBS.Partitions.Initialize (VM_Partition);
+      FBVBS.Partitions.Create_VM
+        (VM_Partition, 16#102#, 0, FBVBS.ABI.Page_Size * 2, 0, Status);
+      pragma Assert (Status = FBVBS.ABI.Invalid_Parameter);
+
+      --  Memory too small
+      FBVBS.Partitions.Create_VM
+        (VM_Partition, 16#102#, 2, FBVBS.ABI.Page_Size, 0, Status);
+      pragma Assert (Status = FBVBS.ABI.Invalid_Parameter);
+
+      --  Invalid VM flags
+      FBVBS.Partitions.Create_VM
+        (VM_Partition, 16#102#, 1, FBVBS.ABI.Page_Size * 2, 16#FF#, Status);
+      pragma Assert (Status = FBVBS.ABI.Invalid_Parameter);
+   end;
+
     FBVBS.KCI.Initialize (Verify_State);
     FBVBS.UVS.Require_Artifact_Approval
       (Manifest_Set,
@@ -735,7 +818,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
         Dispatch_KSI_Caller : FBVBS.ABI.Partition_Descriptor :=
           (In_Use             => True,
            Partition_Id       => 16#46#,
@@ -749,7 +835,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
         Dispatch_IKS_Caller : FBVBS.ABI.Partition_Descriptor :=
           (In_Use             => True,
            Partition_Id       => 16#47#,
@@ -763,7 +852,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
         Dispatch_SKS_Caller : FBVBS.ABI.Partition_Descriptor :=
           (In_Use             => True,
            Partition_Id       => 16#48#,
@@ -777,7 +869,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
         Dispatch_Log      : FBVBS.ABI.Log_State_Record;
         Dispatch_Caps     : FBVBS.ABI.Platform_Capabilities :=
           (Has_HLAT => True, Has_IOMMU => True);
@@ -1072,6 +1167,11 @@ begin
            Dispatch_Result);
         pragma Assert (Dispatch_Result.Hypercall_Status = FBVBS.ABI.OK);
         pragma Assert (Dispatch_Verify.Intercepted_MSR_Count = 1);
+
+        --  Set up Dispatch_Target as a Guest_VM for subsequent VM calls
+        Dispatch_Target.Kind := FBVBS.ABI.Partition_Guest_VM;
+        Dispatch_Target.State := FBVBS.ABI.Runnable;
+        FBVBS.VMX.Start (Dispatch_VCPU);
 
         Dispatch_Request := (others => <>);
          Dispatch_Request.Call_Id := FBVBS.ABI.Call_VM_Inject_Interrupt;
@@ -1646,6 +1746,12 @@ begin
         pragma Assert (Dispatch_Result.Hypercall_Status = FBVBS.ABI.OK);
         pragma Assert (not Dispatch_Memory_Object.Allocated);
 
+        --  Restore partition state for lifecycle dispatch tests.
+        --  VM dispatch tests left Dispatch_Target as Guest_VM/Runnable;
+        --  lifecycle calls (Load, Start, etc.) require Measured state.
+        Dispatch_Target.Kind := FBVBS.ABI.Partition_Trusted_Service;
+        Dispatch_Target.State := FBVBS.ABI.Measured;
+
         Dispatch_Request := (others => <>);
         Dispatch_Request.Call_Id := FBVBS.ABI.Call_Partition_Load_Image;
         Dispatch_Request.Caller_Sequence := 25;
@@ -1873,6 +1979,10 @@ begin
         pragma Assert (Dispatch_Result.Audit_Mirror.Ring_GPA = FBVBS.ABI.Mirror_Log_Ring_GPA);
         pragma Assert (Dispatch_Result.Audit_Mirror.Ring_Size = FBVBS.ABI.Log_Ring_Total_Size);
         pragma Assert (Dispatch_Result.Audit_Mirror.Record_Size = FBVBS.ABI.Log_Record_Size);
+
+        --  Restore to Guest_VM for subsequent VM dispatch tests
+        Dispatch_Target.Kind := FBVBS.ABI.Partition_Guest_VM;
+        Dispatch_Target.State := FBVBS.ABI.Runnable;
 
         Dispatch_Request := (others => <>);
          Dispatch_Request.Call_Id := FBVBS.ABI.Call_VM_Get_VCPU_Status;
@@ -2738,6 +2848,137 @@ begin
         pragma Assert (Dispatch_Log.Max_Readable_Sequence = 57);
       end;
 
+      --  VM Create / Assign / Release / Destroy dispatch tests
+      declare
+         VM_Tracker   : FBVBS.ABI.Command_Tracker_Record;
+         VM_State     : FBVBS.ABI.Command_State := FBVBS.ABI.Command_Ready;
+         VM_Caller    : FBVBS.ABI.Partition_Descriptor := Host_Partition;
+         VM_Target    : FBVBS.ABI.Partition_Descriptor;
+         VM_Log       : FBVBS.ABI.Log_State_Record;
+         VM_Caps      : FBVBS.ABI.Platform_Capabilities :=
+           (Has_HLAT => True, Has_IOMMU => True);
+         VM_Domain    : FBVBS.ABI.IOMMU_Domain_Record :=
+           (In_Use => True, Domain_Id => 16#DD00#,
+            Owner_Partition_Id => 1, Attached_Device_Count => 0);
+         VM_Artifact  : FBVBS.ABI.Artifact_Catalog_Entry_Record :=
+           (Object_Id => 0, Object_Kind => FBVBS.ABI.Artifact_None, Related_Index => 0);
+         VM_Verify    : FBVBS.ABI.Verification_Record;
+         VM_Manifest  : FBVBS.ABI.Manifest_Set_Record;
+         VM_VCPU      : FBVBS.ABI.VCPU_Record;
+         VM_Mem_Obj   : FBVBS.ABI.Memory_Object_Record;
+         VM_Next_Obj  : FBVBS.ABI.Handle := 16#E000#;
+         VM_Next_Part : FBVBS.ABI.Handle := 16#F000#;
+         VM_TS_State  : FBVBS.ABI.Target_Set_Record;
+         VM_Key       : FBVBS.ABI.Key_Record;
+         VM_Dek       : FBVBS.ABI.Dek_Record;
+         VM_Next_TS   : FBVBS.ABI.Handle := 16#F100#;
+         VM_Next_Key  : FBVBS.ABI.Handle := 16#F200#;
+         VM_Next_Dek  : FBVBS.ABI.Handle := 16#F300#;
+         VM_Request   : FBVBS.ABI.Dispatch_Request_Record;
+         VM_Result    : FBVBS.ABI.Dispatch_Result_Record;
+         VM_Host_Profile : FBVBS.ABI.Host_Callsite_Profile_Record :=
+           (Object_Id          => 16#1000#,
+            Manifest_Object_Id => 16#2000#,
+            Caller_Class       => FBVBS.ABI.Host_Caller_VMM,
+            Load_Base          => 0,
+            Primary_Offset     => 0,
+            Secondary_Offset   => 0);
+      begin
+         FBVBS.Commands.Initialize (VM_Tracker);
+         FBVBS.Partitions.Initialize (VM_Target);
+
+         --  VM_CREATE
+         VM_Request := (others => <>);
+         VM_Request.Call_Id := FBVBS.ABI.Call_VM_Create;
+         VM_Request.Caller_Sequence := 1;
+         VM_Request.Caller_Nonce := 16#01#;
+         VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         VM_Request.Requested_VCPU_Count := 2;
+         VM_Request.Requested_Memory_Limit := FBVBS.ABI.Page_Size * 4;
+         VM_Request.VM_Flags := 0;
+         FBVBS.Hypercall_Dispatcher.Dispatch
+           (VM_Tracker, VM_State, VM_Caller, VM_Target,
+            VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
+            VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
+            VM_Mem_Obj, VM_Next_Obj, VM_Next_Part,
+            VM_TS_State, VM_Key, VM_Dek,
+            VM_Next_TS, VM_Next_Key, VM_Next_Dek,
+            VM_Request, VM_Result);
+         pragma Assert (VM_Result.Hypercall_Status = FBVBS.ABI.OK);
+         pragma Assert (VM_Result.Partition_Id = 16#F000#);
+         pragma Assert (VM_Target.Kind = FBVBS.ABI.Partition_Guest_VM);
+
+         --  VM_ASSIGN_DEVICE
+         VM_Request := (others => <>);
+         VM_Request.Call_Id := FBVBS.ABI.Call_VM_Assign_Device;
+         VM_Request.Caller_Sequence := 2;
+         VM_Request.Caller_Nonce := 16#02#;
+         VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         VM_Request.Device_Id := 16#D100#;
+         FBVBS.Hypercall_Dispatcher.Dispatch
+           (VM_Tracker, VM_State, VM_Caller, VM_Target,
+            VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
+            VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
+            VM_Mem_Obj, VM_Next_Obj, VM_Next_Part,
+            VM_TS_State, VM_Key, VM_Dek,
+            VM_Next_TS, VM_Next_Key, VM_Next_Dek,
+            VM_Request, VM_Result);
+         pragma Assert (VM_Result.Hypercall_Status = FBVBS.ABI.OK);
+         pragma Assert (VM_Target.Assigned_Device_Count = 1);
+
+         --  VM_ASSIGN_DEVICE duplicate
+         VM_Request := (others => <>);
+         VM_Request.Call_Id := FBVBS.ABI.Call_VM_Assign_Device;
+         VM_Request.Caller_Sequence := 3;
+         VM_Request.Caller_Nonce := 16#03#;
+         VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         VM_Request.Device_Id := 16#D100#;
+         FBVBS.Hypercall_Dispatcher.Dispatch
+           (VM_Tracker, VM_State, VM_Caller, VM_Target,
+            VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
+            VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
+            VM_Mem_Obj, VM_Next_Obj, VM_Next_Part,
+            VM_TS_State, VM_Key, VM_Dek,
+            VM_Next_TS, VM_Next_Key, VM_Next_Dek,
+            VM_Request, VM_Result);
+         pragma Assert (VM_Result.Hypercall_Status = FBVBS.ABI.Already_Exists);
+
+         --  VM_RELEASE_DEVICE
+         VM_Request := (others => <>);
+         VM_Request.Call_Id := FBVBS.ABI.Call_VM_Release_Device;
+         VM_Request.Caller_Sequence := 4;
+         VM_Request.Caller_Nonce := 16#04#;
+         VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         VM_Request.Device_Id := 16#D100#;
+         FBVBS.Hypercall_Dispatcher.Dispatch
+           (VM_Tracker, VM_State, VM_Caller, VM_Target,
+            VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
+            VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
+            VM_Mem_Obj, VM_Next_Obj, VM_Next_Part,
+            VM_TS_State, VM_Key, VM_Dek,
+            VM_Next_TS, VM_Next_Key, VM_Next_Dek,
+            VM_Request, VM_Result);
+         pragma Assert (VM_Result.Hypercall_Status = FBVBS.ABI.OK);
+         pragma Assert (VM_Target.Assigned_Device_Count = 0);
+
+         --  VM_DESTROY
+         VM_Request := (others => <>);
+         VM_Request.Call_Id := FBVBS.ABI.Call_VM_Destroy;
+         VM_Request.Caller_Sequence := 5;
+         VM_Request.Caller_Nonce := 16#05#;
+         VM_Request.Observed_RIP := FBVBS.ABI.Host_Callsite_VMM_Primary;
+         FBVBS.Hypercall_Dispatcher.Dispatch
+           (VM_Tracker, VM_State, VM_Caller, VM_Target,
+            VM_Host_Profile, VM_Caps, VM_Domain, VM_Artifact,
+            VM_Log, VM_Verify, VM_Manifest, VM_VCPU,
+            VM_Mem_Obj, VM_Next_Obj, VM_Next_Part,
+            VM_TS_State, VM_Key, VM_Dek,
+            VM_Next_TS, VM_Next_Key, VM_Next_Dek,
+            VM_Request, VM_Result);
+         pragma Assert (VM_Result.Hypercall_Status = FBVBS.ABI.OK);
+         pragma Assert (VM_Target.State = FBVBS.ABI.Destroyed);
+      end;
+
       declare
          Lifecycle_Tracker  : FBVBS.ABI.Command_Tracker_Record;
          Lifecycle_State    : FBVBS.ABI.Command_State := FBVBS.ABI.Command_Ready;
@@ -2995,7 +3236,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
         Memory_Object    : FBVBS.ABI.Memory_Object_Record;
         Next_Object_Id   : FBVBS.ABI.Handle := 16#9000#;
      begin
@@ -3057,7 +3301,10 @@ begin
            Last_Fault_Code  => 0,
            Last_Source_Component => 0,
            Last_Fault_Detail0 => 0,
-           Last_Fault_Detail1 => 0);
+           Last_Fault_Detail1 => 0,
+           VM_Flags              => 0,
+           Assigned_Device_Count => 0,
+           Assigned_Devices      => (others => 0));
     FBVBS.Partitions.Refresh_VM_State
       (Guest_VM,
        Any_Running             => True,

@@ -106,6 +106,11 @@ is
    Synthetic_Exit_RIP_MMIO     : constant U64 := 16#0000_0000_FFF0_0002#;
    Synthetic_Exit_RIP_Shutdown : constant U64 := 16#0000_0000_FFF0_0003#;
    Synthetic_Exit_RIP_Fault    : constant U64 := 16#0000_0000_FFF0_0004#;
+   VM_Flag_Nested_Virt_Disabled : constant U32 := 16#0001#;
+   Max_Assigned_Devices         : constant := 8;
+
+   subtype Device_Slot is Natural range 0 .. Max_Assigned_Devices - 1;
+   type Device_Id_Array is array (Device_Slot) of Handle;
 
    type Key_Type is
      (No_Key,
@@ -335,11 +340,15 @@ is
    Call_UVS_Verify_Manifest_Set : constant U32 := 16#6001#;
    Call_UVS_Verify_Artifact    : constant U32 := 16#6002#;
    Call_UVS_Check_Revocation   : constant U32 := 16#6003#;
+   Call_VM_Create              : constant U32 := 16#7001#;
+   Call_VM_Destroy             : constant U32 := 16#7002#;
    Call_VM_Run                 : constant U32 := 16#7003#;
    Call_VM_Set_Register        : constant U32 := 16#7004#;
    Call_VM_Get_Register        : constant U32 := 16#7005#;
    Call_VM_Map_Memory          : constant U32 := 16#7006#;
    Call_VM_Inject_Interrupt    : constant U32 := 16#7007#;
+   Call_VM_Assign_Device       : constant U32 := 16#7008#;
+   Call_VM_Release_Device      : constant U32 := 16#7009#;
    Call_VM_Get_VCPU_Status     : constant U32 := 16#700A#;
    Call_Audit_Get_Mirror_Info  : constant U32 := 16#8001#;
    Call_Audit_Get_Boot_Id      : constant U32 := 16#8002#;
@@ -450,6 +459,9 @@ is
         Last_Source_Component : U32 := 0;
         Last_Fault_Detail0 : U64 := 0;
         Last_Fault_Detail1 : U64 := 0;
+        VM_Flags              : U32 := 0;
+        Assigned_Device_Count : U32 := 0;
+        Assigned_Devices      : Device_Id_Array := (others => 0);
      end record;
 
    type Memory_Object_Record is record
@@ -541,6 +553,7 @@ is
        Jail_Context_OK          : Boolean := False;
       MAC_Context_OK           : Boolean := False;
       New_Object_Id            : Handle := 0;
+      VM_Flags                 : U32 := 0;
       Register_Id              : U32 := 0;
       Register_Value           : U64 := 0;
       Pin_Register             : U32 := 0;

@@ -21,7 +21,10 @@ is
             Last_Fault_Code    => 0,
             Last_Source_Component => 0,
             Last_Fault_Detail0 => 0,
-            Last_Fault_Detail1 => 0);
+            Last_Fault_Detail1 => 0,
+            VM_Flags              => 0,
+            Assigned_Device_Count => 0,
+            Assigned_Devices      => (others => 0));
    end Initialize;
 
    procedure Create
@@ -407,4 +410,137 @@ is
          Status := FBVBS.ABI.OK;
       end if;
    end Bind_Service;
+
+   procedure Create_VM
+     (Partition          : in out FBVBS.ABI.Partition_Descriptor;
+      Partition_Id       : FBVBS.ABI.U64;
+      VCPU_Count         : FBVBS.ABI.U32;
+      Memory_Limit_Bytes : FBVBS.ABI.U64;
+      VM_Flags           : FBVBS.ABI.U32;
+      Status             : out FBVBS.ABI.Status_Code)
+   is
+      Min_Memory : constant FBVBS.ABI.U64 :=
+        FBVBS.ABI.Page_Size * FBVBS.ABI.U64 (VCPU_Count + 1);
+   begin
+      if Partition.In_Use then
+         Status := FBVBS.ABI.Invalid_State;
+      elsif Partition_Id = 0
+        or else VCPU_Count = 0
+        or else VCPU_Count > 252
+      then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Memory_Limit_Bytes < Min_Memory then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif (VM_Flags and (not FBVBS.ABI.VM_Flag_Nested_Virt_Disabled)) /= 0 then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      else
+         Partition.In_Use := True;
+         Partition.Partition_Id := Partition_Id;
+         Partition.Kind := FBVBS.ABI.Partition_Guest_VM;
+         Partition.State := FBVBS.ABI.Created;
+         Partition.Measurement_Epoch := 0;
+         Partition.Service_Kind := FBVBS.ABI.Service_None;
+         Partition.Memory_Limit_Bytes := Memory_Limit_Bytes;
+         Partition.Capability_Mask := 0;
+         Partition.Mapped_Bytes := 0;
+         Partition.Last_Fault_Code := 0;
+         Partition.Last_Source_Component := 0;
+         Partition.Last_Fault_Detail0 := 0;
+         Partition.Last_Fault_Detail1 := 0;
+         Partition.VM_Flags := VM_Flags;
+         Partition.Assigned_Device_Count := 0;
+         Partition.Assigned_Devices := (others => 0);
+         Status := FBVBS.ABI.OK;
+      end if;
+   end Create_VM;
+
+   procedure Destroy_VM
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Status    : out FBVBS.ABI.Status_Code)
+   is
+   begin
+      if not Partition.In_Use then
+         Status := FBVBS.ABI.Not_Found;
+      elsif Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.State = FBVBS.ABI.Destroyed then
+         Status := FBVBS.ABI.Invalid_State;
+      else
+         Partition.State := FBVBS.ABI.Destroyed;
+         Partition.Mapped_Bytes := 0;
+         Partition.Assigned_Device_Count := 0;
+         Partition.Assigned_Devices := (others => 0);
+         Status := FBVBS.ABI.OK;
+      end if;
+   end Destroy_VM;
+
+   procedure Assign_Device
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Device_Id : FBVBS.ABI.Handle;
+      Has_IOMMU : Boolean;
+      Status    : out FBVBS.ABI.Status_Code)
+   is
+      use type FBVBS.ABI.Handle;
+   begin
+      if not Partition.In_Use
+        or else Device_Id = 0
+      then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.State = FBVBS.ABI.Running
+        or else Partition.State = FBVBS.ABI.Faulted
+        or else Partition.State = FBVBS.ABI.Destroyed
+      then
+         Status := FBVBS.ABI.Invalid_State;
+      elsif not Has_IOMMU then
+         Status := FBVBS.ABI.Not_Supported_On_Platform;
+      elsif Partition.Assigned_Device_Count >= FBVBS.ABI.U32 (FBVBS.ABI.Max_Assigned_Devices) then
+         Status := FBVBS.ABI.Resource_Exhausted;
+      else
+         for I in FBVBS.ABI.Device_Slot loop
+            if Partition.Assigned_Devices (I) = Device_Id then
+               Status := FBVBS.ABI.Already_Exists;
+               return;
+            end if;
+         end loop;
+         for I in FBVBS.ABI.Device_Slot loop
+            if Partition.Assigned_Devices (I) = 0 then
+               Partition.Assigned_Devices (I) := Device_Id;
+               Partition.Assigned_Device_Count := Partition.Assigned_Device_Count + 1;
+               Status := FBVBS.ABI.OK;
+               return;
+            end if;
+         end loop;
+         Status := FBVBS.ABI.Resource_Exhausted;
+      end if;
+   end Assign_Device;
+
+   procedure Release_Device
+     (Partition : in out FBVBS.ABI.Partition_Descriptor;
+      Device_Id : FBVBS.ABI.Handle;
+      Status    : out FBVBS.ABI.Status_Code)
+   is
+      use type FBVBS.ABI.Handle;
+   begin
+      if not Partition.In_Use or else Device_Id = 0 then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.Kind /= FBVBS.ABI.Partition_Guest_VM then
+         Status := FBVBS.ABI.Invalid_Parameter;
+      elsif Partition.State = FBVBS.ABI.Running then
+         Status := FBVBS.ABI.Invalid_State;
+      elsif Partition.State = FBVBS.ABI.Destroyed then
+         Status := FBVBS.ABI.Invalid_State;
+      else
+         for I in FBVBS.ABI.Device_Slot loop
+            if Partition.Assigned_Devices (I) = Device_Id then
+               Partition.Assigned_Devices (I) := 0;
+               Partition.Assigned_Device_Count := Partition.Assigned_Device_Count - 1;
+               Status := FBVBS.ABI.OK;
+               return;
+            end if;
+         end loop;
+         Status := FBVBS.ABI.Not_Found;
+      end if;
+   end Release_Device;
 end FBVBS.Partitions;
