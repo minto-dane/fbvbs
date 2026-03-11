@@ -1,8 +1,0 @@
-project FBVBS_Hypervisor is
-   for Source_Dirs use ("src");
-   for Main use ("fbvbs_hypervisor_main.adb");
-
-   package Compiler is
-      for Default_Switches ("Ada") use ("-gnat2022", "-gnata");
-   end Compiler;
-end FBVBS_Hypervisor;

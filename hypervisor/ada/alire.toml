@@ -1,9 +1,0 @@
-name = "fbvbs_hypervisor"
-description = "FBVBS Ada/SPARK hypervisor implementation and assurance executable"
-version = "0.1.0-dev"
-
-authors = ["GitHub Copilot CLI"]
-maintainers = ["GitHub Copilot CLI <223556219+Copilot@users.noreply.github.com>"]
-licenses = "BSD-2-Clause"
-project-files = ["fbvbs_hypervisor.gpr"]
-executables = ["fbvbs_hypervisor_main"]
