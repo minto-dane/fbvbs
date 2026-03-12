@@ -383,7 +383,7 @@ int fbvbs_partition_resume(struct fbvbs_hypervisor_state *state, uint64_t partit
 /*@ requires \valid(state);
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1],
             state->mirror_log;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE;
 */
 int fbvbs_partition_fault(
     struct fbvbs_hypervisor_state *state,

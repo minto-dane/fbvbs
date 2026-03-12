@@ -328,6 +328,9 @@ static int fbvbs_wx_safe(uint32_t permissions) {
     ensures \result == 0 || \result == 1;
 */
 static int fbvbs_range_valid(uint64_t guest_physical_address, uint64_t size) {
+    if (guest_physical_address > UINT64_MAX - size) {
+        return 0;
+    }
     return guest_physical_address != 0U &&
         size != 0U &&
         (guest_physical_address % FBVBS_PAGE_SIZE) == 0U &&
@@ -340,8 +343,14 @@ static int fbvbs_ranges_overlap(
     uint64_t right_base,
     uint64_t right_size
 ) {
-    uint64_t left_end = left_base + left_size;
-    uint64_t right_end = right_base + right_size;
+    uint64_t left_end;
+    uint64_t right_end;
+
+    if (left_base > UINT64_MAX - left_size || right_base > UINT64_MAX - right_size) {
+        return 1;
+    }
+    left_end = left_base + left_size;
+    right_end = right_base + right_size;
 
     return left_base < right_end && right_base < left_end;
 }
@@ -616,6 +625,9 @@ static int fbvbs_partition_can_charge_mapping(
     const struct fbvbs_partition *partition,
     uint64_t size
 ) {
+    if (partition->mapped_bytes > UINT64_MAX - size) {
+        return 0;
+    }
     return partition->mapped_bytes + size <= partition->memory_limit_bytes;
 }
 
@@ -1080,7 +1092,11 @@ static void fbvbs_partition_release_shared_registrations(
     for (index = 0U; index < FBVBS_MAX_SHARED_OBJECTS; ++index) {
         struct fbvbs_shared_registration *shared = &state->shared_objects[index];
 
-        if (!shared->active || shared->peer_partition_id != partition_id) {
+        /* Clean up registrations where this partition is either the owner or peer */
+        if (!shared->active) {
+            continue;
+        }
+        if (shared->peer_partition_id != partition_id && shared->owner_partition_id != partition_id) {
             continue;
         }
         if (shared->memory_object_id != 0U) {
@@ -1091,7 +1107,7 @@ static void fbvbs_partition_release_shared_registrations(
                 object->shared_count -= 1U;
             }
         }
-        if (shared->peer_partition_id != 0U) {
+        if (shared->peer_partition_id != 0U && shared->peer_partition_id != partition_id) {
             struct fbvbs_partition *peer_partition =
                 fbvbs_find_partition(state, shared->peer_partition_id);
 
@@ -1100,6 +1116,18 @@ static void fbvbs_partition_release_shared_registrations(
                     peer_partition->mapped_bytes -= shared->size;
                 } else {
                     peer_partition->mapped_bytes = 0U;
+                }
+            }
+        }
+        if (shared->owner_partition_id != 0U && shared->owner_partition_id != partition_id) {
+            struct fbvbs_partition *owner_partition =
+                fbvbs_find_partition(state, shared->owner_partition_id);
+
+            if (owner_partition != NULL) {
+                if (owner_partition->mapped_bytes >= shared->size) {
+                    owner_partition->mapped_bytes -= shared->size;
+                } else {
+                    owner_partition->mapped_bytes = 0U;
                 }
             }
         }
@@ -1516,12 +1544,13 @@ int fbvbs_partition_fault(
     uint64_t detail0,
     uint64_t detail1
 ) {
-    struct fbvbs_partition *partition = fbvbs_find_partition(state, partition_id);
+    struct fbvbs_partition *partition;
     struct fbvbs_audit_partition_fault_event event;
 
     if (state == NULL || partition_id == 0U) {
         return INVALID_PARAMETER;
     }
+    partition = fbvbs_find_partition(state, partition_id);
     if (partition == NULL) {
         return NOT_FOUND;
     }

@@ -4,9 +4,12 @@ void fbvbs_zero_memory(void *buffer, size_t length) {
     uint8_t *bytes = (uint8_t *)buffer;
     size_t index;
 
+    /* TODO: Replace with memset_explicit/memset_s/explicit_bzero to prevent compiler optimization */
     for (index = 0; index < length; ++index) {
         bytes[index] = 0;
     }
+    /* Compiler barrier to prevent optimization */
+    __asm__ volatile("" : : "r"(bytes) : "memory");
 }
 
 void fbvbs_copy_memory(void *destination, const void *source, size_t length) {

@@ -739,16 +739,16 @@ int fbvbs_dispatch_hypercall(
         fbvbs_finish_trap(page, registers, status, page->actual_output_length);
         return status;
     }
-    status = fbvbs_validate_command_sequence(state, page_gpa, page);
-    if (status != OK) {
-        fbvbs_finish_trap(page, registers, status, page->actual_output_length);
-        return status;
-    }
     owner = fbvbs_find_command_page_owner(state, page_gpa, &owner_vcpu_id);
     if (owner != NULL && owner_vcpu_id < owner->vcpu_count && owner_vcpu_id < FBVBS_MAX_VCPUS) {
         observed_rip = owner->vcpus[owner_vcpu_id].rip;
     }
     status = fbvbs_validate_caller_for_call(state, owner, page->call_id, observed_rip);
+    if (status != OK) {
+        fbvbs_finish_trap(page, registers, status, page->actual_output_length);
+        return status;
+    }
+    status = fbvbs_validate_command_sequence(state, page_gpa, page);
     if (status != OK) {
         fbvbs_finish_trap(page, registers, status, page->actual_output_length);
         return status;

@@ -125,6 +125,7 @@ int fbvbs_log_append(
     }
 
     record->crc32c = fbvbs_crc32c((const uint8_t *)record, offsetof(struct fbvbs_log_record_v1, crc32c));
+    /* TODO: Use atomic operations or locking to prevent race conditions on max_readable_sequence */
     state->mirror_log.header.max_readable_sequence = sequence;
     state->mirror_log.header.write_offset = slot_index * FBVBS_LOG_RECORD_V1_SIZE;
 

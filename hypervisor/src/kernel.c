@@ -81,6 +81,9 @@ int fbvbs_configure_host_callsite_table(
         loop variant count - index;
     */
     for (index = 0U; index < count; ++index) {
+        if (load_base > UINT64_MAX - allowed_offsets[index]) {
+            return INVALID_PARAMETER;
+        }
         table.allowed_offsets[index] = allowed_offsets[index];
         table.relocated_callsites[index] = load_base + allowed_offsets[index];
     }
@@ -864,13 +867,16 @@ void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     state->trusted_time_seconds = 1000U;
     fbvbs_seed_boot_ids(state);
     fbvbs_materialize_boot_artifact_entries(boot_artifact_entries);
-    (void)fbvbs_ingest_boot_catalog(
+    status = fbvbs_ingest_boot_catalog(
         state,
         boot_artifact_entries,
         (uint32_t)FBVBS_BOOT_ARTIFACT_SEED_COUNT,
         g_fbvbs_boot_manifest_profiles,
         (uint32_t)FBVBS_BOOT_MANIFEST_PROFILE_COUNT
     );
+    if (status != OK) {
+        return status;
+    }
     fbvbs_partition_seed_freebsd_host(state);
     fbvbs_vmx_probe(&state->vmx_caps);
     fbvbs_seed_capability_bitmap(state);

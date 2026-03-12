@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository's C implementation covers the complete hypervisor model:
+This document covers the retained C leaf boundary scope:
 
 - `hypervisor/src/vmx.c` — VMX capability probing and leaf-exit classification
 - `hypervisor/src/vm_policy.c` — VM exit handling policy
@@ -40,26 +40,26 @@ All externally visible functions receive ACSL annotations for Frama-C WP verific
 
 ## Machine-checkable evidence
 
-The repository contains the following mandatory machine-checkable artifacts:
+The repository contains the following planned machine-checkable artifacts:
 
-- `python3 hypervisor/tools/check_retained_c_subset.py`
+- `python3 hypervisor/tools/check_retained_c_subset.py` (planned placeholder)
   - checks the C source file set and include boundaries
   - checks forbidden-construct subset for the VMX leaf
   - checks fixed ABI assertions for the public leaf header
-- `python3 hypervisor/tools/prove_leaf_vmx_contracts.py`
+- `python3 hypervisor/tools/prove_leaf_vmx_contracts.py` (planned placeholder)
   - compiles the C leaf as a shared object
   - executes null-contract checks
   - exhaustively compares the C implementation against an abstract VMX leaf model over a bounded exhaustive proof-style contract comparison state space
-- `make -C hypervisor frama-c-wp`
+- `make -C hypervisor frama-c-wp` (planned Frama-C target)
   - runs Frama-C WP proof discharge on annotated C modules
-- `make -C hypervisor frama-c-eva`
+- `make -C hypervisor frama-c-eva` (planned Frama-C target)
   - runs Frama-C Eva value analysis for AoRTE on C modules
 
-These artifacts are wired into:
+These artifacts are proposed for integration into:
 
-- `make -C hypervisor analyze`
-- `make -C hypervisor proof`
-- `make -C hypervisor test`
+- `make -C hypervisor analyze` (planned)
+- `make -C hypervisor proof` (planned)
+- `make -C hypervisor test` (planned)
 
 ## Requirement traceability
 

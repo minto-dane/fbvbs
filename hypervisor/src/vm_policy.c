@@ -217,7 +217,7 @@ static void fbvbs_vmx_ept_violation_exit(
     requires \valid(response) || response == \null;
     requires partition != \null ==> partition->vcpu_count <= FBVBS_MAX_VCPUS;
     requires state != \null ==> state->intercepted_msr_count <= 16;
-    requires \separated(state, partition, response);
+    requires \separated(state, response);
     assigns *state, *partition, *response;
     ensures \result == OK || \result == INVALID_PARAMETER ||
             \result == INVALID_STATE || \result == NOT_SUPPORTED_ON_PLATFORM ||
@@ -242,6 +242,9 @@ int fbvbs_vmx_run_vcpu(
 
     if (state == NULL || partition == NULL || response == NULL) {
         return INVALID_PARAMETER;
+    }
+    if (partition->vcpu_count > FBVBS_MAX_VCPUS) {
+        return INVALID_STATE;
     }
     if (vcpu_id >= partition->vcpu_count) {
         return INVALID_PARAMETER;

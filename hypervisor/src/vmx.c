@@ -64,12 +64,14 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     fbvbs_leaf_zero_caps(caps);
 
 #if defined(__x86_64__) || defined(_M_X64)
+    /* TODO: Replace compile-time assignments with runtime CPUID feature detection */
+    /* For now, use conservative defaults that require runtime verification */
     caps->vmx_supported = 1U;
-    caps->hlat_available = 1U;
-    caps->iommu_available = 1U;
-    caps->mbec_available = 1U;
-    caps->cet_available = 1U;
-    caps->aesni_available = 1U;
+    caps->hlat_available = 0U;  /* Should check CPUID for HLAT support */
+    caps->iommu_available = 0U;  /* Should query platform for IOMMU presence */
+    caps->mbec_available = 0U;  /* Should check VMX secondary execution controls */
+    caps->cet_available = 0U;  /* Should check CPUID for CET support */
+    caps->aesni_available = 0U;  /* Should check CPUID for AES-NI support */
 #endif
 
     return OK;

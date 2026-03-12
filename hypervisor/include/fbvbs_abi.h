@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "../../generated/bindings/fbvbs_abi_v1.h"
+#include "fbvbs_abi_v1.h"
 
 #define FBVBS_ABI_VERSION 1U
 #define FBVBS_PAGE_SIZE 4096U

@@ -352,6 +352,16 @@ int fbvbs_artifact_approval_exists(
         return 0;
     }
 
+    /* Check if artifact is revoked */
+    if (fbvbs_is_object_revoked(state, artifact_object_id)) {
+        return 0;
+    }
+
+    /* Check if manifest is revoked */
+    if (fbvbs_is_object_revoked(state, manifest_object_id)) {
+        return 0;
+    }
+
     /*@ loop invariant 0 <= index <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
         loop assigns index;
         loop variant FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - index;
@@ -361,7 +371,8 @@ int fbvbs_artifact_approval_exists(
 
         if (approval->active &&
             approval->artifact_object_id == artifact_object_id &&
-            approval->manifest_object_id == manifest_object_id) {
+            approval->manifest_object_id == manifest_object_id &&
+            approval->manifest_set_id == state->current_manifest_set_id) {
             return 1;
         }
     }
@@ -2296,17 +2307,36 @@ int fbvbs_uvs_check_revocation(
     const struct fbvbs_uvs_check_revocation_request *request,
     struct fbvbs_uvs_check_revocation_response *response
 ) {
+    int found = 0;
+
     if (state == NULL || request == NULL || response == NULL) {
         return INVALID_PARAMETER;
     }
     if (request->object_id == 0U || request->object_type == 0U || request->reserved0 != 0U) {
         return INVALID_PARAMETER;
     }
-    if (!fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_IMAGE) &&
-        !fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_MANIFEST) &&
-        !fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_MODULE) &&
-        fbvbs_find_iks_key(state, request->object_id) == NULL &&
-        fbvbs_find_sks_dek(state, request->object_id) == NULL) {
+
+    /* Validate object_type and perform type-specific lookup */
+    switch (request->object_type) {
+        case FBVBS_ARTIFACT_OBJECT_IMAGE:
+            found = fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_IMAGE);
+            break;
+        case FBVBS_ARTIFACT_OBJECT_MANIFEST:
+            found = fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_MANIFEST);
+            break;
+        case FBVBS_ARTIFACT_OBJECT_MODULE:
+            found = fbvbs_artifact_exists(state, request->object_id, FBVBS_ARTIFACT_OBJECT_MODULE);
+            break;
+        default:
+            /* For non-artifact types (keys, DEKs), check existence without type constraint */
+            if (fbvbs_find_iks_key(state, request->object_id) != NULL ||
+                fbvbs_find_sks_dek(state, request->object_id) != NULL) {
+                found = 1;
+            }
+            break;
+    }
+
+    if (!found) {
         return NOT_FOUND;
     }
 
