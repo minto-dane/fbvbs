@@ -117,6 +117,9 @@ int fbvbs_vmx_leaf_run_vcpu(
     if (caps->vmx_supported == 0U) {
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    if (intercepted_msr_count > FBVBS_MAX_INTERCEPTED_MSRS) {
+        return INVALID_PARAMETER;
+    }
     if (intercepted_msr_count != 0U && intercepted_msrs == NULL) {
         return INVALID_PARAMETER;
     }

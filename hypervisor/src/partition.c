@@ -1045,7 +1045,8 @@ static int fbvbs_partition_create_common(
     partition->memory_limit_bytes = memory_limit_bytes;
     partition->capability_mask = capability_mask;
     partition->image_object_id = image_object_id;
-    partition->mapped_bytes = fbvbs_partition_bootstrap_bytes(vcpu_count);
+    partition->mapped_bytes = 0U;
+    partition->bootstrap_bytes = fbvbs_partition_bootstrap_bytes(vcpu_count);
     partition->service_kind = SERVICE_KIND_NONE;
     fbvbs_partition_init_bootstrap(partition);
     fbvbs_partition_reset_vcpus(partition, FBVBS_VCPU_STATE_CREATED);

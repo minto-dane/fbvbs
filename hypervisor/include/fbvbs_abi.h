@@ -593,4 +593,37 @@ struct fbvbs_diag_device_list_response {
     uint8_t entries[4032];
 };
 
+/* Compile-time layout checks to prevent silent padding changes */
+_Static_assert(sizeof(struct fbvbs_partition_create_request) == 32, "fbvbs_partition_create_request size mismatch");
+_Static_assert(offsetof(struct fbvbs_partition_create_request, memory_limit_bytes) == 8, "fbvbs_partition_create_request layout mismatch");
+
+_Static_assert(sizeof(struct fbvbs_partition_create_response) == 8, "fbvbs_partition_create_response size mismatch");
+
+_Static_assert(sizeof(struct fbvbs_vm_run_response) == 4040, "fbvbs_vm_run_response size mismatch");
+_Static_assert(offsetof(struct fbvbs_vm_run_response, exit_payload) == 8, "fbvbs_vm_run_response exit_payload offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_ksi_modify_tier_b_request) == 4024, "fbvbs_ksi_modify_tier_b_request size mismatch");
+_Static_assert(offsetof(struct fbvbs_ksi_modify_tier_b_request, patch) == 16, "fbvbs_ksi_modify_tier_b_request patch offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_iks_sign_response) == 4008, "fbvbs_iks_sign_response size mismatch");
+_Static_assert(offsetof(struct fbvbs_iks_sign_response, signature) == 8, "fbvbs_iks_sign_response signature offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_iks_key_exchange_request) == 4008, "fbvbs_iks_key_exchange_request size mismatch");
+_Static_assert(offsetof(struct fbvbs_iks_key_exchange_request, peer_public_key) == 16, "fbvbs_iks_key_exchange_request peer_public_key offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_iks_derive_request) == 4008, "fbvbs_iks_derive_request size mismatch");
+_Static_assert(offsetof(struct fbvbs_iks_derive_request, params) == 16, "fbvbs_iks_derive_request params offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_diag_partition_list_response) == 4040, "fbvbs_diag_partition_list_response size mismatch");
+_Static_assert(offsetof(struct fbvbs_diag_partition_list_response, entries) == 8, "fbvbs_diag_partition_list_response entries offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_diag_artifact_list_response) == 4040, "fbvbs_diag_artifact_list_response size mismatch");
+_Static_assert(offsetof(struct fbvbs_diag_artifact_list_response, entries) == 8, "fbvbs_diag_artifact_list_response entries offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_diag_device_list_response) == 4040, "fbvbs_diag_device_list_response size mismatch");
+_Static_assert(offsetof(struct fbvbs_diag_device_list_response, entries) == 8, "fbvbs_diag_device_list_response entries offset mismatch");
+
+_Static_assert(sizeof(struct fbvbs_ksi_create_target_set_request) == 4024, "fbvbs_ksi_create_target_set_request size mismatch");
+_Static_assert(offsetof(struct fbvbs_ksi_create_target_set_request, target_object_ids) == 8, "fbvbs_ksi_create_target_set_request target_object_ids offset mismatch");
+
 #endif

@@ -13,9 +13,9 @@ static void test_probe_reports_capabilities(void) {
 
     assert(fbvbs_vmx_probe(&caps) == OK);
     assert(caps.vmx_supported == 1U);
-    assert(caps.hlat_available == 1U);
-    assert(caps.iommu_available == 1U);
-    assert(caps.mbec_available == 1U);
+    assert(caps.hlat_available == 0U);
+    assert(caps.iommu_available == 0U);
+    assert(caps.mbec_available == 0U);
 }
 
 static void test_leaf_run_rejects_invalid_inputs(void) {

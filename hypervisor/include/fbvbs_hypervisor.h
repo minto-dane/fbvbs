@@ -65,6 +65,7 @@ struct fbvbs_partition {
     uint64_t measurement_epoch;
     uint64_t measurement_digest_id;
     uint64_t mapped_bytes;
+    uint64_t bootstrap_bytes;
     uint64_t entry_ip;
     uint64_t initial_sp;
     uint32_t last_fault_code;
@@ -270,7 +271,7 @@ struct fbvbs_hypervisor_state {
     struct fbvbs_uvs_artifact_approval approvals[FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES];
     uint64_t pinned_cr0_mask;
     uint64_t pinned_cr4_mask;
-    uint32_t intercepted_msrs[16];
+    uint32_t intercepted_msrs[FBVBS_MAX_INTERCEPTED_MSRS];
     uint32_t intercepted_msr_count;
     struct fbvbs_artifact_catalog artifact_catalog;
     struct fbvbs_device_catalog device_catalog;

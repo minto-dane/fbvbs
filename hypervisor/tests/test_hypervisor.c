@@ -3145,7 +3145,7 @@ static void test_dispatch_diagnostic_calls(void) {
     page = prepare_host_dispatch_page(&state, &registers, FBVBS_CALL_AUDIT_GET_MIRROR_INFO, 0U, sizeof(mirror_info));
     assert(fbvbs_dispatch_hypercall(&state, &registers) == OK);
     fbvbs_copy_memory(&mirror_info, page->body, sizeof(mirror_info));
-    assert(mirror_info.ring_gpa == (uint64_t)(uintptr_t)&state.mirror_log);
+    assert(mirror_info.ring_gpa == 0U);  /* mirror_log is not guest-accessible */
     assert(mirror_info.ring_size == sizeof(state.mirror_log));
     assert(mirror_info.record_size == FBVBS_LOG_RECORD_V1_SIZE);
 

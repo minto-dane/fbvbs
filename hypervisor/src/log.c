@@ -153,7 +153,9 @@ int fbvbs_audit_get_mirror_info(
         return INVALID_PARAMETER;
     }
 
-    response->ring_gpa = (uint64_t)(uintptr_t)&state->mirror_log;
+    /* Return 0 for ring_gpa as mirror_log is not guest-accessible (embedded in hypervisor state).
+     * Callers expecting a guest-accessible GPA should map mirror_log to guest memory first. */
+    response->ring_gpa = 0U;
     response->ring_size = (uint32_t)sizeof(state->mirror_log);
     response->record_size = FBVBS_LOG_RECORD_V1_SIZE;
     return OK;
