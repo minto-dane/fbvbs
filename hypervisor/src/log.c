@@ -98,12 +98,21 @@ int fbvbs_log_append(
     uint64_t sequence;
     uint32_t slot_index;
     struct fbvbs_log_record_v1 *record;
+    uint32_t lock_val;
 
     if (state == NULL ||
         payload_length > sizeof(state->mirror_log.records[0].payload) ||
         (payload_length != 0U && payload == NULL)) {
         return INVALID_PARAMETER;
     }
+
+    /* Acquire spinlock */
+    do {
+        __asm__ volatile("xchgl %0, %1"
+                         : "=r"(lock_val), "=m"(state->log_lock)
+                         : "0"(1U)
+                         : "memory");
+    } while (lock_val != 0U);
 
     sequence = state->mirror_log.header.max_readable_sequence + 1U;
     slot_index = (uint32_t)((sequence - 1U) % FBVBS_LOG_SLOT_COUNT);
@@ -125,9 +134,24 @@ int fbvbs_log_append(
     }
 
     record->crc32c = fbvbs_crc32c((const uint8_t *)record, offsetof(struct fbvbs_log_record_v1, crc32c));
-    /* TODO: Use atomic operations or locking to prevent race conditions on max_readable_sequence */
-    state->mirror_log.header.max_readable_sequence = sequence;
-    state->mirror_log.header.write_offset = slot_index * FBVBS_LOG_RECORD_V1_SIZE;
+
+    /* Use atomic write for max_readable_sequence (x86_64 aligned uint64_t writes are atomic) */
+    __asm__ volatile("movq %1, %0"
+                     : "=m"(state->mirror_log.header.max_readable_sequence)
+                     : "r"(sequence)
+                     : "memory");
+
+    /* Use atomic write for write_offset (x86_64 aligned uint32_t writes are atomic) */
+    __asm__ volatile("movl %1, %0"
+                     : "=m"(state->mirror_log.header.write_offset)
+                     : "r"(slot_index * FBVBS_LOG_RECORD_V1_SIZE)
+                     : "memory");
+
+    /* Release spinlock */
+    __asm__ volatile("movl %0, %1"
+                     :
+                     : "r"(0U), "m"(state->log_lock)
+                     : "memory");
 
     return OK;
 }

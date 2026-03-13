@@ -57,6 +57,8 @@ static void fbvbs_leaf_zero_exit(struct fbvbs_vmx_leaf_exit *exit) {
     disjoint behaviors;
 */
 int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
+    uint32_t eax, ebx, ecx, edx;
+
     if (caps == NULL) {
         return INVALID_PARAMETER;
     }
@@ -64,14 +66,56 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     fbvbs_leaf_zero_caps(caps);
 
 #if defined(__x86_64__) || defined(_M_X64)
-    /* TODO: Replace compile-time assignments with runtime CPUID feature detection */
-    /* For now, use conservative defaults that require runtime verification */
-    caps->vmx_supported = 1U;
-    caps->hlat_available = 0U;  /* Should check CPUID for HLAT support */
-    caps->iommu_available = 0U;  /* Should query platform for IOMMU presence */
-    caps->mbec_available = 0U;  /* Should check VMX secondary execution controls */
-    caps->cet_available = 0U;  /* Should check CPUID for CET support */
-    caps->aesni_available = 0U;  /* Should check CPUID for AES-NI support */
+    /* Check for CPUID support */
+    eax = 0U;
+    ecx = 0U;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "0"(eax), "2"(ecx)
+                     : "memory");
+
+    /* Check for VMX support (CPUID.01H:ECX.VMX[bit 5]) */
+    if (ecx & (1U << 5)) {
+        caps->vmx_supported = 1U;
+    }
+
+    /* Check for AES-NI support (CPUID.01H:ECX.AESNI[bit 25]) */
+    if (ecx & (1U << 25)) {
+        caps->aesni_available = 1U;
+    }
+
+    /* Check for extended features (CPUID.07H) */
+    eax = 7U;
+    ecx = 0U;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "0"(eax), "2"(ecx)
+                     : "memory");
+
+    /* Check for MBEC support (CPUID.07H:ECX.MBEC[bit 6]) */
+    if (ecx & (1U << 6)) {
+        caps->mbec_available = 1U;
+    }
+
+    /* Check for CET support (CPUID.07H:ECX.CET[bit 7]) */
+    if (ecx & (1U << 7)) {
+        caps->cet_available = 1U;
+    }
+
+    /* Check for HLAT support (CPUID.80000008H:EBX.HLAT[bit 1]) */
+    eax = 0x80000008U;
+    ecx = 0U;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "0"(eax), "2"(ecx)
+                     : "memory");
+    if (ebx & (1U << 1)) {
+        caps->hlat_available = 1U;
+    }
+
+    /* IOMMU detection requires platform-specific methods (MSR/ACPI) */
+    /* For now, leave as 0 (not available) */
+    caps->iommu_available = 0U;
 #endif
 
     return OK;

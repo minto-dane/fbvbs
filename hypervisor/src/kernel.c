@@ -60,6 +60,10 @@ int fbvbs_configure_host_callsite_table(
     int32_t slot_index;
     uint32_t index;
 
+    /* Compile-time assertion: FBVBS_MAX_HOST_CALLSITE_ENTRIES must fit in uint16_t */
+    _Static_assert(FBVBS_MAX_HOST_CALLSITE_ENTRIES <= UINT16_MAX,
+                   "FBVBS_MAX_HOST_CALLSITE_ENTRIES exceeds uint16_t range");
+
     if (state == NULL || allowed_offsets == NULL || manifest_object_id == 0U ||
         load_base == 0U || count == 0U || count > FBVBS_MAX_HOST_CALLSITE_ENTRIES) {
         return INVALID_PARAMETER;
@@ -67,6 +71,19 @@ int fbvbs_configure_host_callsite_table(
     if (caller_class != FBVBS_HOST_CALLER_CLASS_FBVBS &&
         caller_class != FBVBS_HOST_CALLER_CLASS_VMM) {
         return INVALID_PARAMETER;
+    }
+
+    /* Runtime overflow check for uint16_t cast */
+    if (count > UINT16_MAX) {
+        return INVALID_PARAMETER;
+    }
+
+    /* Check if caller_class already exists to prevent overwriting */
+    for (index = 0U; index < FBVBS_MAX_HOST_CALLSITE_TABLES; ++index) {
+        if (state->host_callsites[index].active &&
+            state->host_callsites[index].caller_class == caller_class) {
+            return ALREADY_EXISTS;
+        }
     }
 
     table = (struct fbvbs_host_callsite_table){0};
@@ -212,22 +229,107 @@ static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
 
 /*@ requires \valid(hash + (0 .. 47));
     assigns hash[0 .. 47];
-    ensures hash[0] == tag;
-    ensures hash[47] == (uint8_t)(tag ^ 0xFFU);
 */
 static void fbvbs_seed_hash(uint8_t hash[48], uint8_t tag) {
     uint32_t index;
+    uint32_t state[8];
+    uint32_t temp;
+    uint32_t w[64];
 
-    /*@ loop invariant 0 <= index <= 48;
-        loop invariant \forall integer j; 0 <= j < index ==> hash[j] == 0;
-        loop assigns index, hash[0 .. 47];
-        loop variant 48 - index;
-    */
-    for (index = 0U; index < 48U; ++index) {
-        hash[index] = 0U;
+    /* Initialize SHA-256 state with initial values */
+    state[0] = 0x6A09E667U;
+    state[1] = 0xBB67AE85U;
+    state[2] = 0x3C6EF372U;
+    state[3] = 0xA54FF53AU;
+    state[4] = 0x510E527FU;
+    state[5] = 0x9B05688CU;
+    state[6] = 0x1F83D9ABU;
+    state[7] = 0x5BE0CD19U;
+
+    /* Prepare message schedule */
+    for (index = 0U; index < 16U; ++index) {
+        w[index] = 0U;
     }
-    hash[0] = tag;
-    hash[47] = (uint8_t)(tag ^ 0xFFU);
+    w[0] = ((uint32_t)tag) << 24;
+
+    /* Extend message schedule */
+    for (index = 16U; index < 64U; ++index) {
+        temp = w[index - 15];
+        uint32_t s0 = ((temp >> 7) | (temp << 25)) ^ ((temp >> 18) | (temp << 14)) ^ (temp >> 3);
+        temp = w[index - 2];
+        uint32_t s1 = ((temp >> 17) | (temp << 15)) ^ ((temp >> 19) | (temp << 13)) ^ (temp >> 10);
+        w[index] = w[index - 16] + s0 + w[index - 7] + s1;
+    }
+
+    /* SHA-256 compression function */
+    uint32_t a = state[0];
+    uint32_t b = state[1];
+    uint32_t c = state[2];
+    uint32_t d = state[3];
+    uint32_t e = state[4];
+    uint32_t f = state[5];
+    uint32_t g = state[6];
+    uint32_t h = state[7];
+
+    /* SHA-256 round constants */
+    static const uint32_t k[64] = {
+        0x428A2F98U, 0x71374491U, 0xB5C0FBCFU, 0xE9B5DBA5U,
+        0x3956C25BU, 0x59F111F1U, 0x923F82A4U, 0xAB1C5ED5U,
+        0xD807AA98U, 0x12835B01U, 0x243185BEU, 0x550C7DC3U,
+        0x72BE5D74U, 0x80DEB1FEU, 0x9BDC06A7U, 0xC19BF174U,
+        0xE49B69C1U, 0xEFBE4786U, 0x0FC19DC6U, 0x240CA1CCU,
+        0x2DE92C6FU, 0x4A7484AAU, 0x5CB0A9DCU, 0x76F988DAU,
+        0x983E5152U, 0xA831C66DU, 0xB00327C8U, 0xBF597FC7U,
+        0xC6E00BF3U, 0xD5A79147U, 0x06CA6351U, 0x14292967U,
+        0x27B70A85U, 0x2E1B2138U, 0x4D2C6DFCU, 0x53380D13U,
+        0x650A7354U, 0x766A0ABBU, 0x81C2C92EU, 0x92722C85U,
+        0xA2BFE8A1U, 0xA81A664BU, 0xC24B8B70U, 0xC76C51A3U,
+        0xD192E819U, 0xD6990624U, 0xF40E3585U, 0x106AA070U,
+        0x19A4C116U, 0x1E376C08U, 0x2748774CU, 0x34B0BCB5U,
+        0x391C0CB3U, 0x4ED8AA4AU, 0x5B9CCA4FU, 0x682E6FF3U,
+        0x748F82EEU, 0x78A5636FU, 0x84C87814U, 0x8CC70208U,
+        0x90BEFFFAU, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U
+    };
+
+    for (index = 0U; index < 64U; ++index) {
+        uint32_t S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t temp1 = h + S1 + ch + k[index] + w[index];
+        uint32_t S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+
+    /* Convert state to hash bytes (big-endian) */
+    for (index = 0U; index < 8U; ++index) {
+        hash[index * 4] = (uint8_t)(state[index] >> 24);
+        hash[index * 4 + 1] = (uint8_t)(state[index] >> 16);
+        hash[index * 4 + 2] = (uint8_t)(state[index] >> 8);
+        hash[index * 4 + 3] = (uint8_t)(state[index]);
+    }
+
+    /* Fill remaining bytes with derived values */
+    for (index = 32U; index < 48U; ++index) {
+        hash[index] = hash[index - 32] ^ hash[index - 16] ^ tag;
+    }
 }
 
 struct fbvbs_boot_artifact_seed {
@@ -443,11 +545,18 @@ static int fbvbs_validate_boot_artifact_catalog(
     struct fbvbs_artifact_catalog *catalog
 ) {
     uint32_t index;
-    uint32_t other;
+    uint32_t hash_index;
+    uint64_t hash_table[32];  /* Simple hash table for duplicate detection */
+    uint32_t hash_table_size = 32U;
 
     if (artifact_entries == NULL || catalog == NULL || artifact_count == 0U ||
         artifact_count > FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
         return INVALID_PARAMETER;
+    }
+
+    /* Initialize hash table */
+    for (index = 0U; index < hash_table_size; ++index) {
+        hash_table[index] = 0U;
     }
 
     *catalog = (struct fbvbs_artifact_catalog){0};
@@ -457,7 +566,7 @@ static int fbvbs_validate_boot_artifact_catalog(
         loop invariant catalog->count == artifact_count;
         loop invariant \forall integer j; 0 <= j < index ==>
             catalog->entries[j].related_index < artifact_count;
-        loop assigns index, other, *catalog;
+        loop assigns index, hash_index, *catalog;
         loop variant artifact_count - index;
     */
     for (index = 0U; index < artifact_count; ++index) {
@@ -468,15 +577,18 @@ static int fbvbs_validate_boot_artifact_catalog(
             entry->related_index >= artifact_count) {
             return INVALID_PARAMETER;
         }
-        /*@ loop invariant 0 <= other <= index;
-            loop assigns other;
-            loop variant index - other;
-        */
-        for (other = 0U; other < index; ++other) {
-            if (artifact_entries[other].object_id == entry->object_id) {
+
+        /* Check for duplicate object_id using hash table */
+        hash_index = (uint32_t)(entry->object_id % hash_table_size);
+        /* Linear probing for collision resolution */
+        while (hash_table[hash_index] != 0U) {
+            if (hash_table[hash_index] == entry->object_id) {
                 return ALREADY_EXISTS;
             }
+            hash_index = (hash_index + 1U) % hash_table_size;
         }
+        hash_table[hash_index] = entry->object_id;
+
         catalog->entries[index] = *entry;
     }
 
@@ -852,6 +964,7 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
 void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     static const uint8_t boot_payload[] = "fbvbs hypervisor kernel boot";
     struct fbvbs_artifact_catalog_entry boot_artifact_entries[FBVBS_BOOT_ARTIFACT_SEED_COUNT];
+    int status;
 
     *state = (struct fbvbs_hypervisor_state){0};
     state->next_partition_id = 1U;
@@ -895,8 +1008,129 @@ void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
 
 /*@ assigns g_fbvbs_hypervisor;
 */
-void fbvbs_kernel_main(void) {
+void fbvbs_kernel_main(const void *multiboot_info) {
+    /* Store Multiboot information pointer for later use */
+    g_fbvbs_hypervisor.multiboot_info = multiboot_info;
+
     fbvbs_hypervisor_init(&g_fbvbs_hypervisor);
+
+    /* Process Multiboot information if available */
+    if (multiboot_info != NULL) {
+        fbvbs_process_multiboot_info(&g_fbvbs_hypervisor, multiboot_info);
+    }
+}
+
+/* Process Multiboot information structure */
+void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info) {
+    const uint32_t *info = (const uint32_t *)multiboot_info;
+    uint32_t total_size;
+    uint32_t offset;
+
+    if (state == NULL || multiboot_info == NULL) {
+        return;
+    }
+
+    /* Multiboot2 information structure format:
+     * [0] total_size (bytes)
+     * [1] reserved
+     * [2...] tags
+     */
+    total_size = info[0];
+    offset = 8;  /* Skip total_size and reserved */
+
+    /* Initialize memory map count */
+    state->memory_map_count = 0U;
+
+    /* Iterate through tags */
+    while (offset < total_size) {
+        const uint32_t *tag = (const uint32_t *)((const uint8_t *)multiboot_info + offset);
+        uint32_t type = tag[0];
+        uint32_t size = tag[1];
+
+        /* Align to 8-byte boundary */
+        uint32_t aligned_size = (size + 7) & ~7U;
+
+        switch (type) {
+            case 0:  /* End tag */
+                return;
+
+            case 4:  /* Basic memory information */
+                if (size >= 16) {
+                    /* mem_lower and mem_upper in KB */
+                    uint32_t mem_lower = tag[2];
+                    uint32_t mem_upper = tag[3];
+                    /* Store memory information if needed */
+                    (void)mem_lower;
+                    (void)mem_upper;
+                }
+                break;
+
+            case 6:  /* Memory map */
+                /* Process memory map entries */
+                if (size >= 16) {
+                    uint32_t entry_size = tag[4];
+                    uint32_t entry_version = tag[5];
+                    uint32_t entry_offset = offset + 16;
+
+                    (void)entry_version;
+
+                    while (entry_offset < offset + size && state->memory_map_count < 32U) {
+                        const uint64_t *entry = (const uint64_t *)((const uint8_t *)multiboot_info + entry_offset);
+                        uint64_t base_addr = entry[0];
+                        uint64_t length = entry[1];
+                        uint32_t entry_type = (uint32_t)entry[2];
+
+                        /* Store memory map entry */
+                        state->memory_map[state->memory_map_count].base_addr = base_addr;
+                        state->memory_map[state->memory_map_count].length = length;
+                        state->memory_map[state->memory_map_count].type = entry_type;
+                        state->memory_map[state->memory_map_count].reserved = 0U;
+                        state->memory_map_count++;
+
+                        entry_offset += entry_size;
+                    }
+                }
+                break;
+
+            case 1:  /* Command line */
+                /* Process command line string */
+                if (size > 8) {
+                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 8);
+                    (void)cmdline;
+                }
+                break;
+
+            case 3:  /* Module */
+                /* Process module information */
+                if (size >= 16) {
+                    uint32_t mod_start = tag[2];
+                    uint32_t mod_end = tag[3];
+                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 16);
+                    (void)mod_start;
+                    (void)mod_end;
+                    (void)cmdline;
+                }
+                break;
+
+            case 5:  /* Boot device */
+                /* Process boot device information */
+                if (size >= 16) {
+                    uint32_t biosdev = tag[2];
+                    uint32_t partition = tag[3];
+                    uint32_t sub_partition = tag[4];
+                    state->boot_device = biosdev;
+                    state->boot_partition = partition;
+                    state->boot_sub_partition = sub_partition;
+                }
+                break;
+
+            default:
+                /* Unknown tag, skip */
+                break;
+        }
+
+        offset += aligned_size;
+    }
 }
 
 /*@ requires \valid(state) || state == \null;

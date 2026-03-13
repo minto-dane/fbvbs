@@ -236,6 +236,13 @@ struct fbvbs_command_tracker {
     uint64_t last_nonce;
 };
 
+struct fbvbs_memory_map_entry {
+    uint64_t base_addr;
+    uint64_t length;
+    uint32_t type;
+    uint32_t reserved;
+};
+
 struct fbvbs_hypervisor_state {
     uint64_t next_partition_id;
     uint64_t next_measurement_digest_id;
@@ -278,6 +285,13 @@ struct fbvbs_hypervisor_state {
     struct fbvbs_command_tracker command_trackers[FBVBS_MAX_COMMAND_TRACKERS];
     struct fbvbs_iommu_domain iommu_domains[FBVBS_MAX_PARTITIONS];
     struct fbvbs_partition partitions[FBVBS_MAX_PARTITIONS];
+    const void *multiboot_info;  /* Pointer to Multiboot information structure */
+    uint32_t memory_map_count;
+    struct fbvbs_memory_map_entry memory_map[32];  /* Memory map from bootloader */
+    uint32_t boot_device;
+    uint32_t boot_partition;
+    uint32_t boot_sub_partition;
+    volatile uint32_t log_lock;  /* Spinlock for log operations */
 };
 
 extern struct fbvbs_hypervisor_state g_fbvbs_hypervisor;
@@ -306,7 +320,8 @@ static inline void fbvbs_copy_bytes(uint8_t *dest, const uint8_t *src, size_t n)
 }
 
 void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state);
-void fbvbs_kernel_main(void);
+void fbvbs_kernel_main(const void *multiboot_info);
+void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info);
 
 uint32_t fbvbs_crc32c(const uint8_t *data, size_t length);
 int fbvbs_log_init(struct fbvbs_hypervisor_state *state);

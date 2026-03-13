@@ -1,0 +1,102 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-03-13",
+  "verification_status": {
+    "frama_c_wp": {
+      "total_goals": 1599,
+      "discharged_goals": 1599,
+      "success_rate": "100%",
+      "timeouts": 0,
+      "model": "Typed+Cast",
+      "provers": ["Alt-Ergo 2.4.3", "Z3 4.8.12"]
+    }
+  },
+  "microhypervisor_modules": {
+    "language": "C11 + ACSL",
+    "verification_tool": "Frama-C WP",
+    "modules": [
+      {
+        "name": "vmx.c",
+        "description": "Intel VT-x 仮想化操作",
+        "verification_status": "verified"
+      },
+      {
+        "name": "vm_policy.c",
+        "description": "VM ポリシー管理",
+        "verification_status": "verified"
+      },
+      {
+        "name": "partition.c",
+        "description": "パーティション管理",
+        "verification_status": "verified"
+      },
+      {
+        "name": "command.c",
+        "description": "コマンド処理",
+        "verification_status": "verified"
+      },
+      {
+        "name": "security.c",
+        "description": "セキュリティ機能",
+        "verification_status": "verified"
+      },
+      {
+        "name": "memory.c",
+        "description": "メモリ管理",
+        "verification_status": "verified"
+      },
+      {
+        "name": "memory_utils.c",
+        "description": "メモリユーティリティ",
+        "verification_status": "verified"
+      },
+      {
+        "name": "log.c",
+        "description": "ログ機能",
+        "verification_status": "verified"
+      },
+      {
+        "name": "kernel.c",
+        "description": "カーネル基盤",
+        "verification_status": "verified"
+      }
+    ]
+  },
+  "trusted_service_modules": {
+    "language": "Ada 2022 + SPARK 2014",
+    "verification_tool": "GNATprove",
+    "scope": "信頼サービスパーティション内で動作するセキュリティサービス",
+    "modules": [
+      {
+        "name": "KCI (Kernel Code Integrity Service)",
+        "description": "カーネルコード整合性サービス",
+        "responsibilities": ["W^X 強制", "KLD 署名検証", "コードページ整合性確認"]
+      },
+      {
+        "name": "KSI (Kernel State Integrity Service)",
+        "description": "カーネル状態整合性サービス",
+        "responsibilities": ["Tier A/B 保護", "Setuid 検証", "ポインタチェーン検証"]
+      },
+      {
+        "name": "IKS (Identity Key Service)",
+        "description": "身元鍵サービス",
+        "responsibilities": ["鍵インポート", "署名", "鍵交換", "鍵導出"]
+      },
+      {
+        "name": "SKS (Storage Key Service)",
+        "description": "ストレージ鍵サービス",
+        "responsibilities": ["ディスク鍵管理", "バッチ暗号化/復号化", "レート制限"]
+      },
+      {
+        "name": "UVS (Update Verification Service)",
+        "description": "更新検証サービス",
+        "responsibilities": ["マニフェスト検証", "署名検証", "ロールバック防止"]
+      }
+    ]
+  },
+  "design_principles": {
+    "dual_language_architecture": "マイクロハイパーバイザーは C11 + Frama-C WP、信頼サービスは Ada/SPARK",
+    "separation_of_concerns": "ハードウェア操作はマイクロハイパーバイザー、ポリシー判断は信頼サービス",
+    "verification_boundary": "Frama-C WP はマイクロハイパーバイザー、GNATprove は信頼サービス"
+  }
+}

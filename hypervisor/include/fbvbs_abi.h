@@ -3,9 +3,70 @@
 
 #include <stdint.h>
 
-#include "fbvbs_abi_v1.h"
+#define OK 0
+#define INVALID_PARAMETER (-1)
+#define ABI_VERSION_UNSUPPORTED (-2)
+#define RESOURCE_BUSY (-3)
+#define NOT_SUPPORTED_ON_PLATFORM (-4)
+#define INVALID_STATE (-5)
+#define RESOURCE_EXHAUSTED (-6)
+#define ALREADY_EXISTS (-7)
+#define NOT_FOUND (-8)
+#define GENERATION_MISMATCH (-9)
+#define SIGNATURE_INVALID (-10)
+#define PERMISSION_DENIED (-11)
+#define POLICY_DENIED (-12)
+#define BUFFER_TOO_SMALL (-13)
+#define MEASUREMENT_FAILED (-14)
+#define INTERNAL_CORRUPTION (-15)
 
 #define FBVBS_ABI_VERSION 1U
+
+#define FBVBS_LOG_RECORD_V1_SIZE 256U
+
+struct fbvbs_command_page_v1 {
+    uint32_t abi_version;
+    uint32_t input_length;
+    uint32_t output_length;
+    uint32_t actual_output_length;
+    uint32_t command_state;
+    uint32_t flags;
+    uint64_t output_page_gpa;
+    uint64_t reserved0;
+    uint8_t body[4000];
+};
+
+struct fbvbs_bootstrap_page_v1 {
+    uint32_t abi_version;
+    uint32_t reserved0;
+    uint64_t partition_id;
+    uint64_t command_page_gpa;
+    uint64_t log_ring_gpa;
+};
+
+struct fbvbs_log_ring_header_v1 {
+    uint32_t abi_version;
+    uint32_t record_size;
+    uint32_t total_size;
+    uint32_t write_offset;
+    uint64_t max_readable_sequence;
+    uint64_t boot_id_hi;
+    uint64_t boot_id_lo;
+};
+
+struct fbvbs_log_record_v1 {
+    uint64_t sequence;
+    uint64_t boot_id_hi;
+    uint64_t boot_id_lo;
+    uint64_t timestamp_counter;
+    uint32_t cpu_id;
+    uint32_t source_component;
+    uint16_t severity;
+    uint16_t event_code;
+    uint32_t payload_length;
+    uint8_t payload[220];
+    uint32_t crc32c;
+};
 #define FBVBS_PAGE_SIZE 4096U
 #define FBVBS_MAX_PARTITIONS 16U
 #define FBVBS_MAX_VCPUS 4U
@@ -101,6 +162,14 @@
 #define FBVBS_ARTIFACT_OBJECT_IMAGE 1U
 #define FBVBS_ARTIFACT_OBJECT_MANIFEST 2U
 #define FBVBS_ARTIFACT_OBJECT_MODULE 3U
+
+#define SERVICE_KIND_NONE 0U
+#define SERVICE_KIND_KCI 1U
+#define SERVICE_KIND_VMM 2U
+#define SERVICE_KIND_KSI 3U
+#define SERVICE_KIND_IKS 4U
+#define SERVICE_KIND_SKS 5U
+#define SERVICE_KIND_UVS 6U
 
 struct fbvbs_partition_create_request {
     uint16_t kind;
