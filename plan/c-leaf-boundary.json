@@ -1,102 +1,131 @@
 {
-  "version": "1.0",
-  "last_updated": "2026-03-13",
+  "version": "1.1",
+  "last_updated": "2026-03-18",
   "verification_status": {
+    "gcc_fanalyzer": {
+      "status": "passing",
+      "command": "make -C hypervisor analyze",
+      "scope": "11 retained C source files"
+    },
+    "unit_tests": {
+      "status": "passing",
+      "command": "make -C hypervisor test",
+      "suites": [
+        "fbvbs_leaf_boundary_tests",
+        "fbvbs_policy_security_tests"
+      ]
+    },
     "frama_c_wp": {
-      "total_goals": 1599,
-      "discharged_goals": 1599,
-      "success_rate": "100%",
-      "timeouts": 0,
-      "model": "Typed+Cast",
-      "provers": ["Alt-Ergo 2.4.3", "Z3 4.8.12"]
+      "status": "blocked_in_current_environment",
+      "command": "make -C hypervisor frama-c-wp",
+      "reason": "Frama-C WP plugin is not installed in this environment.",
+      "model": "Typed+Cast"
     }
+  },
+  "production_readiness": {
+    "status": "not_ready",
+    "blocking_items": [
+      "KCI_SET_WX page binding between approved artifact bytes and execute-enabled GPA ranges",
+      "authoritative IOMMU and interrupt-remapping bring-up",
+      "authoritative boot-integrity chain establishment",
+      "device qualification, ACS verification, and safe reset/FLR for passthrough"
+    ]
   },
   "microhypervisor_modules": {
     "language": "C11 + ACSL",
-    "verification_tool": "Frama-C WP",
+    "assurance_boundary": "retained C model",
     "modules": [
       {
         "name": "vmx.c",
-        "description": "Intel VT-x 仮想化操作",
-        "verification_status": "verified"
+        "description": "Intel VT-x capability probing and leaf behavior",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "vm_policy.c",
-        "description": "VM ポリシー管理",
-        "verification_status": "verified"
+        "description": "VM exit handling policy",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "partition.c",
-        "description": "パーティション管理",
-        "verification_status": "verified"
+        "description": "Partition lifecycle, VM lifecycle, mapping, and shared-memory policy",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "command.c",
-        "description": "コマンド処理",
-        "verification_status": "verified"
+        "description": "Hypercall command validation and dispatch",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "security.c",
-        "description": "セキュリティ機能",
-        "verification_status": "verified"
+        "description": "KCI, KSI, IKS, SKS, UVS retained C service logic",
+        "implementation_status": "implemented_with_fail_closed_gates",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "memory.c",
-        "description": "メモリ管理",
-        "verification_status": "verified"
+        "description": "Memory object and mapping management",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "memory_utils.c",
-        "description": "メモリユーティリティ",
-        "verification_status": "verified"
+        "description": "Memory utility helpers",
+        "implementation_status": "implemented",
+        "assurance_status": "analyzed_and_tested"
       },
       {
         "name": "log.c",
-        "description": "ログ機能",
-        "verification_status": "verified"
+        "description": "Audit logging with integrity metadata",
+        "implementation_status": "implemented",
+        "assurance_status": "annotated_analyzed_and_tested"
       },
       {
         "name": "kernel.c",
-        "description": "カーネル基盤",
-        "verification_status": "verified"
+        "description": "Hypervisor state initialization and platform gating",
+        "implementation_status": "implemented_with_fail_closed_gates",
+        "assurance_status": "annotated_analyzed_and_tested"
+      },
+      {
+        "name": "boot_multiboot.c",
+        "description": "Multiboot2 parsing retained C path",
+        "implementation_status": "implemented",
+        "assurance_status": "analyzed_and_tested"
+      },
+      {
+        "name": "cpu_security.c",
+        "description": "CPU feature detection and mitigation state computation",
+        "implementation_status": "implemented_with_fail_closed_gates",
+        "assurance_status": "annotated_analyzed_and_tested"
       }
     ]
   },
+  "current_fail_closed_gates": [
+    {
+      "area": "KCI_SET_WX",
+      "reason": "Executable-page byte binding is not implemented strongly enough in the retained C model."
+    },
+    {
+      "area": "VM_ASSIGN_DEVICE / VM_RELEASE_DEVICE",
+      "reason": "Authoritative device qualification, ACS validation, interrupt remapping, and safe reset/FLR are not implemented."
+    },
+    {
+      "area": "hypervisor init",
+      "reason": "IOMMU and boot-integrity detection do not yet provide authoritative platform bring-up evidence."
+    }
+  ],
   "trusted_service_modules": {
     "language": "Ada 2022 + SPARK 2014",
     "verification_tool": "GNATprove",
-    "scope": "信頼サービスパーティション内で動作するセキュリティサービス",
-    "modules": [
-      {
-        "name": "KCI (Kernel Code Integrity Service)",
-        "description": "カーネルコード整合性サービス",
-        "responsibilities": ["W^X 強制", "KLD 署名検証", "コードページ整合性確認"]
-      },
-      {
-        "name": "KSI (Kernel State Integrity Service)",
-        "description": "カーネル状態整合性サービス",
-        "responsibilities": ["Tier A/B 保護", "Setuid 検証", "ポインタチェーン検証"]
-      },
-      {
-        "name": "IKS (Identity Key Service)",
-        "description": "身元鍵サービス",
-        "responsibilities": ["鍵インポート", "署名", "鍵交換", "鍵導出"]
-      },
-      {
-        "name": "SKS (Storage Key Service)",
-        "description": "ストレージ鍵サービス",
-        "responsibilities": ["ディスク鍵管理", "バッチ暗号化/復号化", "レート制限"]
-      },
-      {
-        "name": "UVS (Update Verification Service)",
-        "description": "更新検証サービス",
-        "responsibilities": ["マニフェスト検証", "署名検証", "ロールバック防止"]
-      }
-    ]
+    "status": "planned",
+    "scope": "Trusted-service partitions defined by the FBVBS design"
   },
   "design_principles": {
-    "dual_language_architecture": "マイクロハイパーバイザーは C11 + Frama-C WP、信頼サービスは Ada/SPARK",
-    "separation_of_concerns": "ハードウェア操作はマイクロハイパーバイザー、ポリシー判断は信頼サービス",
-    "verification_boundary": "Frama-C WP はマイクロハイパーバイザー、GNATprove は信頼サービス"
+    "dual_language_architecture": "Microhypervisor logic is retained in C11 + ACSL; trusted services are planned in Ada/SPARK.",
+    "separation_of_concerns": "Hardware ownership remains in the microhypervisor; policy decisions remain in trusted services.",
+    "assurance_boundary": "Current repository evidence is analyzer + tests, with optional Frama-C WP when the plugin is available."
   }
 }

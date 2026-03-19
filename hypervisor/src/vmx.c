@@ -22,27 +22,33 @@ static void fbvbs_leaf_zero_caps(struct fbvbs_vmx_capabilities *caps) {
 }
 
 /*@ requires \valid(exit);
-    assigns exit->exit_reason, exit->cr_number, exit->msr_address,
-            exit->port, exit->access_size, exit->is_write,
-            exit->value, exit->guest_physical_address;
+    assigns *exit;
     ensures exit->exit_reason == 0;
-    ensures exit->cr_number == 0;
-    ensures exit->msr_address == 0;
-    ensures exit->port == 0;
-    ensures exit->access_size == 0;
-    ensures exit->is_write == 0;
-    ensures exit->value == 0;
-    ensures exit->guest_physical_address == 0;
+    ensures exit->reserved0 == 0;
 */
 static void fbvbs_leaf_zero_exit(struct fbvbs_vmx_leaf_exit *exit) {
-    exit->exit_reason = 0U;
-    exit->cr_number = 0U;
-    exit->msr_address = 0U;
-    exit->port = 0U;
-    exit->access_size = 0U;
-    exit->is_write = 0U;
-    exit->value = 0U;
-    exit->guest_physical_address = 0U;
+    *exit = (struct fbvbs_vmx_leaf_exit){0};
+}
+
+/*@ requires \valid_read(vcpu);
+    assigns \nothing;
+    ensures \result == FBVBS_VM_EPT_ACCESS_READ ||
+            \result == FBVBS_VM_EPT_ACCESS_WRITE ||
+            \result == FBVBS_VM_EPT_ACCESS_EXECUTE ||
+            \result == (FBVBS_VM_EPT_ACCESS_READ | FBVBS_VM_EPT_ACCESS_WRITE) ||
+            \result == (FBVBS_VM_EPT_ACCESS_READ | FBVBS_VM_EPT_ACCESS_EXECUTE) ||
+            \result == (FBVBS_VM_EPT_ACCESS_WRITE | FBVBS_VM_EPT_ACCESS_EXECUTE) ||
+            \result == (FBVBS_VM_EPT_ACCESS_READ | FBVBS_VM_EPT_ACCESS_WRITE | FBVBS_VM_EPT_ACCESS_EXECUTE);
+*/
+static uint32_t fbvbs_leaf_synthetic_ept_access_bits(const struct fbvbs_vcpu *vcpu) {
+    uint32_t access_bits =
+        (uint32_t)((vcpu->rflags >> FBVBS_SYNTHETIC_EPT_ACCESS_SHIFT) & 0x7U);
+
+    if (access_bits == 0U) {
+        return FBVBS_VM_EPT_ACCESS_READ;
+    }
+
+    return access_bits;
 }
 
 /*@ requires \valid(caps) || caps == \null;
@@ -163,7 +169,9 @@ int fbvbs_vmx_leaf_run_vcpu(
     const struct fbvbs_vmx_capabilities *caps,
     const struct fbvbs_vcpu *vcpu,
     uint64_t pinned_cr0_mask,
+    uint64_t pinned_cr0_value,
     uint64_t pinned_cr4_mask,
+    uint64_t pinned_cr4_value,
     const uint32_t *intercepted_msrs,
     uint32_t intercepted_msr_count,
     uint64_t mapped_bytes,
@@ -185,44 +193,55 @@ int fbvbs_vmx_leaf_run_vcpu(
 
     if (vcpu->pending_interrupt_delivery != 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
-        leaf_exit->value = vcpu->pending_interrupt_vector;
+        leaf_exit->detail.external_interrupt.vector = vcpu->pending_interrupt_vector;
         return OK;
     }
-    if (pinned_cr0_mask != 0U && (vcpu->cr0 & pinned_cr0_mask) != pinned_cr0_mask) {
+    if (pinned_cr0_mask != 0U && (vcpu->cr0 & pinned_cr0_mask) != pinned_cr0_value) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
-        leaf_exit->cr_number = 0U;
-        leaf_exit->value = vcpu->cr0;
+        leaf_exit->detail.cr_access.cr_number = 0U;
+        leaf_exit->detail.cr_access.access_type = FBVBS_VM_CR_ACCESS_WRITE;
+        leaf_exit->detail.cr_access.value = vcpu->cr0;
         return OK;
     }
-    if (pinned_cr4_mask != 0U && (vcpu->cr4 & pinned_cr4_mask) != pinned_cr4_mask) {
+    if (pinned_cr4_mask != 0U && (vcpu->cr4 & pinned_cr4_mask) != pinned_cr4_value) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
-        leaf_exit->cr_number = 4U;
-        leaf_exit->value = vcpu->cr4;
+        leaf_exit->detail.cr_access.cr_number = 4U;
+        leaf_exit->detail.cr_access.access_type = FBVBS_VM_CR_ACCESS_WRITE;
+        leaf_exit->detail.cr_access.value = vcpu->cr4;
         return OK;
     }
     if (intercepted_msr_count != 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
-        leaf_exit->msr_address = intercepted_msrs[0];
+        leaf_exit->detail.msr_access.msr_address = intercepted_msrs[0];
+        /* Synthetic convention: RFLAGS bit 0 selects RDMSR/WRMSR and RSP
+         * carries the 64-bit value used by the policy layer tests. */
+        leaf_exit->detail.msr_access.is_write = (uint32_t)(vcpu->rflags & 0x1U);
+        leaf_exit->detail.msr_access.value = vcpu->rsp;
         return OK;
     }
     if (mapped_bytes == 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
+        /* Synthetic convention: RSP is the faulting GPA and RFLAGS bits
+         * 10:8 encode the read/write/execute access bitmap. */
+        leaf_exit->detail.ept_violation.guest_physical_address = vcpu->rsp;
+        leaf_exit->detail.ept_violation.access_bits =
+            fbvbs_leaf_synthetic_ept_access_bits(vcpu);
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_PIO) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
-        leaf_exit->port = (uint16_t)(vcpu->rsp & 0xFFFFU);
-        leaf_exit->access_size = 4U;
-        leaf_exit->is_write = (uint8_t)(vcpu->rflags & 0x1U);
-        leaf_exit->value = (uint32_t)vcpu->rflags;
+        leaf_exit->detail.pio.port = (uint16_t)(vcpu->rsp & 0xFFFFU);
+        leaf_exit->detail.pio.access_size = 4U;
+        leaf_exit->detail.pio.is_write = (uint8_t)(vcpu->rflags & 0x1U);
+        leaf_exit->detail.pio.value = (uint32_t)vcpu->rflags;
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_MMIO) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
-        leaf_exit->guest_physical_address = vcpu->rsp;
-        leaf_exit->access_size = 8U;
-        leaf_exit->is_write = (uint8_t)(vcpu->rflags & 0x1U);
-        leaf_exit->value = (uint32_t)vcpu->rflags;
+        leaf_exit->detail.mmio.guest_physical_address = vcpu->rsp;
+        leaf_exit->detail.mmio.access_size = 8U;
+        leaf_exit->detail.mmio.is_write = (uint8_t)(vcpu->rflags & 0x1U);
+        leaf_exit->detail.mmio.value = (uint32_t)vcpu->rflags;
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_SHUTDOWN) {

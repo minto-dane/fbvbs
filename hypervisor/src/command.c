@@ -965,7 +965,12 @@ static int handle_memory_allocate_object(struct fbvbs_hypervisor_state *state, c
     if (page->input_length != sizeof(struct fbvbs_memory_allocate_object_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_memory_allocate_object(state, (const struct fbvbs_memory_allocate_object_request *)page->body, &response);
+    status = fbvbs_memory_allocate_object(
+        state,
+        (const struct fbvbs_memory_allocate_object_request *)page->body,
+        &response,
+        owner != NULL ? owner->partition_id : 0U
+    );
     if (status == OK) {
         status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
     }
@@ -978,11 +983,14 @@ static int handle_memory_allocate_object(struct fbvbs_hypervisor_state *state, c
     assigns *state;
 */
 static int handle_memory_map(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page) {
-    (void)owner;
     if (page->input_length != sizeof(struct fbvbs_memory_map_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_memory_map(state, (const struct fbvbs_memory_map_request *)page->body);
+    return fbvbs_memory_map(
+        state,
+        (const struct fbvbs_memory_map_request *)page->body,
+        owner != NULL ? owner->partition_id : 0U
+    );
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1004,11 +1012,14 @@ static int handle_memory_unmap(struct fbvbs_hypervisor_state *state, const struc
     assigns *state;
 */
 static int handle_memory_set_permission(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page) {
-    (void)owner;
     if (page->input_length != sizeof(struct fbvbs_memory_set_permission_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_memory_set_permission(state, (const struct fbvbs_memory_set_permission_request *)page->body);
+    return fbvbs_memory_set_permission(
+        state,
+        (const struct fbvbs_memory_set_permission_request *)page->body,
+        owner != NULL ? owner->partition_id : 0U
+    );
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1037,11 +1048,14 @@ static int handle_memory_register_shared(struct fbvbs_hypervisor_state *state, c
     assigns *state;
 */
 static int handle_memory_release_object(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page) {
-    (void)owner;
     if (page->input_length != sizeof(struct fbvbs_memory_object_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_memory_release_object(state, ((const struct fbvbs_memory_object_id_request *)page->body)->memory_object_id);
+    return fbvbs_memory_release_object(
+        state,
+        ((const struct fbvbs_memory_object_id_request *)page->body)->memory_object_id,
+        owner != NULL ? owner->partition_id : 0U
+    );
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1561,11 +1575,14 @@ static int handle_vm_get_register(struct fbvbs_hypervisor_state *state, const st
     assigns *state;
 */
 static int handle_vm_map_memory(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page) {
-    (void)owner;
     if (page->input_length != sizeof(struct fbvbs_vm_map_memory_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_map_memory(state, (const struct fbvbs_vm_map_memory_request *)page->body);
+    return fbvbs_vm_map_memory(
+        state,
+        (const struct fbvbs_vm_map_memory_request *)page->body,
+        owner != NULL ? owner->partition_id : 0U
+    );
 }
 
 /*@ requires fbvbs_state_invariant(state);

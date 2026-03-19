@@ -55,24 +55,21 @@ ANALYZER_CFLAGS := $(HOST_CFLAGS) -fanalyzer
 ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(ALL_SOURCES))
 HOST_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/host_%.o,$(ALL_SOURCES))
 
-TEST_BIN := $(BUILD_DIR)/fbvbs_leaf_boundary_tests
+TEST_BINS := \
+	$(BUILD_DIR)/fbvbs_leaf_boundary_tests \
+	$(BUILD_DIR)/fbvbs_policy_security_tests
 
 # ---------- Frama-C ----------
 
-FRAMAC ?= frama-c
-FRAMAC_WP_PAR ?= $(shell \
-    MEM_KB=$$(grep MemTotal /proc/meminfo | awk '{print $$2}'); \
-    CORES=$$(nproc); \
-    MEM_PAR=$$((MEM_KB / 1048576)); \
-    if [ $$MEM_PAR -lt 2 ]; then MEM_PAR=2; fi; \
-    if [ $$CORES -lt $$MEM_PAR ]; then echo $$CORES; else echo $$MEM_PAR; fi)
+FRAMAC ?= $(shell \
+	if command -v opam >/dev/null 2>&1; then \
+		opam exec -- which frama-c 2>/dev/null || command -v frama-c; \
+	else \
+		command -v frama-c; \
+	fi)
 FRAMAC_WP_FLAGS := \
     -wp \
     -wp-model 'Typed+Cast' \
-    -wp-prover alt-ergo,z3 \
-    -wp-par $(FRAMAC_WP_PAR) \
-    -wp-timeout 45 \
-    -wp-smoke-tests \
     -kernel-warn-key annot-error=abort \
     -cpp-extra-args="-Iinclude"
 
@@ -85,12 +82,14 @@ all: analyze
 analyze: $(ANALYZER_OBJECTS)
 	@echo "GCC -fanalyzer: all $(words $(ALL_SOURCES)) sources passed."
 
-test: $(TEST_BIN)
-	$(TEST_BIN)
+test: $(TEST_BINS)
+	$(BUILD_DIR)/fbvbs_leaf_boundary_tests
+	$(BUILD_DIR)/fbvbs_policy_security_tests
 
 proof: frama-c-wp
 
 frama-c-wp:
+	@$(FRAMAC) -plugins | grep -q '^WP[[:space:]]' || { echo "Frama-C WP plugin is not installed in this environment."; exit 2; }
 	$(FRAMAC) $(FRAMAC_WP_FLAGS) $(FRAMA_C_WP_SOURCES)
 
 clean:
@@ -107,5 +106,8 @@ $(BUILD_DIR)/analyze_%.o: src/%.c | $(BUILD_DIR)
 $(BUILD_DIR)/host_%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BIN): $(BUILD_DIR)/host_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_leaf_boundary_tests: $(BUILD_DIR)/host_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_policy_security_tests: $(HOST_OBJECTS) tests/test_policy_security.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@

@@ -74,7 +74,7 @@ int fbvbs_log_init(struct fbvbs_hypervisor_state *state) {
     requires payload_length == 0 || \valid_read(payload + (0 .. payload_length - 1));
     requires payload_length == 0 || \separated(payload + (0 .. payload_length - 1), log);
     assigns *log, *lock;
-    ensures \result == OK || \result == RESOURCE_BUSY;
+    ensures \result == OK || \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
 */
 static int fbvbs_log_append_core(
     struct fbvbs_log_storage *log,
@@ -119,6 +119,18 @@ static int fbvbs_log_append_core(
         }
     }
 #endif
+
+    if (log->header.max_readable_sequence == UINT64_MAX) {
+#ifdef __FRAMAC__
+        *lock = 0U;
+#else
+        __asm__ volatile("movl %0, %1"
+                         :
+                         : "r"(0U), "m"(*lock)
+                         : "memory");
+#endif
+        return RESOURCE_EXHAUSTED;
+    }
 
     sequence = log->header.max_readable_sequence + 1U;
     slot_index = (uint32_t)((sequence - 1U) % FBVBS_LOG_SLOT_COUNT);
@@ -182,7 +194,8 @@ static int fbvbs_log_append_core(
     requires payload_length != 0 && payload != \null && state != \null ==>
              \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
     assigns state->mirror_log, state->log_lock;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
+                      \result == RESOURCE_EXHAUSTED;
     behavior null_state:
       assumes state == \null;
       assigns \nothing;
@@ -204,7 +217,7 @@ static int fbvbs_log_append_core(
       assumes payload_length <= 220;
       assumes payload_length == 0 || payload != \null;
       assigns state->mirror_log, state->log_lock;
-      ensures \result == OK || \result == RESOURCE_BUSY;
+      ensures \result == OK || \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
     complete behaviors;
     disjoint behaviors;
 */

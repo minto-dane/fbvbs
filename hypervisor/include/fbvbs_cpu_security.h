@@ -138,6 +138,7 @@ struct fbvbs_cpuid_features {
     uint32_t has_cet_ss;               /* ECX=7,0: ECX[7] */
     uint32_t has_cet_ibt;              /* ECX=7,0: EDX[20] */
     uint32_t has_md_clear;             /* ECX=7,0: EDX[10] */
+    uint32_t has_mcu_opt_ctrl;         /* ECX=7,0: EDX[9] */
     uint32_t has_ibpb;                 /* ECX=7,0: EDX[26] (Intel) */
     uint32_t has_stibp;                /* ECX=7,0: EDX[27] */
     uint32_t has_umip;                 /* ECX=7,0: ECX[2] */
@@ -403,7 +404,9 @@ int fbvbs_cpu_compute_cr_pins(struct fbvbs_cpu_security_profile *profile);
     requires cpu_count >= 1;
     requires \valid_read(profiles + (0 .. cpu_count - 1));
     requires \separated(profiles + (0 .. cpu_count - 1), state);
-    assigns state->host_spec_ctrl_value,
+    assigns state->cpu_count,
+            state->vendor,
+            state->host_spec_ctrl_value,
             state->worst_case_vuln,
             state->profiles_consistent;
     ensures \result == 0 || \result == -1;

@@ -118,6 +118,7 @@ struct fbvbs_memory_object {
     bool allocated;
     uint32_t object_flags;
     uint64_t memory_object_id;
+    uint64_t owner_partition_id;
     uint64_t size;
     uint32_t map_count;
     uint32_t shared_count;
@@ -277,7 +278,9 @@ struct fbvbs_hypervisor_state {
     struct fbvbs_uvs_manifest_set manifest_sets[8];
     struct fbvbs_uvs_artifact_approval approvals[FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES];
     uint64_t pinned_cr0_mask;
+    uint64_t pinned_cr0_value;
     uint64_t pinned_cr4_mask;
+    uint64_t pinned_cr4_value;
     uint32_t intercepted_msrs[FBVBS_MAX_INTERCEPTED_MSRS];
     uint32_t intercepted_msr_count;
     struct fbvbs_artifact_catalog artifact_catalog;
@@ -309,6 +312,7 @@ struct fbvbs_hypervisor_state {
         s->intercepted_msr_count <= FBVBS_MAX_INTERCEPTED_MSRS &&
         s->next_memory_object_id > 0 &&
         s->next_partition_id > 0 &&
+        s->next_measurement_digest_id > 0 &&
         s->next_shared_object_id > 0 &&
         s->next_target_set_id > 0 &&
         s->next_key_handle > 0 &&
@@ -325,6 +329,15 @@ void fbvbs_copy_memory(void *destination, const void *source, size_t length);
 int fbvbs_memory_is_zero(const void *buffer, size_t length);
 int fbvbs_constant_time_equals(const void *a, const void *b, size_t length);
 void fbvbs_zero_page_at_gpa(uint64_t gpa);
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static inline int fbvbs_id_allocator_can_advance(uint64_t next_id, uint64_t step) {
+    return next_id != 0U &&
+        step != 0U &&
+        next_id <= UINT64_MAX - step;
+}
 
 /*@ requires n == 0 || \valid(dest + (0 .. n - 1));
     requires n == 0 || \valid_read(src + (0 .. n - 1));
@@ -473,7 +486,8 @@ int fbvbs_vm_run(
 );
 int fbvbs_vm_map_memory(
     struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_vm_map_memory_request *request
+    const struct fbvbs_vm_map_memory_request *request,
+    uint64_t requester_partition_id
 );
 int fbvbs_vm_inject_interrupt(
     struct fbvbs_hypervisor_state *state,
@@ -490,11 +504,13 @@ int fbvbs_vm_release_device(
 int fbvbs_memory_allocate_object(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_allocate_object_request *request,
-    struct fbvbs_memory_allocate_object_response *response
+    struct fbvbs_memory_allocate_object_response *response,
+    uint64_t owner_partition_id
 );
 int fbvbs_memory_map(
     struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_memory_map_request *request
+    const struct fbvbs_memory_map_request *request,
+    uint64_t requester_partition_id
 );
 int fbvbs_memory_unmap(
     struct fbvbs_hypervisor_state *state,
@@ -502,7 +518,8 @@ int fbvbs_memory_unmap(
 );
 int fbvbs_memory_set_permission(
     struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_memory_set_permission_request *request
+    const struct fbvbs_memory_set_permission_request *request,
+    uint64_t requester_partition_id
 );
 int fbvbs_memory_register_shared(
     struct fbvbs_hypervisor_state *state,
@@ -512,7 +529,8 @@ int fbvbs_memory_register_shared(
 );
 int fbvbs_memory_release_object(
     struct fbvbs_hypervisor_state *state,
-    uint64_t memory_object_id
+    uint64_t memory_object_id,
+    uint64_t requester_partition_id
 );
 int fbvbs_memory_unregister_shared(
     struct fbvbs_hypervisor_state *state,

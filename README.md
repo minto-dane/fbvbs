@@ -1,13 +1,12 @@
 # FBVBS — FreeBSD Virtualization-Based Security
 
-FBVBS v7 は、FreeBSD 向けのマイクロハイパーベースのセキュリティアーキテクチャです。
+FBVBS v7 は、FreeBSD 向けのマイクロハイパーバイザーベースのセキュリティアーキテクチャです。このリポジトリは、その retained C 実装と設計文書を保持します。
 
-## アーキテクチャ概要
+## 現在の実装状態
 
-FBVBS はデュアル言語アーキテクチャを採用しています：
-
-- **マイクロハイパーバイザー本体**: C11 + ACSL + Frama-C WP による形式検証
-- **信頼サービスパーティション**: Ada 2022 + SPARK 2014 による実装
+- **マイクロハイパーバイザー本体**: C11 + ACSL。現時点の機械的検証は GCC `-fanalyzer` と unit test が中心です。
+- **Frama-C WP**: `make proof` で実行できますが、現在の環境では WP plugin が未導入なら fail します。
+- **fail-closed の未実装機能**: `KCI_SET_WX` の byte-backed page binding、authoritative な IOMMU/boot integrity bring-up、device passthrough qualification は未完成のため成功を返さない設計にしています。
 
 ## セキュリティ目標
 
@@ -21,25 +20,28 @@ FBVBS はデュアル言語アーキテクチャを採用しています：
 
 ```
 fbvbs/
-├── hypervisor/           # マイクロハイパーバイザー
-│   ├── src/              # C11 + Frama-C WP 検証済みソース
+├── hypervisor/           # retained C マイクロハイパーバイザー実装
+│   ├── src/              # C11 + ACSL ソース
 │   ├── include/          # ヘッダファイル
-│   ├── tests/            # テスト
-│   └── compliance/       # コンプライアンス文書
+│   ├── tests/            # unit test
+│   └── compliance/       # コンプライアンス/保証文書
 ├── plan/                 # 設計・計画文書
-│   └── fbvbs-design.md   # FBVBS v7 仕様書
+│   ├── fbvbs-design.md   # FBVBS v7 仕様書
+│   └── development-plan.md
 └── README.md             # このファイル
 ```
 
-## ビルド
+## ビルドと検証
 
 ```bash
 cd hypervisor
-make proof    # Frama-C WP による証明
-make analyze  # Frama-C EVA による解析
-make test     # テスト実行
+make analyze  # GCC -fanalyzer
+make test     # unit test
+make proof    # Frama-C WP（WP plugin がある環境のみ）
 ```
 
 ## 関連文書
 
 - [FBVBS v7 仕様書](plan/fbvbs-design.md)
+- [開発計画](plan/development-plan.md)
+- [retained C 境界保証](hypervisor/compliance/retained_c_leaf_boundary.md)

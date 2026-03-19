@@ -67,11 +67,15 @@ static struct fbvbs_memory_object *fbvbs_allocate_memory_object_slot(
 int fbvbs_memory_allocate_object(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_allocate_object_request *request,
-    struct fbvbs_memory_allocate_object_response *response
+    struct fbvbs_memory_allocate_object_response *response,
+    uint64_t owner_partition_id
 ) {
     struct fbvbs_memory_object *object;
 
     if (state == NULL || request == NULL || response == NULL) {
+        return INVALID_PARAMETER;
+    }
+    if (owner_partition_id == 0U) {
         return INVALID_PARAMETER;
     }
     if (request->reserved0 != 0U || request->size == 0U) {
@@ -90,11 +94,15 @@ int fbvbs_memory_allocate_object(
     if (object == NULL) {
         return RESOURCE_EXHAUSTED;
     }
+    if (!fbvbs_id_allocator_can_advance(state->next_memory_object_id, 1U)) {
+        return RESOURCE_EXHAUSTED;
+    }
 
     *object = (struct fbvbs_memory_object){0};
     object->allocated = true;
     object->object_flags = request->object_flags;
     object->memory_object_id = state->next_memory_object_id++;
+    object->owner_partition_id = owner_partition_id;
     object->size = request->size;
     response->memory_object_id = object->memory_object_id;
     return OK;
@@ -103,18 +111,25 @@ int fbvbs_memory_allocate_object(
 /*@ requires \valid(state);
     assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1];
     ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == NOT_FOUND || \result == RESOURCE_BUSY;
+            \result == NOT_FOUND || \result == RESOURCE_BUSY || \result == PERMISSION_DENIED;
 */
-int fbvbs_memory_release_object(struct fbvbs_hypervisor_state *state, uint64_t memory_object_id) {
+int fbvbs_memory_release_object(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t memory_object_id,
+    uint64_t requester_partition_id
+) {
     struct fbvbs_memory_object *object;
 
-    if (state == NULL || memory_object_id == 0U) {
+    if (state == NULL || memory_object_id == 0U || requester_partition_id == 0U) {
         return INVALID_PARAMETER;
     }
 
     object = fbvbs_find_memory_object(state, memory_object_id);
     if (object == NULL) {
         return NOT_FOUND;
+    }
+    if (object->owner_partition_id != requester_partition_id) {
+        return PERMISSION_DENIED;
     }
     if (object->map_count != 0U || object->shared_count != 0U) {
         return RESOURCE_BUSY;

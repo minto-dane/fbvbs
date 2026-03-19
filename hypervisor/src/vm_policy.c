@@ -19,7 +19,7 @@ static void fbvbs_vmx_external_interrupt_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_external_interrupt){0};
-    payload.s.vector = (uint32_t)leaf_exit->value;
+    payload.s.vector = leaf_exit->detail.external_interrupt.vector;
     payload.s.reserved0 = 0U;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
@@ -48,11 +48,9 @@ static void fbvbs_vmx_cr_access_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_cr_access){0};
-    payload.s.cr_number = leaf_exit->cr_number;
-    /* Leaf VMX layer does not provide access_type (MOV-to-CR vs MOV-from-CR);
-     * bare-metal would decode from VMX exit qualification bits 5:4. */
-    payload.s.access_type = FBVBS_VM_CR_ACCESS_WRITE;
-    payload.s.value = leaf_exit->value;
+    payload.s.cr_number = leaf_exit->detail.cr_access.cr_number;
+    payload.s.access_type = leaf_exit->detail.cr_access.access_type;
+    payload.s.value = leaf_exit->detail.cr_access.value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -78,12 +76,12 @@ static void fbvbs_vmx_pio_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_pio){0};
-    payload.s.port = leaf_exit->port;
-    payload.s.width = leaf_exit->access_size;
-    payload.s.is_write = leaf_exit->is_write;
+    payload.s.port = leaf_exit->detail.pio.port;
+    payload.s.width = leaf_exit->detail.pio.access_size;
+    payload.s.is_write = leaf_exit->detail.pio.is_write;
     /* Leaf simulation: single-rep only; bare-metal uses ECX for REP count */
     payload.s.count = 1U;
-    payload.s.value = leaf_exit->value;
+    payload.s.value = leaf_exit->detail.pio.value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -109,12 +107,12 @@ static void fbvbs_vmx_mmio_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_mmio){0};
-    payload.s.guest_physical_address = leaf_exit->guest_physical_address;
-    payload.s.width = leaf_exit->access_size;
-    payload.s.is_write = leaf_exit->is_write;
+    payload.s.guest_physical_address = leaf_exit->detail.mmio.guest_physical_address;
+    payload.s.width = leaf_exit->detail.mmio.access_size;
+    payload.s.is_write = leaf_exit->detail.mmio.is_write;
     payload.s.reserved0 = 0U;
     payload.s.reserved1 = 0U;
-    payload.s.value = leaf_exit->value;
+    payload.s.value = leaf_exit->detail.mmio.value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -140,9 +138,9 @@ static void fbvbs_vmx_msr_access_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_msr_access){0};
-    payload.s.msr = leaf_exit->msr_address;
-    payload.s.is_write = leaf_exit->is_write;
-    payload.s.value = leaf_exit->value;
+    payload.s.msr = leaf_exit->detail.msr_access.msr_address;
+    payload.s.is_write = leaf_exit->detail.msr_access.is_write;
+    payload.s.value = leaf_exit->detail.msr_access.value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -207,11 +205,8 @@ static void fbvbs_vmx_ept_violation_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_ept_violation){0};
-    payload.s.guest_physical_address = leaf_exit->guest_physical_address;
-    /* TODO: leaf_exit struct lacks access_bits field; bare-metal would decode
-     * from VMX exit qualification.  Hardcoded EXECUTE until leaf layer provides
-     * the actual read/write/execute access type that caused the EPT violation. */
-    payload.s.access_bits = FBVBS_VM_EPT_ACCESS_EXECUTE;
+    payload.s.guest_physical_address = leaf_exit->detail.ept_violation.guest_physical_address;
+    payload.s.access_bits = leaf_exit->detail.ept_violation.access_bits;
     payload.s.reserved0 = 0U;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
@@ -280,7 +275,9 @@ int fbvbs_vmx_run_vcpu(
         &state->vmx_caps,
         vcpu,
         state->pinned_cr0_mask,
+        state->pinned_cr0_value,
         state->pinned_cr4_mask,
+        state->pinned_cr4_value,
         state->intercepted_msrs,
         state->intercepted_msr_count,
         partition->mapped_bytes,

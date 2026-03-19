@@ -855,7 +855,7 @@ static int fbvbs_build_host_callsite_tables(
         */
         for (callsite_index = 0U; callsite_index < profile->allowed_callsite_count; ++callsite_index) {
             if (profile->load_base > UINT64_MAX - profile->allowed_callsite_offsets[callsite_index]) {
-                continue; /* skip this callsite on overflow */
+                return INVALID_PARAMETER;
             }
             table->allowed_offsets[callsite_index] = profile->allowed_callsite_offsets[callsite_index];
             table->relocated_callsites[callsite_index] =
@@ -989,7 +989,8 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
 
 /*@ requires \valid(state);
     assigns *state;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == ALREADY_EXISTS;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == ALREADY_EXISTS ||
+            \result == NOT_SUPPORTED_ON_PLATFORM || \result == RESOURCE_EXHAUSTED;
 */
 int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     static const uint8_t boot_payload[] = "fbvbs hypervisor kernel boot";
@@ -1033,16 +1034,36 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
      * Detects features, builds vulnerability profile, computes CR pinning
      * and SPEC_CTRL values, detects IOMMU and boot integrity state.
      * Must run after vmx_probe (uses vmx_caps) and before any VM runs. */
-    fbvbs_cpu_detect_features(0U, &state->bsp_profile);
-    fbvbs_cpu_build_vuln_profile(&state->bsp_profile);
-    fbvbs_cpu_compute_cr_pins(&state->bsp_profile);
-    fbvbs_cpu_compute_global_mitigations(
+    status = fbvbs_cpu_detect_features(0U, &state->bsp_profile);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    status = fbvbs_cpu_build_vuln_profile(&state->bsp_profile);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    status = fbvbs_cpu_compute_cr_pins(&state->bsp_profile);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    status = fbvbs_cpu_compute_global_mitigations(
         &state->bsp_profile, 1U, &state->cpu_security);
-    fbvbs_iommu_detect(&state->cpu_security);
-    fbvbs_boot_integrity_detect(&state->cpu_security);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    status = fbvbs_iommu_detect(&state->cpu_security);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    status = fbvbs_boot_integrity_detect(&state->cpu_security);
+    if (status != 0) {
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
     /* Apply computed CR pin masks from CPU security profile */
     state->pinned_cr0_mask = state->bsp_profile.cr_pins.cr0_pin_mask;
+    state->pinned_cr0_value = state->bsp_profile.cr_pins.cr0_pin_value;
     state->pinned_cr4_mask = state->bsp_profile.cr_pins.cr4_pin_mask;
+    state->pinned_cr4_value = state->bsp_profile.cr_pins.cr4_pin_value;
     /* Initialize host SPEC_CTRL from computed value */
     state->spec_ctrl.host_spec_ctrl = state->cpu_security.host_spec_ctrl_value;
 

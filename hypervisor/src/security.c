@@ -16,20 +16,22 @@ static int fbvbs_artifact_exists(
     uint32_t expected_kind
 ) {
     uint32_t index;
+    uint32_t found = 0U;
 
     /*@ loop invariant 0 <= index <= state->artifact_catalog.count;
-        loop assigns index;
+        loop assigns index, found;
         loop variant state->artifact_catalog.count - index;
     */
     for (index = 0U; index < state->artifact_catalog.count; ++index) {
         const struct fbvbs_artifact_catalog_entry *entry = &state->artifact_catalog.entries[index];
+        uint32_t match =
+            (uint32_t)(entry->object_id == object_id && entry->object_kind == expected_kind);
 
-        if (entry->object_id == object_id && entry->object_kind == expected_kind) {
-            return 1;
-        }
+        found |= match;
     }
 
-    return 0;
+    __asm__ volatile("" : "+r"(found) : : "memory");
+    return found != 0U;
 }
 
 /*@ requires \valid_read(state);
@@ -135,6 +137,26 @@ static int fbvbs_hash_tail_zero(const uint8_t hash[64]) {
 
     __asm__ volatile("" : "+r"(nonzero) : : "memory");
     return nonzero == 0U;
+}
+
+/*@ requires \valid_read(hash + (0 .. 47));
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_hash_prefix_nonzero(const uint8_t hash[48]) {
+    uint32_t index;
+    uint32_t nonzero = 0U;
+
+    /*@ loop invariant 0 <= index <= 48;
+        loop assigns index, nonzero;
+        loop variant 48 - index;
+    */
+    for (index = 0U; index < 48U; ++index) {
+        nonzero |= (uint32_t)hash[index];
+    }
+
+    __asm__ volatile("" : "+r"(nonzero) : : "memory");
+    return nonzero != 0U;
 }
 
 /*@ requires \valid(destination + (0 .. 47));
@@ -366,20 +388,14 @@ int fbvbs_artifact_approval_exists(
 ) {
     uint32_t index;
     uint32_t found = 0U;
+    uint32_t revoked = 0U;
 
     if (state == NULL || artifact_object_id == 0U || manifest_object_id == 0U) {
         return 0;
     }
 
-    /* Check if artifact is revoked */
-    if (fbvbs_is_object_revoked(state, artifact_object_id)) {
-        return 0;
-    }
-
-    /* Check if manifest is revoked */
-    if (fbvbs_is_object_revoked(state, manifest_object_id)) {
-        return 0;
-    }
+    revoked |= (uint32_t)fbvbs_is_object_revoked(state, artifact_object_id);
+    revoked |= (uint32_t)fbvbs_is_object_revoked(state, manifest_object_id);
 
     /* Constant-time: accumulate matches without early return to prevent
      * timing side-channel leaking which approval slot matched. */
@@ -396,8 +412,8 @@ int fbvbs_artifact_approval_exists(
             found |= match;
         }
     }
-    __asm__ volatile("" : "+r"(found) : : "memory");
-    return found != 0U;
+    __asm__ volatile("" : "+r"(found), "+r"(revoked) : : "memory");
+    return found != 0U && revoked == 0U;
 }
 
 /*@ requires manifest_set_page_gpa == 0U ||
@@ -1358,11 +1374,11 @@ int fbvbs_kci_verify_module(
     const struct fbvbs_kci_verify_module_request *request,
     struct fbvbs_verdict_response *response
 ) {
+    const struct fbvbs_uvs_manifest_set *manifest_set;
+    const struct fbvbs_metadata_manifest *manifest;
+
     if (state == NULL || request == NULL || response == NULL) {
         return INVALID_PARAMETER;
-    }
-    if (request->generation != 1U) {
-        return GENERATION_MISMATCH;
     }
     if (!fbvbs_manifest_pair_valid(
         state,
@@ -1371,6 +1387,23 @@ int fbvbs_kci_verify_module(
         FBVBS_ARTIFACT_OBJECT_MODULE
     )) {
         return NOT_FOUND;
+    }
+    manifest_set = fbvbs_find_manifest_set(state, state->current_manifest_set_id);
+    if (manifest_set == NULL) {
+        return INVALID_STATE;
+    }
+    manifest = fbvbs_find_manifest_in_verified_set(manifest_set, request->manifest_object_id);
+    if (manifest == NULL) {
+        return NOT_FOUND;
+    }
+    if ((manifest->flags & FBVBS_METADATA_FLAG_SIGNATURE_VALID) == 0U) {
+        return SIGNATURE_INVALID;
+    }
+    if ((manifest->flags & FBVBS_METADATA_FLAG_REVOKED) != 0U) {
+        return REVOKED;
+    }
+    if (request->generation != manifest->generation) {
+        return GENERATION_MISMATCH;
     }
     if (!fbvbs_artifact_approval_exists(state, request->module_object_id, request->manifest_object_id)) {
         return SIGNATURE_INVALID;
@@ -1386,7 +1419,7 @@ int fbvbs_kci_verify_module(
     requires \valid_read(request) || request == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_STATE ||
-            \result == PERMISSION_DENIED;
+            \result == PERMISSION_DENIED || \result == NOT_SUPPORTED_ON_PLATFORM;
     behavior invalid_args:
       assumes state == \null || request == \null;
       ensures \result == INVALID_PARAMETER;
@@ -1410,7 +1443,12 @@ int fbvbs_kci_set_wx(
         (request->permissions & FBVBS_MEMORY_PERMISSION_WRITE) != 0U) {
         return PERMISSION_DENIED;
     }
-    return OK;
+
+    /* Fail closed until executable-page bytes are cryptographically bound to
+     * the approved artifact and re-verified at this GPA range.  The current
+     * retained C model does not track page contents strongly enough to make
+     * that guarantee, so enabling execute here would overclaim security. */
+    return NOT_SUPPORTED_ON_PLATFORM;
 }
 
 /*@ requires \valid(state) || state == \null;
@@ -1431,11 +1469,14 @@ int fbvbs_kci_pin_cr(
 
     switch (request->cr_number) {
         case 0U:
-            /* Monotonically increasing: once a bit is pinned it cannot be unpinned */
+            /* ABI v1 hardening: KCI can only add must-be-1 pins.
+             * Must-be-0 pins are fixed by the platform security profile. */
             state->pinned_cr0_mask |= request->pin_mask;
+            state->pinned_cr0_value |= request->pin_mask;
             return OK;
         case 4U:
             state->pinned_cr4_mask |= request->pin_mask;
+            state->pinned_cr4_value |= request->pin_mask;
             return OK;
         default:
             return NOT_SUPPORTED_ON_PLATFORM;
@@ -1526,6 +1567,9 @@ int fbvbs_ksi_create_target_set(
 
     target_set = fbvbs_allocate_target_set(state);
     if (target_set == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (!fbvbs_id_allocator_can_advance(state->next_target_set_id, 1U)) {
         return RESOURCE_EXHAUSTED;
     }
 
@@ -1719,17 +1763,20 @@ int fbvbs_ksi_validate_setuid(
     struct fbvbs_ksi_object *context_object;
     uint32_t uid_mask = FBVBS_KSI_VALID_RUID | FBVBS_KSI_VALID_EUID | FBVBS_KSI_VALID_SUID;
     uint32_t gid_mask = FBVBS_KSI_VALID_RGID | FBVBS_KSI_VALID_EGID | FBVBS_KSI_VALID_SGID;
-    uint32_t hash_nonzero = 0U;
-    uint32_t index;
+    uint32_t hash_present;
+    uint32_t hash_tail_zero;
 
     if (state == NULL || request == NULL || response == NULL || request->valid_mask == 0U ||
         (request->valid_mask & ~0x3FU) != 0U) {
         return INVALID_PARAMETER;
     }
-    if (!fbvbs_hash_tail_zero(request->measured_hash)) {
+    if ((request->fsid == 0U) != (request->fileid == 0U)) {
         return INVALID_PARAMETER;
     }
-    if ((request->fsid == 0U) != (request->fileid == 0U)) {
+
+    hash_tail_zero = (uint32_t)fbvbs_hash_tail_zero(request->measured_hash);
+    hash_present = (uint32_t)fbvbs_hash_prefix_nonzero(request->measured_hash);
+    if (hash_tail_zero == 0U) {
         return INVALID_PARAMETER;
     }
 
@@ -1741,20 +1788,9 @@ int fbvbs_ksi_validate_setuid(
         return POLICY_DENIED;
     }
 
-    /* Constant-time: OR-accumulate all 48 hash bytes without branching to
-     * prevent timing side-channel leaking the leading zero count. */
-    /*@ loop invariant 0 <= index <= 48;
-        loop assigns index, hash_nonzero;
-        loop variant 48 - index;
-    */
-    for (index = 0U; index < 48U; ++index) {
-        hash_nonzero |= (uint32_t)request->measured_hash[index];
-    }
-    __asm__ volatile("" : "+r"(hash_nonzero) : : "memory");
-
     switch (request->operation_class) {
         case FBVBS_KSI_OPERATION_EXEC_ELEVATION:
-            if (request->fileid == 0U || hash_nonzero == 0U) {
+            if (request->fileid == 0U || hash_present == 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & (uid_mask | gid_mask)) == 0U) {
@@ -1762,7 +1798,7 @@ int fbvbs_ksi_validate_setuid(
             }
             break;
         case FBVBS_KSI_OPERATION_SETUID_FAMILY:
-            if (request->fileid != 0U || hash_nonzero != 0U) {
+            if (request->fileid != 0U || hash_present != 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & gid_mask) != 0U) {
@@ -1773,7 +1809,7 @@ int fbvbs_ksi_validate_setuid(
             }
             break;
         case FBVBS_KSI_OPERATION_SETGID_FAMILY:
-            if (request->fileid != 0U || hash_nonzero != 0U) {
+            if (request->fileid != 0U || hash_present != 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & uid_mask) != 0U) {
@@ -1846,6 +1882,9 @@ int fbvbs_ksi_allocate_ucred(
 
     object = fbvbs_allocate_ksi_object(state);
     if (object == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (!fbvbs_id_allocator_can_advance(state->next_memory_object_id, FBVBS_PAGE_SIZE)) {
         return RESOURCE_EXHAUSTED;
     }
 
@@ -1964,6 +2003,9 @@ int fbvbs_iks_import_key(
     if (key == NULL) {
         return RESOURCE_EXHAUSTED;
     }
+    if (!fbvbs_id_allocator_can_advance(state->next_key_handle, 1U)) {
+        return RESOURCE_EXHAUSTED;
+    }
 
     *key = (struct fbvbs_iks_key){0};
     key->active = true;
@@ -2056,6 +2098,9 @@ int fbvbs_iks_key_exchange(
     if (derived == NULL) {
         return RESOURCE_EXHAUSTED;
     }
+    if (!fbvbs_id_allocator_can_advance(state->next_key_handle, 1U)) {
+        return RESOURCE_EXHAUSTED;
+    }
 
     *derived = (struct fbvbs_iks_key){0};
     derived->active = true;
@@ -2097,6 +2142,9 @@ int fbvbs_iks_derive(
 
     derived = fbvbs_allocate_iks_key(state);
     if (derived == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (!fbvbs_id_allocator_can_advance(state->next_key_handle, 1U)) {
         return RESOURCE_EXHAUSTED;
     }
 
@@ -2154,6 +2202,9 @@ int fbvbs_sks_import_dek(
 
     dek = fbvbs_allocate_sks_dek(state);
     if (dek == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (!fbvbs_id_allocator_can_advance(state->next_dek_handle, 1U)) {
         return RESOURCE_EXHAUSTED;
     }
 
@@ -2294,6 +2345,9 @@ int fbvbs_uvs_verify_manifest_set(
 
     manifest_set = fbvbs_allocate_manifest_set(state);
     if (manifest_set == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (!fbvbs_id_allocator_can_advance(state->next_manifest_set_id, 1U)) {
         return RESOURCE_EXHAUSTED;
     }
 

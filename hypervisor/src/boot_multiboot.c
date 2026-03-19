@@ -93,11 +93,15 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
                         break;
                     }
                     while (entry_offset + entry_size <= offset + size && state->memory_map_count < 32U) {
-                        /* x86_64: unaligned access is safe; would need byte reads on strict-alignment architectures */
-                        const uint64_t *entry = (const uint64_t *)((const uint8_t *)multiboot_info + entry_offset);
-                        uint64_t base_addr = entry[0];
-                        uint64_t length = entry[1];
-                        uint32_t entry_type = (uint32_t)entry[2];
+                        const uint8_t *entry =
+                            (const uint8_t *)multiboot_info + entry_offset;
+                        uint64_t base_addr = 0U;
+                        uint64_t length = 0U;
+                        uint32_t entry_type = 0U;
+
+                        fbvbs_copy_memory(&base_addr, entry, sizeof(base_addr));
+                        fbvbs_copy_memory(&length, entry + 8U, sizeof(length));
+                        fbvbs_copy_memory(&entry_type, entry + 16U, sizeof(entry_type));
 
                         /* Store memory map entry */
                         state->memory_map[state->memory_map_count].base_addr = base_addr;

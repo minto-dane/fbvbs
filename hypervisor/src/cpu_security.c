@@ -18,10 +18,10 @@
 #include "fbvbs_cpu_security.h"
 
 /* ================================================================
- * Internal CPUID helper (model-level stub for WP verification)
+ * Internal CPUID/MSR helpers
  *
- * In bare-metal, this wraps the CPUID instruction.
- * For Frama-C WP, we model it as returning bounded values.
+ * Under Frama-C we keep model stubs. On x86 we issue the real
+ * instructions so the runtime mitigation state reflects hardware.
  * ================================================================ */
 
 /*@ requires \valid(out_eax) && \valid(out_ebx) && \valid(out_ecx) && \valid(out_edx);
@@ -32,14 +32,27 @@ static void cpuid_query(uint32_t leaf, uint32_t subleaf,
                         uint32_t *out_eax, uint32_t *out_ebx,
                         uint32_t *out_ecx, uint32_t *out_edx)
 {
-    /* Bare-metal: __asm__ volatile("cpuid" : ... ) */
-    /* Model stub for verification */
+#if defined(__FRAMAC__)
     (void)leaf;
     (void)subleaf;
     *out_eax = 0;
     *out_ebx = 0;
     *out_ecx = 0;
     *out_edx = 0;
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("cpuid"
+                     : "=a"(*out_eax), "=b"(*out_ebx),
+                       "=c"(*out_ecx), "=d"(*out_edx)
+                     : "0"(leaf), "2"(subleaf)
+                     : "memory");
+#else
+    (void)leaf;
+    (void)subleaf;
+    *out_eax = 0;
+    *out_ebx = 0;
+    *out_ecx = 0;
+    *out_edx = 0;
+#endif
 }
 
 /* ================================================================
@@ -51,9 +64,22 @@ static void cpuid_query(uint32_t leaf, uint32_t subleaf,
 */
 static uint64_t msr_read(uint32_t msr_addr)
 {
-    /* Bare-metal: rdmsr instruction */
+#if defined(__FRAMAC__)
     (void)msr_addr;
     return 0;
+#elif defined(__x86_64__) || defined(__i386__)
+    uint32_t lo;
+    uint32_t hi;
+
+    __asm__ volatile("rdmsr"
+                     : "=a"(lo), "=d"(hi)
+                     : "c"(msr_addr)
+                     : "memory");
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+#else
+    (void)msr_addr;
+    return 0;
+#endif
 }
 
 /* ================================================================
@@ -63,9 +89,91 @@ static uint64_t msr_read(uint32_t msr_addr)
 /*@ assigns \nothing; */
 static void msr_write(uint32_t msr_addr, uint64_t value)
 {
-    /* Bare-metal: wrmsr instruction */
+#if defined(__FRAMAC__)
     (void)msr_addr;
     (void)value;
+#elif defined(__x86_64__) || defined(__i386__)
+    uint32_t lo = (uint32_t)(value & 0xFFFFFFFFU);
+    uint32_t hi = (uint32_t)(value >> 32);
+
+    __asm__ volatile("wrmsr"
+                     :
+                     : "c"(msr_addr), "a"(lo), "d"(hi)
+                     : "memory");
+#else
+    (void)msr_addr;
+    (void)value;
+#endif
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int cpuid_basic_leaf_supported(uint32_t leaf)
+{
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+
+    cpuid_query(0, 0, &eax, &ebx, &ecx, &edx);
+    return eax >= leaf;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int cpuid_extended_leaf_supported(uint32_t leaf)
+{
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+
+    cpuid_query(0x80000000U, 0, &eax, &ebx, &ecx, &edx);
+    return eax >= leaf;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int detect_smt_enabled(uint32_t vendor)
+{
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t max_logical;
+
+    cpuid_query(1, 0, &eax, &ebx, &ecx, &edx);
+    max_logical = (ebx >> 16) & 0xFFU;
+    if (max_logical <= 1U) {
+        return 0;
+    }
+
+    if (vendor == CPU_VENDOR_INTEL) {
+        if (cpuid_basic_leaf_supported(0xBU) != 0) {
+            cpuid_query(0xBU, 0, &eax, &ebx, &ecx, &edx);
+            if (((ecx >> 8) & 0xFFU) == 1U) {
+                return ebx > 1U;
+            }
+        }
+        if (cpuid_basic_leaf_supported(4U) != 0) {
+            cpuid_query(4, 0, &eax, &ebx, &ecx, &edx);
+            return max_logical > ((((eax >> 26) & 0x3FU) + 1U));
+        }
+        return max_logical > 1U;
+    }
+
+    if (vendor == CPU_VENDOR_AMD) {
+        if (cpuid_extended_leaf_supported(0x80000008U) != 0) {
+            cpuid_query(0x80000008U, 0, &eax, &ebx, &ecx, &edx);
+            return max_logical > ((ecx & 0xFFU) + 1U);
+        }
+        return max_logical > 1U;
+    }
+
+    return max_logical > 1U;
 }
 
 /* ================================================================
@@ -151,87 +259,90 @@ int fbvbs_cpu_detect_features(uint32_t cpu_id,
     f->has_vmx   = (ecx >> 5)  & 1U;
 
     /* NX from extended leaf 0x80000001 */
-    cpuid_query(0x80000001U, 0, &eax, &ebx, &ecx, &edx);
-    f->has_nx    = (edx >> 20) & 1U;
-    f->has_svm   = (ecx >> 2)  & 1U;
+    if (cpuid_extended_leaf_supported(0x80000001U) != 0) {
+        cpuid_query(0x80000001U, 0, &eax, &ebx, &ecx, &edx);
+        f->has_nx    = (edx >> 20) & 1U;
+        f->has_svm   = (ecx >> 2)  & 1U;
+    }
 
     /* Structured feature flags: CPUID.(EAX=7, ECX=0) */
-    cpuid_query(7, 0, &eax, &ebx, &ecx, &edx);
-    f->has_smep       = (ebx >> 7)  & 1U;
-    f->has_smap       = (ebx >> 20) & 1U;
-    f->has_cet_ss     = (ecx >> 7)  & 1U;
-    f->has_umip       = (ecx >> 2)  & 1U;
-    f->has_pku        = (ecx >> 3)  & 1U;
-    f->has_pks        = (ecx >> 31) & 1U;
-    f->has_la57       = (ecx >> 16) & 1U;
-    f->has_cet_ibt    = (edx >> 20) & 1U;
-    f->has_md_clear   = (edx >> 10) & 1U;
-    f->has_ibpb       = (edx >> 26) & 1U;
-    f->has_stibp      = (edx >> 27) & 1U;
+    if (cpuid_basic_leaf_supported(7U) != 0) {
+        cpuid_query(7, 0, &eax, &ebx, &ecx, &edx);
+        f->has_smep         = (ebx >> 7)  & 1U;
+        f->has_smap         = (ebx >> 20) & 1U;
+        f->has_cet_ss       = (ecx >> 7)  & 1U;
+        f->has_umip         = (ecx >> 2)  & 1U;
+        f->has_pku          = (ecx >> 3)  & 1U;
+        f->has_pks          = (ecx >> 31) & 1U;
+        f->has_la57         = (ecx >> 16) & 1U;
+        f->has_cet_ibt      = (edx >> 20) & 1U;
+        f->has_md_clear     = (edx >> 10) & 1U;
+        f->has_mcu_opt_ctrl = (edx >> 9)  & 1U;
+        f->has_ibpb         = (edx >> 26) & 1U;
+        f->has_stibp        = (edx >> 27) & 1U;
 
-    /* CPUID.(EAX=7, ECX=1) for LASS, FRED */
-    cpuid_query(7, 1, &eax, &ebx, &ecx, &edx);
-    f->has_lass = (eax >> 6)  & 1U;
-    f->has_fred = (eax >> 17) & 1U;
+        /* CPUID.(EAX=7, ECX=1) for LASS, FRED */
+        cpuid_query(7, 1, &eax, &ebx, &ecx, &edx);
+        f->has_lass = (eax >> 6)  & 1U;
+        f->has_fred = (eax >> 17) & 1U;
 
-    /* CPUID.(EAX=7, ECX=2) for BHI_CTRL */
-    cpuid_query(7, 2, &eax, &ebx, &ecx, &edx);
-    f->has_bhi_ctrl = (edx >> 4) & 1U;
+        /* CPUID.(EAX=7, ECX=2) for BHI_CTRL */
+        cpuid_query(7, 2, &eax, &ebx, &ecx, &edx);
+        f->has_bhi_ctrl = (edx >> 4) & 1U;
+    }
 
     /* Read microcode revision (Intel: CPUID.1 after wrmsr 0x8B; AMD: MSR 0x8B directly) */
     {
         uint64_t ucode_rev = msr_read(0x0000008BU);
-        profile->microcode_version = (uint32_t)(ucode_rev >> 32);
-    }
-
-    /* SMT detection: CPUID.1:EBX[23:16] = max_logical_per_package,
-       CPUID.4(0):EAX[31:26]+1 = max_cores_per_package.
-       If logical > cores, SMT is active. */
-    {
-        uint32_t smt_eax, smt_ebx, smt_ecx, smt_edx;
-        uint32_t max_logical;
-        /* Re-query leaf 1 for EBX (overwritten by subsequent CPUID calls) */
-        cpuid_query(1, 0, &smt_eax, &smt_ebx, &smt_ecx, &smt_edx);
-        max_logical = (smt_ebx >> 16) & 0xFFU;
-        cpuid_query(4, 0, &smt_eax, &smt_ebx, &smt_ecx, &smt_edx);
-        {
-            uint32_t max_cores = ((smt_eax >> 26) & 0x3FU) + 1U;
-            profile->smt_enabled = (max_logical > max_cores) ? 1U : 0U;
+        if (profile->vendor == CPU_VENDOR_AMD) {
+            profile->microcode_version = (uint32_t)(ucode_rev & 0xFFFFFFFFU);
+        } else {
+            profile->microcode_version = (uint32_t)(ucode_rev >> 32);
         }
     }
+
+    profile->smt_enabled = (uint32_t)detect_smt_enabled(profile->vendor);
 
     /* AMD-specific extended features */
     if (profile->vendor == CPU_VENDOR_AMD) {
         /* SVM features: CPUID Fn8000_000A */
-        cpuid_query(0x8000000AU, 0, &eax, &ebx, &ecx, &edx);
-        f->has_npt          = (edx >> 0)  & 1U;
-        f->has_lbr_virt     = (edx >> 1)  & 1U;
-        f->has_vmcb_clean   = (edx >> 5)  & 1U;
-        f->has_decode_assists = (edx >> 7) & 1U;
-        f->has_pause_filter = (edx >> 10) & 1U;
-        f->has_avic         = (edx >> 13) & 1U;
-        f->has_vgif         = (edx >> 16) & 1U;
-        f->has_sss_check    = (edx >> 19) & 1U;
-        f->has_gmet         = (edx >> 24) & 1U;
-        f->has_vnmi         = (edx >> 25) & 1U;
+        if (cpuid_extended_leaf_supported(0x8000000AU) != 0) {
+            cpuid_query(0x8000000AU, 0, &eax, &ebx, &ecx, &edx);
+            f->has_npt            = (edx >> 0)  & 1U;
+            f->has_lbr_virt       = (edx >> 1)  & 1U;
+            f->has_vmcb_clean     = (edx >> 5)  & 1U;
+            f->has_decode_assists = (edx >> 7)  & 1U;
+            f->has_pause_filter   = (edx >> 10) & 1U;
+            f->has_avic           = (edx >> 13) & 1U;
+            f->has_vgif           = (edx >> 16) & 1U;
+            f->has_sss_check      = (edx >> 19) & 1U;
+            f->has_gmet           = (edx >> 24) & 1U;
+            f->has_vnmi           = (edx >> 25) & 1U;
+        }
 
         /* AMD speculative mitigations: CPUID Fn8000_0008 */
-        cpuid_query(0x80000008U, 0, &eax, &ebx, &ecx, &edx);
-        f->has_amd_ibpb     = (ebx >> 12) & 1U;
-        f->has_amd_stibp    = (ebx >> 15) & 1U;
-        f->has_amd_ssbd     = (ebx >> 24) & 1U;
-        f->has_amd_ibpb_ret = (ebx >> 30) & 1U;
+        if (cpuid_extended_leaf_supported(0x80000008U) != 0) {
+            cpuid_query(0x80000008U, 0, &eax, &ebx, &ecx, &edx);
+            f->has_amd_ibpb     = (ebx >> 12) & 1U;
+            f->has_amd_stibp    = (ebx >> 15) & 1U;
+            f->has_amd_ssbd     = (ebx >> 24) & 1U;
+            f->has_amd_ibpb_ret = (ebx >> 30) & 1U;
+        }
 
         /* AMD extended features: CPUID Fn8000_0021 */
-        cpuid_query(0x80000021U, 0, &eax, &ebx, &ecx, &edx);
-        f->has_autoibrs = (eax >> 8) & 1U;
+        if (cpuid_extended_leaf_supported(0x80000021U) != 0) {
+            cpuid_query(0x80000021U, 0, &eax, &ebx, &ecx, &edx);
+            f->has_autoibrs = (eax >> 8) & 1U;
+        }
 
         /* AMD SEV: CPUID Fn8000_001F */
-        cpuid_query(0x8000001FU, 0, &eax, &ebx, &ecx, &edx);
-        f->has_sev     = (eax >> 1) & 1U;
-        f->has_sev_es  = (eax >> 3) & 1U;
-        f->has_sev_snp = (eax >> 4) & 1U;
-        f->has_sme     = (eax >> 0) & 1U;
+        if (cpuid_extended_leaf_supported(0x8000001FU) != 0) {
+            cpuid_query(0x8000001FU, 0, &eax, &ebx, &ecx, &edx);
+            f->has_sev     = (eax >> 1) & 1U;
+            f->has_sev_es  = (eax >> 3) & 1U;
+            f->has_sev_snp = (eax >> 4) & 1U;
+            f->has_sme     = (eax >> 0) & 1U;
+        }
     }
 
     profile->initialized = 1;
@@ -452,7 +563,9 @@ static int has_vendor_mismatch(
     requires cpu_count >= 1;
     requires \valid_read(profiles + (0 .. cpu_count - 1));
     requires \separated(profiles + (0 .. cpu_count - 1), state);
-    assigns state->host_spec_ctrl_value,
+    assigns state->cpu_count,
+            state->vendor,
+            state->host_spec_ctrl_value,
             state->worst_case_vuln,
             state->profiles_consistent;
     ensures \result == 0 || \result == -1;
@@ -469,6 +582,8 @@ int fbvbs_cpu_compute_global_mitigations(
     uint32_t all_have_amd_stibp = profiles[0].features.has_amd_stibp;
 
     *wc = (struct fbvbs_vuln_profile){0};
+    state->cpu_count = cpu_count;
+    state->vendor = profiles[0].vendor;
     state->profiles_consistent = 1;
     state->host_spec_ctrl_value = 0;
 
@@ -525,12 +640,7 @@ int fbvbs_cpu_compute_global_mitigations(
         if (profiles[i].features.has_bhi_ctrl == 0U)   { all_have_bhi_ctrl = 0; }
         if (profiles[i].features.has_amd_stibp == 0U)  { all_have_amd_stibp = 0; }
 
-        /* Check consistency: all CPUs should have same vendor */
-        if (profiles[i].vendor != profiles[0].vendor) {
-            state->profiles_consistent = 0;
-        }
-        /* Check microcode consistency */
-        if (profiles[i].microcode_version != profiles[0].microcode_version) {
+        if (fbvbs_cpu_verify_consistency(&profiles[0], &profiles[i]) == 0) {
             state->profiles_consistent = 0;
         }
     }
@@ -584,7 +694,9 @@ int fbvbs_cpu_compute_global_mitigations(
     /* GDS (Downfall) mitigation: MCU_OPT_CTRL[GDS_MITG_DIS] = 0 enables mitigation.
      * Opt-in via VERW (already handled by need_verw). Just ensure MCU_OPT_CTRL
      * does not have the disable bit set. */
-    if (wc->immune_gds == 0U) {
+    if (wc->immune_gds == 0U &&
+        profiles[0].vendor == CPU_VENDOR_INTEL &&
+        profiles[0].features.has_mcu_opt_ctrl != 0U) {
         /* Ensure GDS mitigation is not disabled in MCU_OPT_CTRL.
          * Bit 4 = GDS_MITG_DIS: must be 0 for mitigation to be active.
          * Reading and clearing this bit ensures microcode-level mitigation is on. */
@@ -629,7 +741,10 @@ int fbvbs_iommu_detect(struct fbvbs_global_security_state *state)
         state->iommu.iommu_type = IOMMU_TYPE_NONE;
     }
 
-    return 0;
+    /* Fail closed: a hostile-environment hypervisor must not claim DMA
+     * isolation without authoritative evidence of DMA remapping,
+     * interrupt remapping, and ACS qualification. */
+    return -1;
 }
 
 /* ================================================================
@@ -661,7 +776,10 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
         }
     }
 
-    return 0;
+    /* Fail closed: DRTM/TPM/Secure Boot/measured boot must be established by
+     * the real platform bring-up path before this hypervisor can claim a
+     * trustworthy boot chain. */
+    return -1;
 }
 
 /* ================================================================
@@ -682,18 +800,53 @@ int fbvbs_cpu_verify_consistency(
     if (profile_a->vendor != profile_b->vendor) { return 0; }
     if (profile_a->family != profile_b->family) { return 0; }
     if (profile_a->model  != profile_b->model)  { return 0; }
+    if (profile_a->stepping != profile_b->stepping) { return 0; }
+    if (profile_a->microcode_version != profile_b->microcode_version) { return 0; }
+    if (profile_a->smt_enabled != profile_b->smt_enabled) { return 0; }
 
     /* Feature flags must match for security-critical features */
     const struct fbvbs_cpuid_features *fa = &profile_a->features;
     const struct fbvbs_cpuid_features *fb = &profile_b->features;
 
-    if (fa->has_smep    != fb->has_smep)    { return 0; }
-    if (fa->has_smap    != fb->has_smap)    { return 0; }
-    if (fa->has_cet_ss  != fb->has_cet_ss)  { return 0; }
-    if (fa->has_cet_ibt != fb->has_cet_ibt) { return 0; }
-    if (fa->has_nx      != fb->has_nx)      { return 0; }
-    if (fa->has_ibpb    != fb->has_ibpb)    { return 0; }
-    if (fa->has_pcid    != fb->has_pcid)    { return 0; }
+    if (fa->has_smep         != fb->has_smep)         { return 0; }
+    if (fa->has_smap         != fb->has_smap)         { return 0; }
+    if (fa->has_cet_ss       != fb->has_cet_ss)       { return 0; }
+    if (fa->has_cet_ibt      != fb->has_cet_ibt)      { return 0; }
+    if (fa->has_md_clear     != fb->has_md_clear)     { return 0; }
+    if (fa->has_mcu_opt_ctrl != fb->has_mcu_opt_ctrl) { return 0; }
+    if (fa->has_ibpb         != fb->has_ibpb)         { return 0; }
+    if (fa->has_stibp        != fb->has_stibp)        { return 0; }
+    if (fa->has_umip         != fb->has_umip)         { return 0; }
+    if (fa->has_pku          != fb->has_pku)          { return 0; }
+    if (fa->has_pks          != fb->has_pks)          { return 0; }
+    if (fa->has_la57         != fb->has_la57)         { return 0; }
+    if (fa->has_lass         != fb->has_lass)         { return 0; }
+    if (fa->has_fred         != fb->has_fred)         { return 0; }
+    if (fa->has_bhi_ctrl     != fb->has_bhi_ctrl)     { return 0; }
+    if (fa->has_vmx          != fb->has_vmx)          { return 0; }
+    if (fa->has_svm          != fb->has_svm)          { return 0; }
+    if (fa->has_npt          != fb->has_npt)          { return 0; }
+    if (fa->has_gmet         != fb->has_gmet)         { return 0; }
+    if (fa->has_avic         != fb->has_avic)         { return 0; }
+    if (fa->has_vgif         != fb->has_vgif)         { return 0; }
+    if (fa->has_vmcb_clean   != fb->has_vmcb_clean)   { return 0; }
+    if (fa->has_decode_assists != fb->has_decode_assists) { return 0; }
+    if (fa->has_vnmi         != fb->has_vnmi)         { return 0; }
+    if (fa->has_pause_filter != fb->has_pause_filter) { return 0; }
+    if (fa->has_lbr_virt     != fb->has_lbr_virt)     { return 0; }
+    if (fa->has_sss_check    != fb->has_sss_check)    { return 0; }
+    if (fa->has_amd_ibpb     != fb->has_amd_ibpb)     { return 0; }
+    if (fa->has_amd_stibp    != fb->has_amd_stibp)    { return 0; }
+    if (fa->has_amd_ibpb_ret != fb->has_amd_ibpb_ret) { return 0; }
+    if (fa->has_autoibrs     != fb->has_autoibrs)     { return 0; }
+    if (fa->has_amd_ssbd     != fb->has_amd_ssbd)     { return 0; }
+    if (fa->has_sev          != fb->has_sev)          { return 0; }
+    if (fa->has_sev_es       != fb->has_sev_es)       { return 0; }
+    if (fa->has_sev_snp      != fb->has_sev_snp)      { return 0; }
+    if (fa->has_sme          != fb->has_sme)          { return 0; }
+    if (fa->has_pcid         != fb->has_pcid)         { return 0; }
+    if (fa->has_aesni        != fb->has_aesni)        { return 0; }
+    if (fa->has_nx           != fb->has_nx)           { return 0; }
 
     /* Vulnerability profiles must match — all 12 immunity flags */
     const struct fbvbs_vuln_profile *a = &profile_a->vuln;
@@ -826,7 +979,7 @@ void fbvbs_vmentry_mitigate(const struct fbvbs_vuln_profile *vuln,
  * ================================================================ */
 
 /*@ requires \valid(guest_cet);
-    requires \valid(host_cet);
+    requires \valid_read(host_cet);
     assigns *guest_cet;
 */
 void fbvbs_cet_save_guest(struct fbvbs_cet_state *guest_cet,
@@ -851,7 +1004,7 @@ void fbvbs_cet_save_guest(struct fbvbs_cet_state *guest_cet,
     msr_write(MSR_IA32_INTERRUPT_SSP_TABLE, host_cet->isst_addr);
 }
 
-/*@ requires \valid(guest_cet);
+/*@ requires \valid_read(guest_cet);
     assigns \nothing;
 */
 void fbvbs_cet_restore_guest(const struct fbvbs_cet_state *guest_cet)
@@ -884,7 +1037,7 @@ void fbvbs_debug_save_guest(struct fbvbs_debug_state *guest_dbg)
     guest_dbg->dr7 = 0;
 }
 
-/*@ requires \valid(guest_dbg);
+/*@ requires \valid_read(guest_dbg);
     assigns \nothing;
 */
 void fbvbs_debug_restore_guest(const struct fbvbs_debug_state *guest_dbg)
