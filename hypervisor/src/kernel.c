@@ -39,7 +39,8 @@ static int32_t fbvbs_find_host_callsite_table_slot_index(
              (allowed_offsets != \null &&
               \valid_read(allowed_offsets + (0 .. count - 1)));
     assigns state->host_callsites[0 .. FBVBS_MAX_HOST_CALLSITE_TABLES - 1];
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_EXHAUSTED;
+    ensures \result == OK || \result == INVALID_PARAMETER ||
+            \result == RESOURCE_EXHAUSTED || \result == ALREADY_EXISTS;
     behavior invalid_args:
       assumes state == \null || allowed_offsets == \null ||
               manifest_object_id == 0U || load_base == 0U || count == 0U ||
@@ -60,10 +61,6 @@ int fbvbs_configure_host_callsite_table(
     int32_t slot_index;
     uint32_t index;
 
-    /* Compile-time assertion: FBVBS_MAX_HOST_CALLSITE_ENTRIES must fit in uint16_t */
-    _Static_assert(FBVBS_MAX_HOST_CALLSITE_ENTRIES <= UINT16_MAX,
-                   "FBVBS_MAX_HOST_CALLSITE_ENTRIES exceeds uint16_t range");
-
     if (state == NULL || allowed_offsets == NULL || manifest_object_id == 0U ||
         load_base == 0U || count == 0U || count > FBVBS_MAX_HOST_CALLSITE_ENTRIES) {
         return INVALID_PARAMETER;
@@ -73,12 +70,11 @@ int fbvbs_configure_host_callsite_table(
         return INVALID_PARAMETER;
     }
 
-    /* Runtime overflow check for uint16_t cast */
-    if (count > UINT16_MAX) {
-        return INVALID_PARAMETER;
-    }
-
     /* Check if caller_class already exists to prevent overwriting */
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_HOST_CALLSITE_TABLES;
+        loop assigns index;
+        loop variant FBVBS_MAX_HOST_CALLSITE_TABLES - index;
+    */
     for (index = 0U; index < FBVBS_MAX_HOST_CALLSITE_TABLES; ++index) {
         if (state->host_callsites[index].active &&
             state->host_callsites[index].caller_class == caller_class) {
@@ -232,44 +228,25 @@ static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
 */
 static void fbvbs_seed_hash(uint8_t hash[48], uint8_t tag) {
     uint32_t index;
-    uint32_t state[8];
+    uint32_t sha_state[8];
     uint32_t temp;
     uint32_t w[64];
-
-    /* Initialize SHA-256 state with initial values */
-    state[0] = 0x6A09E667U;
-    state[1] = 0xBB67AE85U;
-    state[2] = 0x3C6EF372U;
-    state[3] = 0xA54FF53AU;
-    state[4] = 0x510E527FU;
-    state[5] = 0x9B05688CU;
-    state[6] = 0x1F83D9ABU;
-    state[7] = 0x5BE0CD19U;
-
-    /* Prepare message schedule */
-    for (index = 0U; index < 16U; ++index) {
-        w[index] = 0U;
-    }
-    w[0] = ((uint32_t)tag) << 24;
-
-    /* Extend message schedule */
-    for (index = 16U; index < 64U; ++index) {
-        temp = w[index - 15];
-        uint32_t s0 = ((temp >> 7) | (temp << 25)) ^ ((temp >> 18) | (temp << 14)) ^ (temp >> 3);
-        temp = w[index - 2];
-        uint32_t s1 = ((temp >> 17) | (temp << 15)) ^ ((temp >> 19) | (temp << 13)) ^ (temp >> 10);
-        w[index] = w[index - 16] + s0 + w[index - 7] + s1;
-    }
-
-    /* SHA-256 compression function */
-    uint32_t a = state[0];
-    uint32_t b = state[1];
-    uint32_t c = state[2];
-    uint32_t d = state[3];
-    uint32_t e = state[4];
-    uint32_t f = state[5];
-    uint32_t g = state[6];
-    uint32_t h = state[7];
+    uint32_t s0;
+    uint32_t s1;
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    uint32_t d;
+    uint32_t e;
+    uint32_t f;
+    uint32_t g;
+    uint32_t h;
+    uint32_t S0_val;
+    uint32_t S1_val;
+    uint32_t ch;
+    uint32_t temp1;
+    uint32_t maj;
+    uint32_t temp2;
 
     /* SHA-256 round constants */
     static const uint32_t k[64] = {
@@ -291,13 +268,60 @@ static void fbvbs_seed_hash(uint8_t hash[48], uint8_t tag) {
         0x90BEFFFAU, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U
     };
 
+    /* Initialize SHA-256 state with initial values */
+    sha_state[0] = 0x6A09E667U;
+    sha_state[1] = 0xBB67AE85U;
+    sha_state[2] = 0x3C6EF372U;
+    sha_state[3] = 0xA54FF53AU;
+    sha_state[4] = 0x510E527FU;
+    sha_state[5] = 0x9B05688CU;
+    sha_state[6] = 0x1F83D9ABU;
+    sha_state[7] = 0x5BE0CD19U;
+
+    /* Prepare message schedule */
+    /*@ loop invariant 0 <= index <= 16;
+        loop assigns index, w[0 .. 15];
+        loop variant 16 - index;
+    */
+    for (index = 0U; index < 16U; ++index) {
+        w[index] = 0U;
+    }
+    w[0] = ((uint32_t)tag) << 24;
+
+    /* Extend message schedule */
+    /*@ loop invariant 16 <= index <= 64;
+        loop assigns index, temp, s0, s1, w[16 .. 63];
+        loop variant 64 - index;
+    */
+    for (index = 16U; index < 64U; ++index) {
+        temp = w[index - 15];
+        s0 = ((temp >> 7) | (temp << 25)) ^ ((temp >> 18) | (temp << 14)) ^ (temp >> 3);
+        temp = w[index - 2];
+        s1 = ((temp >> 17) | (temp << 15)) ^ ((temp >> 19) | (temp << 13)) ^ (temp >> 10);
+        w[index] = w[index - 16] + s0 + w[index - 7] + s1;
+    }
+
+    /* SHA-256 compression function */
+    a = sha_state[0];
+    b = sha_state[1];
+    c = sha_state[2];
+    d = sha_state[3];
+    e = sha_state[4];
+    f = sha_state[5];
+    g = sha_state[6];
+    h = sha_state[7];
+
+    /*@ loop invariant 0 <= index <= 64;
+        loop assigns index, S1_val, ch, temp1, S0_val, maj, temp2, a, b, c, d, e, f, g, h;
+        loop variant 64 - index;
+    */
     for (index = 0U; index < 64U; ++index) {
-        uint32_t S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
-        uint32_t ch = (e & f) ^ (~e & g);
-        uint32_t temp1 = h + S1 + ch + k[index] + w[index];
-        uint32_t S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = S0 + maj;
+        S1_val = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
+        ch = (e & f) ^ (~e & g);
+        temp1 = h + S1_val + ch + k[index] + w[index];
+        S0_val = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
+        maj = (a & b) ^ (a & c) ^ (b & c);
+        temp2 = S0_val + maj;
 
         h = g;
         g = f;
@@ -309,24 +333,32 @@ static void fbvbs_seed_hash(uint8_t hash[48], uint8_t tag) {
         a = temp1 + temp2;
     }
 
-    state[0] += a;
-    state[1] += b;
-    state[2] += c;
-    state[3] += d;
-    state[4] += e;
-    state[5] += f;
-    state[6] += g;
-    state[7] += h;
+    sha_state[0] += a;
+    sha_state[1] += b;
+    sha_state[2] += c;
+    sha_state[3] += d;
+    sha_state[4] += e;
+    sha_state[5] += f;
+    sha_state[6] += g;
+    sha_state[7] += h;
 
     /* Convert state to hash bytes (big-endian) */
+    /*@ loop invariant 0 <= index <= 8;
+        loop assigns index, hash[0 .. 31];
+        loop variant 8 - index;
+    */
     for (index = 0U; index < 8U; ++index) {
-        hash[index * 4] = (uint8_t)(state[index] >> 24);
-        hash[index * 4 + 1] = (uint8_t)(state[index] >> 16);
-        hash[index * 4 + 2] = (uint8_t)(state[index] >> 8);
-        hash[index * 4 + 3] = (uint8_t)(state[index]);
+        hash[index * 4] = (uint8_t)(sha_state[index] >> 24);
+        hash[index * 4 + 1] = (uint8_t)(sha_state[index] >> 16);
+        hash[index * 4 + 2] = (uint8_t)(sha_state[index] >> 8);
+        hash[index * 4 + 3] = (uint8_t)(sha_state[index]);
     }
 
     /* Fill remaining bytes with derived values */
+    /*@ loop invariant 32 <= index <= 48;
+        loop assigns index, hash[32 .. 47];
+        loop variant 48 - index;
+    */
     for (index = 32U; index < 48U; ++index) {
         hash[index] = hash[index - 32] ^ hash[index - 16] ^ tag;
     }
@@ -498,7 +530,7 @@ enum {
 
 /*@ requires \valid_read(catalog) || catalog == \null;
     requires catalog != \null ==> catalog->count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-    assigns \nothing;
+    assigns \result \from catalog, object_id;
     ensures \result == \null || \valid_read(\result);
     ensures \result != \null ==> \result->object_id == object_id;
 */
@@ -545,18 +577,11 @@ static int fbvbs_validate_boot_artifact_catalog(
     struct fbvbs_artifact_catalog *catalog
 ) {
     uint32_t index;
-    uint32_t hash_index;
-    uint64_t hash_table[32];  /* Simple hash table for duplicate detection */
-    uint32_t hash_table_size = 32U;
+    uint32_t dup_index;
 
     if (artifact_entries == NULL || catalog == NULL || artifact_count == 0U ||
         artifact_count > FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
         return INVALID_PARAMETER;
-    }
-
-    /* Initialize hash table */
-    for (index = 0U; index < hash_table_size; ++index) {
-        hash_table[index] = 0U;
     }
 
     *catalog = (struct fbvbs_artifact_catalog){0};
@@ -566,7 +591,7 @@ static int fbvbs_validate_boot_artifact_catalog(
         loop invariant catalog->count == artifact_count;
         loop invariant \forall integer j; 0 <= j < index ==>
             catalog->entries[j].related_index < artifact_count;
-        loop assigns index, hash_index, *catalog;
+        loop assigns index, dup_index, catalog->entries[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1];
         loop variant artifact_count - index;
     */
     for (index = 0U; index < artifact_count; ++index) {
@@ -578,16 +603,16 @@ static int fbvbs_validate_boot_artifact_catalog(
             return INVALID_PARAMETER;
         }
 
-        /* Check for duplicate object_id using hash table */
-        hash_index = (uint32_t)(entry->object_id % hash_table_size);
-        /* Linear probing for collision resolution */
-        while (hash_table[hash_index] != 0U) {
-            if (hash_table[hash_index] == entry->object_id) {
+        /* Check for duplicate object_id using linear scan */
+        /*@ loop invariant 0 <= dup_index <= index;
+            loop assigns dup_index;
+            loop variant index - dup_index;
+        */
+        for (dup_index = 0U; dup_index < index; ++dup_index) {
+            if (catalog->entries[dup_index].object_id == entry->object_id) {
                 return ALREADY_EXISTS;
             }
-            hash_index = (hash_index + 1U) % hash_table_size;
         }
-        hash_table[hash_index] = entry->object_id;
 
         catalog->entries[index] = *entry;
     }
@@ -645,8 +670,8 @@ static int fbvbs_manifest_component_expected_kind(uint8_t component_type, uint32
 
 /*@ requires \valid_read(catalog) || catalog == \null;
     requires catalog != \null ==> catalog->count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-    requires profile_count == 0U ||
-             (profiles != \null && \valid_read(profiles + (0 .. profile_count - 1)));
+    requires profiles != \null && profile_count > 0U ==>
+             \valid_read(profiles + (0 .. profile_count - 1));
     requires \valid(validated_profiles + (0 .. FBVBS_MAX_MANIFEST_PROFILES - 1)) || validated_profiles == \null;
     requires catalog != \null && validated_profiles != \null ==>
         \separated(catalog, validated_profiles + (0 .. FBVBS_MAX_MANIFEST_PROFILES - 1));
@@ -751,6 +776,7 @@ static int fbvbs_validate_manifest_profiles(
         if (profile->allowed_callsite_count > FBVBS_MAX_HOST_CALLSITE_ENTRIES) {
             return INVALID_PARAMETER;
         }
+
         validated_profiles[index] = *profile;
         validated_profiles[index].active = true;
     }
@@ -828,6 +854,9 @@ static int fbvbs_build_host_callsite_tables(
             loop variant profile->allowed_callsite_count - callsite_index;
         */
         for (callsite_index = 0U; callsite_index < profile->allowed_callsite_count; ++callsite_index) {
+            if (profile->load_base > UINT64_MAX - profile->allowed_callsite_offsets[callsite_index]) {
+                continue; /* skip this callsite on overflow */
+            }
             table->allowed_offsets[callsite_index] = profile->allowed_callsite_offsets[callsite_index];
             table->relocated_callsites[callsite_index] =
                 profile->load_base + profile->allowed_callsite_offsets[callsite_index];
@@ -840,8 +869,8 @@ static int fbvbs_build_host_callsite_tables(
 /*@ requires \valid(state) || state == \null;
     requires artifact_count == 0U ||
              (artifact_entries != \null && \valid_read(artifact_entries + (0 .. artifact_count - 1)));
-    requires profile_count == 0U ||
-             (profiles != \null && \valid_read(profiles + (0 .. profile_count - 1)));
+    requires profiles != \null && profile_count > 0U ==>
+             \valid_read(profiles + (0 .. profile_count - 1));
     assigns state->artifact_catalog,
             state->manifest_profiles[0 .. FBVBS_MAX_MANIFEST_PROFILES - 1],
             state->host_callsites[0 .. FBVBS_MAX_HOST_CALLSITE_TABLES - 1],
@@ -960,8 +989,9 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
 
 /*@ requires \valid(state);
     assigns *state;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == ALREADY_EXISTS;
 */
-void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
+int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     static const uint8_t boot_payload[] = "fbvbs hypervisor kernel boot";
     struct fbvbs_artifact_catalog_entry boot_artifact_entries[FBVBS_BOOT_ARTIFACT_SEED_COUNT];
     int status;
@@ -990,11 +1020,38 @@ void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     if (status != OK) {
         return status;
     }
-    fbvbs_partition_seed_freebsd_host(state);
-    fbvbs_vmx_probe(&state->vmx_caps);
+    status = fbvbs_partition_seed_freebsd_host(state);
+    if (status != OK) {
+        return status;
+    }
+    status = fbvbs_vmx_probe(&state->vmx_caps);
+    if (status != OK) {
+        return status;
+    }
+
+    /* CPU security subsystem initialization (Section 21).
+     * Detects features, builds vulnerability profile, computes CR pinning
+     * and SPEC_CTRL values, detects IOMMU and boot integrity state.
+     * Must run after vmx_probe (uses vmx_caps) and before any VM runs. */
+    fbvbs_cpu_detect_features(0U, &state->bsp_profile);
+    fbvbs_cpu_build_vuln_profile(&state->bsp_profile);
+    fbvbs_cpu_compute_cr_pins(&state->bsp_profile);
+    fbvbs_cpu_compute_global_mitigations(
+        &state->bsp_profile, 1U, &state->cpu_security);
+    fbvbs_iommu_detect(&state->cpu_security);
+    fbvbs_boot_integrity_detect(&state->cpu_security);
+    /* Apply computed CR pin masks from CPU security profile */
+    state->pinned_cr0_mask = state->bsp_profile.cr_pins.cr0_pin_mask;
+    state->pinned_cr4_mask = state->bsp_profile.cr_pins.cr4_pin_mask;
+    /* Initialize host SPEC_CTRL from computed value */
+    state->spec_ctrl.host_spec_ctrl = state->cpu_security.host_spec_ctrl_value;
+
     fbvbs_seed_capability_bitmap(state);
     fbvbs_seed_device_catalog(state);
-    fbvbs_log_init(state);
+    status = fbvbs_log_init(state);
+    if (status != OK) {
+        return status;
+    }
     fbvbs_log_append(
         state,
         0U,
@@ -1004,15 +1061,21 @@ void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
         boot_payload,
         (uint32_t)(sizeof(boot_payload) - 1U)
     );
+    return OK;
 }
 
 /*@ assigns g_fbvbs_hypervisor;
 */
 void fbvbs_kernel_main(const void *multiboot_info) {
-    /* Store Multiboot information pointer for later use */
-    g_fbvbs_hypervisor.multiboot_info = multiboot_info;
+    int init_status;
 
-    fbvbs_hypervisor_init(&g_fbvbs_hypervisor);
+    init_status = fbvbs_hypervisor_init(&g_fbvbs_hypervisor);
+    if (init_status != OK) {
+        return; /* halt: boot catalog or subsystem init failed */
+    }
+
+    /* Store Multiboot information pointer AFTER init (init zeros state) */
+    g_fbvbs_hypervisor.multiboot_info = multiboot_info;
 
     /* Process Multiboot information if available */
     if (multiboot_info != NULL) {
@@ -1020,118 +1083,8 @@ void fbvbs_kernel_main(const void *multiboot_info) {
     }
 }
 
-/* Process Multiboot information structure */
-void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info) {
-    const uint32_t *info = (const uint32_t *)multiboot_info;
-    uint32_t total_size;
-    uint32_t offset;
-
-    if (state == NULL || multiboot_info == NULL) {
-        return;
-    }
-
-    /* Multiboot2 information structure format:
-     * [0] total_size (bytes)
-     * [1] reserved
-     * [2...] tags
-     */
-    total_size = info[0];
-    offset = 8;  /* Skip total_size and reserved */
-
-    /* Initialize memory map count */
-    state->memory_map_count = 0U;
-
-    /* Iterate through tags */
-    while (offset < total_size) {
-        const uint32_t *tag = (const uint32_t *)((const uint8_t *)multiboot_info + offset);
-        uint32_t type = tag[0];
-        uint32_t size = tag[1];
-
-        /* Align to 8-byte boundary */
-        uint32_t aligned_size = (size + 7) & ~7U;
-
-        switch (type) {
-            case 0:  /* End tag */
-                return;
-
-            case 4:  /* Basic memory information */
-                if (size >= 16) {
-                    /* mem_lower and mem_upper in KB */
-                    uint32_t mem_lower = tag[2];
-                    uint32_t mem_upper = tag[3];
-                    /* Store memory information if needed */
-                    (void)mem_lower;
-                    (void)mem_upper;
-                }
-                break;
-
-            case 6:  /* Memory map */
-                /* Process memory map entries */
-                if (size >= 16) {
-                    uint32_t entry_size = tag[4];
-                    uint32_t entry_version = tag[5];
-                    uint32_t entry_offset = offset + 16;
-
-                    (void)entry_version;
-
-                    while (entry_offset < offset + size && state->memory_map_count < 32U) {
-                        const uint64_t *entry = (const uint64_t *)((const uint8_t *)multiboot_info + entry_offset);
-                        uint64_t base_addr = entry[0];
-                        uint64_t length = entry[1];
-                        uint32_t entry_type = (uint32_t)entry[2];
-
-                        /* Store memory map entry */
-                        state->memory_map[state->memory_map_count].base_addr = base_addr;
-                        state->memory_map[state->memory_map_count].length = length;
-                        state->memory_map[state->memory_map_count].type = entry_type;
-                        state->memory_map[state->memory_map_count].reserved = 0U;
-                        state->memory_map_count++;
-
-                        entry_offset += entry_size;
-                    }
-                }
-                break;
-
-            case 1:  /* Command line */
-                /* Process command line string */
-                if (size > 8) {
-                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 8);
-                    (void)cmdline;
-                }
-                break;
-
-            case 3:  /* Module */
-                /* Process module information */
-                if (size >= 16) {
-                    uint32_t mod_start = tag[2];
-                    uint32_t mod_end = tag[3];
-                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 16);
-                    (void)mod_start;
-                    (void)mod_end;
-                    (void)cmdline;
-                }
-                break;
-
-            case 5:  /* Boot device */
-                /* Process boot device information */
-                if (size >= 16) {
-                    uint32_t biosdev = tag[2];
-                    uint32_t partition = tag[3];
-                    uint32_t sub_partition = tag[4];
-                    state->boot_device = biosdev;
-                    state->boot_partition = partition;
-                    state->boot_sub_partition = sub_partition;
-                }
-                break;
-
-            default:
-                /* Unknown tag, skip */
-                break;
-        }
-
-        offset += aligned_size;
-    }
-}
+/* fbvbs_process_multiboot_info is in boot_multiboot.c (excluded from WP
+   due to void* casts required for Multiboot2 binary structure parsing) */
 
 /*@ requires \valid(state) || state == \null;
     requires \valid(response) || response == \null;
@@ -1165,16 +1118,16 @@ int fbvbs_diag_get_capabilities(
     requires state != \null ==> state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     requires \separated(state, response, response_length);
     assigns *response, *response_length;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == BUFFER_TOO_SMALL;
+    ensures \result == OK || \result == INVALID_PARAMETER;
     behavior null_args:
       assumes state == \null || response == \null || response_length == \null;
       ensures \result == INVALID_PARAMETER;
     behavior ok:
       assumes state != \null && response != \null && response_length != \null;
-      assumes state->artifact_catalog.count * (uint32_t)sizeof(struct fbvbs_artifact_catalog_entry) <= sizeof(response->entries);
       ensures \result == OK;
       ensures response->count == state->artifact_catalog.count;
       ensures *response_length == 8U + state->artifact_catalog.count * (uint32_t)sizeof(struct fbvbs_artifact_catalog_entry);
+    complete behaviors;
     disjoint behaviors;
 */
 int fbvbs_diag_get_artifact_list(
@@ -1201,9 +1154,6 @@ int fbvbs_diag_get_artifact_list(
             uint8_t bytes[sizeof(struct fbvbs_artifact_catalog_entry)];
         } entry_copy;
 
-        if (((index + 1U) * (uint32_t)sizeof(struct fbvbs_artifact_catalog_entry)) > sizeof(response->entries)) {
-            return BUFFER_TOO_SMALL;
-        }
         /*@ assert index < FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES; */
         entry_copy.s = state->artifact_catalog.entries[index];
         fbvbs_copy_bytes(
@@ -1226,16 +1176,16 @@ int fbvbs_diag_get_artifact_list(
     requires state != \null ==> state->device_catalog.count <= FBVBS_MAX_DEVICE_CATALOG_ENTRIES;
     requires \separated(state, response, response_length);
     assigns *response, *response_length;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == BUFFER_TOO_SMALL;
+    ensures \result == OK || \result == INVALID_PARAMETER;
     behavior null_args:
       assumes state == \null || response == \null || response_length == \null;
       ensures \result == INVALID_PARAMETER;
     behavior ok:
       assumes state != \null && response != \null && response_length != \null;
-      assumes state->device_catalog.count * (uint32_t)sizeof(struct fbvbs_device_catalog_entry) <= sizeof(response->entries);
       ensures \result == OK;
       ensures response->count == state->device_catalog.count;
       ensures *response_length == 8U + state->device_catalog.count * (uint32_t)sizeof(struct fbvbs_device_catalog_entry);
+    complete behaviors;
     disjoint behaviors;
 */
 int fbvbs_diag_get_device_list(
@@ -1262,9 +1212,6 @@ int fbvbs_diag_get_device_list(
             uint8_t bytes[sizeof(struct fbvbs_device_catalog_entry)];
         } entry_copy;
 
-        if (((index + 1U) * (uint32_t)sizeof(struct fbvbs_device_catalog_entry)) > sizeof(response->entries)) {
-            return BUFFER_TOO_SMALL;
-        }
         /*@ assert index < FBVBS_MAX_DEVICE_CATALOG_ENTRIES; */
         entry_copy.s = state->device_catalog.entries[index];
         fbvbs_copy_bytes(

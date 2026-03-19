@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "fbvbs_abi.h"
+#include "fbvbs_cpu_security.h"
 #include "fbvbs_leaf_vmx.h"
 
 struct fbvbs_trap_registers {
@@ -18,10 +19,6 @@ struct fbvbs_trap_registers {
 #define FBVBS_MAX_HOST_CALLSITE_ENTRIES 4U
 #define FBVBS_MAX_HOST_CALLSITE_TABLES 2U
 #define FBVBS_MAX_MANIFEST_PROFILES 10U
-#define FBVBS_MANIFEST_COMPONENT_TRUSTED_SERVICE 1U
-#define FBVBS_MANIFEST_COMPONENT_GUEST_BOOT 2U
-#define FBVBS_MANIFEST_COMPONENT_FREEBSD_KERNEL 3U
-#define FBVBS_MANIFEST_COMPONENT_FREEBSD_MODULE 4U
 
 struct fbvbs_memory_mapping {
     bool active;
@@ -45,6 +42,7 @@ struct fbvbs_shared_registration {
     uint64_t shared_object_id;
     uint64_t memory_object_id;
     uint64_t size;
+    uint64_t owner_partition_id;
     uint64_t peer_partition_id;
 };
 
@@ -202,6 +200,7 @@ struct fbvbs_uvs_artifact_approval {
     bool active;
     uint8_t reserved0[7];
     uint64_t verified_manifest_set_id;
+    uint64_t manifest_set_id;
     uint64_t artifact_object_id;
     uint64_t manifest_object_id;
     uint8_t artifact_hash[48];
@@ -252,6 +251,7 @@ struct fbvbs_hypervisor_state {
     uint64_t next_key_handle;
     uint64_t next_dek_handle;
     uint64_t next_manifest_set_id;
+    uint64_t current_manifest_set_id;
     uint64_t next_iommu_domain_id;
     uint64_t approved_module_object_id;
     uint64_t boot_id_hi;
@@ -292,13 +292,39 @@ struct fbvbs_hypervisor_state {
     uint32_t boot_partition;
     uint32_t boot_sub_partition;
     volatile uint32_t log_lock;  /* Spinlock for log operations */
+
+    /* CPU security subsystem (Section 21): per-CPU detection, vulnerability
+     * profiling, and VM exit/entry mitigation state.  Initialized once at
+     * boot by fbvbs_hypervisor_init, then immutable except for spec_ctrl. */
+    struct fbvbs_global_security_state cpu_security;
+    struct fbvbs_cpu_security_profile  bsp_profile;
+    struct fbvbs_spec_ctrl_state       spec_ctrl;
 };
+
+/*@ predicate fbvbs_state_invariant(struct fbvbs_hypervisor_state *s) =
+        \valid(s) &&
+        s->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES &&
+        s->device_catalog.count <= FBVBS_MAX_DEVICE_CATALOG_ENTRIES &&
+        s->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES &&
+        s->intercepted_msr_count <= FBVBS_MAX_INTERCEPTED_MSRS &&
+        s->next_memory_object_id > 0 &&
+        s->next_partition_id > 0 &&
+        s->next_shared_object_id > 0 &&
+        s->next_target_set_id > 0 &&
+        s->next_key_handle > 0 &&
+        s->next_dek_handle > 0 &&
+        s->next_manifest_set_id > 0 &&
+        s->next_iommu_domain_id > 0 &&
+        s->memory_map_count <= 32U;
+*/
 
 extern struct fbvbs_hypervisor_state g_fbvbs_hypervisor;
 
 void fbvbs_zero_memory(void *buffer, size_t length);
 void fbvbs_copy_memory(void *destination, const void *source, size_t length);
 int fbvbs_memory_is_zero(const void *buffer, size_t length);
+int fbvbs_constant_time_equals(const void *a, const void *b, size_t length);
+void fbvbs_zero_page_at_gpa(uint64_t gpa);
 
 /*@ requires n == 0 || \valid(dest + (0 .. n - 1));
     requires n == 0 || \valid_read(src + (0 .. n - 1));
@@ -319,7 +345,7 @@ static inline void fbvbs_copy_bytes(uint8_t *dest, const uint8_t *src, size_t n)
     }
 }
 
-void fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state);
+int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state);
 void fbvbs_kernel_main(const void *multiboot_info);
 void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info);
 
@@ -398,7 +424,7 @@ int fbvbs_partition_quiesce(struct fbvbs_hypervisor_state *state, uint64_t parti
 int fbvbs_partition_resume(struct fbvbs_hypervisor_state *state, uint64_t partition_id);
 /*@ requires \valid(state);
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1],
-            state->mirror_log;
+            state->mirror_log, state->log_lock;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE;
 */
 int fbvbs_partition_fault(
@@ -481,7 +507,8 @@ int fbvbs_memory_set_permission(
 int fbvbs_memory_register_shared(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_register_shared_request *request,
-    struct fbvbs_memory_register_shared_response *response
+    struct fbvbs_memory_register_shared_response *response,
+    uint64_t owner_partition_id
 );
 int fbvbs_memory_release_object(
     struct fbvbs_hypervisor_state *state,

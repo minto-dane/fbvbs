@@ -53,10 +53,10 @@ static struct fbvbs_memory_object *fbvbs_allocate_memory_object_slot(
     return NULL;
 }
 
-/*@ requires \valid(state);
-    requires \valid(request);
-    requires \valid(response);
-    requires state->next_memory_object_id > 0;
+/*@ requires \valid(state) || state == \null;
+    requires \valid(request) || request == \null;
+    requires \valid(response) || response == \null;
+    requires state != \null ==> state->next_memory_object_id > 0;
     assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1],
             state->next_memory_object_id,
             *response;

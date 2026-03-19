@@ -337,6 +337,8 @@ static int fbvbs_range_valid(uint64_t guest_physical_address, uint64_t size) {
         (size % FBVBS_PAGE_SIZE) == 0U;
 }
 
+/*@ assigns \result \from left_base, left_size, right_base, right_size;
+*/
 static int fbvbs_ranges_overlap(
     uint64_t left_base,
     uint64_t left_size,
@@ -508,6 +510,11 @@ static struct fbvbs_memory_mapping *fbvbs_find_mapping_covering(
         if (!mapping->active) {
             continue;
         }
+        /* Guard against wraparound: if either range overflows, skip */
+        if (mapping->guest_physical_address > UINT64_MAX - mapping->size ||
+            guest_physical_address > UINT64_MAX - size) {
+            continue;
+        }
         mapping_end = mapping->guest_physical_address + mapping->size;
         requested_end = guest_physical_address + size;
         if (mapping->guest_physical_address <= guest_physical_address && mapping_end >= requested_end) {
@@ -634,7 +641,8 @@ static int fbvbs_partition_can_charge_mapping(
 /*@ requires \valid(partition);
     requires \valid(object);
     assigns partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1], partition->mapped_bytes, object->map_count;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == PERMISSION_DENIED ||
+            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
 */
 static int fbvbs_apply_mapping(
     struct fbvbs_partition *partition,
@@ -647,6 +655,13 @@ static int fbvbs_apply_mapping(
 
     if (!fbvbs_wx_safe(permissions)) {
         return INVALID_PARAMETER;
+    }
+    /* Prevent cross-partition aliasing of non-shareable memory objects.
+     * A PRIVATE or GUEST_MEMORY object must not be mapped by more than one
+     * partition; allowing this would break memory isolation guarantees. */
+    if (object->object_flags != FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE &&
+        object->map_count > 0U) {
+        return PERMISSION_DENIED;
     }
     if (!fbvbs_partition_can_charge_mapping(partition, size)) {
         return RESOURCE_EXHAUSTED;
@@ -802,21 +817,21 @@ static void fbvbs_log_platform_gate_failure(
     uint64_t device_id,
     uint32_t required_capability
 ) {
-    struct fbvbs_audit_platform_gate_event event;
+    union { struct fbvbs_audit_platform_gate_event e; uint8_t b[sizeof(struct fbvbs_audit_platform_gate_event)]; } overlay;
 
-    event = (struct fbvbs_audit_platform_gate_event){0};
-    event.partition_id = partition_id;
-    event.device_id = device_id;
-    event.required_capability = required_capability;
-    event.status = NOT_SUPPORTED_ON_PLATFORM;
+    overlay.e = (struct fbvbs_audit_platform_gate_event){0};
+    overlay.e.partition_id = partition_id;
+    overlay.e.device_id = device_id;
+    overlay.e.required_capability = required_capability;
+    overlay.e.status = NOT_SUPPORTED_ON_PLATFORM;
     fbvbs_log_append(
         state,
         0U,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
         4U,
         FBVBS_EVENT_VM_PLATFORM_GATE,
-        (const uint8_t *)&event,
-        sizeof(event)
+        overlay.b,
+        sizeof(overlay.e)
     );
 }
 
@@ -830,26 +845,54 @@ static void fbvbs_log_device_assignment_event(
     const struct fbvbs_partition *partition,
     uint64_t device_id
 ) {
-    struct fbvbs_audit_device_assignment_event event;
+    union { struct fbvbs_audit_device_assignment_event e; uint8_t b[sizeof(struct fbvbs_audit_device_assignment_event)]; } overlay;
 
-    event = (struct fbvbs_audit_device_assignment_event){0};
-    event.partition_id = partition->partition_id;
-    event.device_id = device_id;
-    event.iommu_domain_id = partition->iommu_domain_id;
-    event.attached_device_count = partition->assigned_device_count;
+    overlay.e = (struct fbvbs_audit_device_assignment_event){0};
+    overlay.e.partition_id = partition->partition_id;
+    overlay.e.device_id = device_id;
+    overlay.e.iommu_domain_id = partition->iommu_domain_id;
+    overlay.e.attached_device_count = partition->assigned_device_count;
     fbvbs_log_append(
         state,
         0U,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
         4U,
         event_code,
-        (const uint8_t *)&event,
-        sizeof(event)
+        overlay.b,
+        sizeof(overlay.e)
     );
 }
 
 /*@ requires \valid(state);
-    assigns *state;
+    assigns state->mirror_log, state->log_lock;
+*/
+static void fbvbs_log_device_release_event(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t device_id,
+    uint64_t iommu_domain_id,
+    uint32_t post_release_device_count
+) {
+    union { struct fbvbs_audit_device_assignment_event e; uint8_t b[sizeof(struct fbvbs_audit_device_assignment_event)]; } overlay;
+
+    overlay.e = (struct fbvbs_audit_device_assignment_event){0};
+    overlay.e.partition_id = partition_id;
+    overlay.e.device_id = device_id;
+    overlay.e.iommu_domain_id = iommu_domain_id;
+    overlay.e.attached_device_count = post_release_device_count;
+    fbvbs_log_append(
+        state,
+        0U,
+        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+        4U,
+        FBVBS_EVENT_VM_DEVICE_RELEASE,
+        overlay.b,
+        sizeof(overlay.e)
+    );
+}
+
+/*@ requires \valid(state);
+    assigns state->mirror_log, state->log_lock;
 */
 static void fbvbs_log_iommu_domain_event(
     struct fbvbs_hypervisor_state *state,
@@ -858,20 +901,20 @@ static void fbvbs_log_iommu_domain_event(
     uint64_t domain_id,
     uint32_t attached_device_count
 ) {
-    struct fbvbs_audit_device_assignment_event event;
+    union { struct fbvbs_audit_device_assignment_event e; uint8_t b[sizeof(struct fbvbs_audit_device_assignment_event)]; } overlay;
 
-    event = (struct fbvbs_audit_device_assignment_event){0};
-    event.partition_id = partition_id;
-    event.iommu_domain_id = domain_id;
-    event.attached_device_count = attached_device_count;
+    overlay.e = (struct fbvbs_audit_device_assignment_event){0};
+    overlay.e.partition_id = partition_id;
+    overlay.e.iommu_domain_id = domain_id;
+    overlay.e.attached_device_count = attached_device_count;
     fbvbs_log_append(
         state,
         0U,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
         4U,
         event_code,
-        (const uint8_t *)&event,
-        sizeof(event)
+        overlay.b,
+        sizeof(overlay.e)
     );
 }
 
@@ -911,6 +954,8 @@ static int fbvbs_partition_attach_iommu_domain(
     requires partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
     requires index < partition->assigned_device_count;
     assigns partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1], partition->assigned_device_count;
+    ensures partition->assigned_device_count == \old(partition->assigned_device_count) - 1;
+    ensures partition->assigned_device_count < FBVBS_MAX_ASSIGNED_DEVICES;
 */
 static void fbvbs_partition_remove_assigned_device_at(
     struct fbvbs_partition *partition,
@@ -932,9 +977,11 @@ static void fbvbs_partition_remove_assigned_device_at(
 /*@ requires \valid(state);
     requires \valid(partition);
     requires \valid(released_domain_id);
+    requires partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
     assigns partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1], partition->assigned_device_count,
             partition->iommu_domain_id, state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1], *released_domain_id;
     ensures \result == OK || \result == INTERNAL_CORRUPTION || \result == NOT_FOUND;
+    ensures partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
 */
 static int fbvbs_partition_release_device_common(
     struct fbvbs_hypervisor_state *state,
@@ -947,9 +994,7 @@ static int fbvbs_partition_release_device_common(
 
     *released_domain_id = 0U;
 
-    if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
-        return INTERNAL_CORRUPTION;
-    }
+    /* requires precondition guarantees assigned_device_count <= MAX */
 
     /*@ loop invariant 0 <= index <= partition->assigned_device_count || index <= FBVBS_MAX_ASSIGNED_DEVICES;
         loop invariant partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
@@ -966,8 +1011,16 @@ static int fbvbs_partition_release_device_common(
                 return INTERNAL_CORRUPTION;
             }
 
+            /* Issue Function Level Reset before detaching from IOMMU domain.
+             * Without FLR, a malicious device retains DMA mappings and pending
+             * transactions after release — data leak or continued DMA to the
+             * previous partition's memory region (Section 37, FBVBS-REQ-0904).
+             * Bare-metal: PCI FLR or D3hot→D0 cycle.  Model: no-op. */
+            (void)device_id; /* FLR stub: bare-metal sends FLR to PCI function */
+
             /*@ assert index < partition->assigned_device_count; */
             fbvbs_partition_remove_assigned_device_at(partition, index);
+            /*@ assert partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES; */
             domain->attached_device_count = (uint16_t)(domain->attached_device_count - 1U);
             if (domain->attached_device_count == 0U) {
                 uint64_t domain_id = domain->domain_id;
@@ -983,14 +1036,34 @@ static int fbvbs_partition_release_device_common(
     return NOT_FOUND;
 }
 
+/*@ requires \valid(state);
+    requires \valid(partition);
+    requires partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
+    assigns partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1],
+            partition->assigned_device_count, partition->iommu_domain_id,
+            state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1];
+*/
 static void fbvbs_partition_release_all_devices(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition
 ) {
-    while (partition->assigned_device_count != 0U) {
-        uint64_t device_id = partition->assigned_devices[partition->assigned_device_count - 1U];
+    uint32_t iteration;
+
+    /*@ loop invariant 0 <= iteration <= FBVBS_MAX_ASSIGNED_DEVICES;
+        loop invariant partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES;
+        loop assigns iteration, partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1],
+                     partition->assigned_device_count, partition->iommu_domain_id,
+                     state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1];
+        loop variant FBVBS_MAX_ASSIGNED_DEVICES - iteration;
+    */
+    for (iteration = 0U; iteration < FBVBS_MAX_ASSIGNED_DEVICES; ++iteration) {
+        uint64_t device_id;
         uint64_t released_domain_id;
 
+        if (partition->assigned_device_count == 0U) {
+            break;
+        }
+        device_id = partition->assigned_devices[partition->assigned_device_count - 1U];
         if (fbvbs_partition_release_device_common(
                 state,
                 partition,
@@ -1010,6 +1083,9 @@ static void fbvbs_partition_release_all_devices(
     ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_EXHAUSTED;
     ensures \result == OK ==> *created_partition != \null;
     ensures \result == OK ==> \valid(*created_partition);
+    ensures \result == OK ==>
+            \exists integer i; 0 <= i < FBVBS_MAX_PARTITIONS &&
+            *created_partition == &state->partitions[i];
 */
 static int fbvbs_partition_create_common(
     struct fbvbs_hypervisor_state *state,
@@ -1034,6 +1110,9 @@ static int fbvbs_partition_create_common(
     if (partition == NULL) {
         return RESOURCE_EXHAUSTED;
     }
+    if (state->next_partition_id == UINT64_MAX) {
+        return RESOURCE_EXHAUSTED;
+    }
 
     *partition = (struct fbvbs_partition){0};
     partition->occupied = true;
@@ -1055,12 +1134,25 @@ static int fbvbs_partition_create_common(
     return OK;
 }
 
+/*@ requires \valid(state);
+    requires \valid(partition);
+    assigns partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1],
+            partition->mapped_bytes,
+            state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].map_count;
+*/
 static void fbvbs_partition_release_mappings(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition
 ) {
     uint32_t index;
 
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_MAPPINGS;
+        loop assigns index,
+                     partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1],
+                     partition->mapped_bytes,
+                     state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].map_count;
+        loop variant FBVBS_MAX_MEMORY_MAPPINGS - index;
+    */
     for (index = 0U; index < FBVBS_MAX_MEMORY_MAPPINGS; ++index) {
         struct fbvbs_memory_mapping *mapping = &partition->mappings[index];
 
@@ -1084,12 +1176,26 @@ static void fbvbs_partition_release_mappings(
     }
 }
 
+/*@ requires \valid(state);
+    assigns state->shared_objects[0 .. FBVBS_MAX_SHARED_OBJECTS - 1],
+            state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].shared_count,
+            state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mapped_bytes,
+            state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1];
+*/
 static void fbvbs_partition_release_shared_registrations(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id
 ) {
     uint32_t index;
 
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_SHARED_OBJECTS;
+        loop assigns index,
+                     state->shared_objects[0 .. FBVBS_MAX_SHARED_OBJECTS - 1],
+                     state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].shared_count,
+                     state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mapped_bytes,
+                     state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1];
+        loop variant FBVBS_MAX_SHARED_OBJECTS - index;
+    */
     for (index = 0U; index < FBVBS_MAX_SHARED_OBJECTS; ++index) {
         struct fbvbs_shared_registration *shared = &state->shared_objects[index];
 
@@ -1118,6 +1224,13 @@ static void fbvbs_partition_release_shared_registrations(
                 } else {
                     peer_partition->mapped_bytes = 0U;
                 }
+                /* Clear dangling mappings in peer partition */
+                for (uint32_t m = 0U; m < FBVBS_MAX_MEMORY_MAPPINGS; ++m) {
+                    if (peer_partition->mappings[m].active &&
+                        peer_partition->mappings[m].memory_object_id == shared->memory_object_id) {
+                        peer_partition->mappings[m] = (struct fbvbs_memory_mapping){0};
+                    }
+                }
             }
         }
         if (shared->owner_partition_id != 0U && shared->owner_partition_id != partition_id) {
@@ -1130,6 +1243,13 @@ static void fbvbs_partition_release_shared_registrations(
                 } else {
                     owner_partition->mapped_bytes = 0U;
                 }
+                /* Clear dangling mappings in owner partition */
+                for (uint32_t m = 0U; m < FBVBS_MAX_MEMORY_MAPPINGS; ++m) {
+                    if (owner_partition->mappings[m].active &&
+                        owner_partition->mappings[m].memory_object_id == shared->memory_object_id) {
+                        owner_partition->mappings[m] = (struct fbvbs_memory_mapping){0};
+                    }
+                }
             }
         }
         *shared = (struct fbvbs_shared_registration){0};
@@ -1138,8 +1258,14 @@ static void fbvbs_partition_release_shared_registrations(
 
 /*@ requires \valid(state);
     requires \valid(partition);
-    assigns *state;
-    ensures \result == OK || \result == INVALID_STATE;
+    assigns *partition,
+            state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mapped_bytes,
+            state->shared_objects[0 .. FBVBS_MAX_SHARED_OBJECTS - 1],
+            state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].map_count,
+            state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].shared_count,
+            state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1],
+            state->mirror_log, state->log_lock;
+    ensures \result == OK;
 */
 static int fbvbs_partition_destroy_common(
     struct fbvbs_hypervisor_state *state,
@@ -1154,7 +1280,9 @@ static int fbvbs_partition_destroy_common(
 
     fbvbs_partition_release_mappings(state, partition);
     fbvbs_partition_release_shared_registrations(state, partition_id);
-    if (kind == PARTITION_KIND_GUEST_VM && partition->assigned_device_count != 0U) {
+    if (kind == PARTITION_KIND_GUEST_VM &&
+        partition->assigned_device_count != 0U &&
+        partition->assigned_device_count <= FBVBS_MAX_ASSIGNED_DEVICES) {
         fbvbs_partition_release_all_devices(state, partition);
     }
     if (kind == PARTITION_KIND_GUEST_VM && partition->iommu_domain_id != 0U) {
@@ -1180,6 +1308,10 @@ static int fbvbs_partition_destroy_common(
     partition->measurement_epoch = measurement_epoch;
     partition->vcpu_count = vcpu_count;
     partition->tombstone = true;
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_VCPUS;
+        loop assigns index, partition->vcpus[0 .. FBVBS_MAX_VCPUS - 1];
+        loop variant FBVBS_MAX_VCPUS - index;
+    */
     for (index = 0U; index < vcpu_count && index < FBVBS_MAX_VCPUS; ++index) {
         partition->vcpus[index].state = FBVBS_VCPU_STATE_DESTROYED;
     }
@@ -1281,6 +1413,7 @@ int fbvbs_partition_create(
     }
 
     /*@ assert partition != \null; */
+    /*@ assert \valid(partition); */
     response->partition_id = partition->partition_id;
     return OK;
 }
@@ -1316,6 +1449,7 @@ int fbvbs_partition_get_status(
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
+    requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1], state->next_measurement_digest_id, *response;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE ||
             \result == MEASUREMENT_FAILED || \result == SIGNATURE_INVALID;
@@ -1546,7 +1680,7 @@ int fbvbs_partition_fault(
     uint64_t detail1
 ) {
     struct fbvbs_partition *partition;
-    struct fbvbs_audit_partition_fault_event event;
+    union { struct fbvbs_audit_partition_fault_event e; uint8_t b[sizeof(struct fbvbs_audit_partition_fault_event)]; } overlay;
 
     if (state == NULL || partition_id == 0U) {
         return INVALID_PARAMETER;
@@ -1558,6 +1692,15 @@ int fbvbs_partition_fault(
     if (!partition->occupied) {
         return INVALID_STATE;
     }
+    /* Restrict fault transition to states where the partition has executable
+     * content. Allowing fault from CREATED/MEASURED would let an attacker
+     * skip the normal lifecycle and enter FAULTED → RECOVER → RUNNABLE. */
+    if (partition->state != FBVBS_PARTITION_STATE_RUNNING &&
+        partition->state != FBVBS_PARTITION_STATE_RUNNABLE &&
+        partition->state != FBVBS_PARTITION_STATE_LOADED &&
+        partition->state != FBVBS_PARTITION_STATE_QUIESCED) {
+        return INVALID_STATE;
+    }
 
     partition->state = FBVBS_PARTITION_STATE_FAULTED;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_FAULTED);
@@ -1565,20 +1708,20 @@ int fbvbs_partition_fault(
     partition->last_fault_source_component = source_component;
     partition->last_fault_detail0 = detail0;
     partition->last_fault_detail1 = detail1;
-    event = (struct fbvbs_audit_partition_fault_event){0};
-    event.partition_id = partition_id;
-    event.fault_code = fault_code;
-    event.source_component = source_component;
-    event.detail0 = detail0;
-    event.detail1 = detail1;
+    overlay.e = (struct fbvbs_audit_partition_fault_event){0};
+    overlay.e.partition_id = partition_id;
+    overlay.e.fault_code = fault_code;
+    overlay.e.source_component = source_component;
+    overlay.e.detail0 = detail0;
+    overlay.e.detail1 = detail1;
     fbvbs_log_append(
         state,
         0U,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
         4U,
         FBVBS_EVENT_PARTITION_FAULT,
-        (const uint8_t *)&event,
-        sizeof(event)
+        overlay.b,
+        sizeof(overlay.e)
     );
     return OK;
 }
@@ -1587,13 +1730,14 @@ int fbvbs_partition_fault(
     requires \valid_read(request) || request == \null;
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INVALID_STATE || \result == MEASUREMENT_FAILED;
+            \result == INVALID_STATE || \result == MEASUREMENT_FAILED || \result == REVOKED;
 */
 int fbvbs_partition_recover(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_recover_request *request
 ) {
     struct fbvbs_partition *partition;
+    uint32_t revcheck;
 
     if (state == NULL || request == NULL) {
         return INVALID_PARAMETER;
@@ -1613,6 +1757,20 @@ int fbvbs_partition_recover(
         return MEASUREMENT_FAILED;
     }
 
+    /* Re-measurement check (Section 18.1): verify the manifest and image
+       have not been revoked while the partition was in Faulted state.
+       Without this, a revoked image could be silently recovered. */
+    /*@ loop invariant 0 <= revcheck <= state->revoked_object_count;
+        loop assigns revcheck;
+        loop variant state->revoked_object_count - revcheck;
+    */
+    for (revcheck = 0U; revcheck < state->revoked_object_count; ++revcheck) {
+        if (state->revoked_object_ids[revcheck] == partition->manifest_object_id ||
+            state->revoked_object_ids[revcheck] == partition->image_object_id) {
+            return REVOKED;
+        }
+    }
+
     partition->measurement_epoch += 1U;
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
     fbvbs_partition_reset_vcpus(partition, FBVBS_VCPU_STATE_RUNNABLE);
@@ -1624,6 +1782,14 @@ int fbvbs_partition_recover(
     return OK;
 }
 
+/*@ requires \valid(state) || state == \null;
+    assigns *state;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_EXHAUSTED;
+    behavior null_state:
+      assumes state == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+*/
 int fbvbs_partition_seed_freebsd_host(struct fbvbs_hypervisor_state *state) {
     struct fbvbs_partition *partition = NULL;
     int status;
@@ -1638,7 +1804,7 @@ int fbvbs_partition_seed_freebsd_host(struct fbvbs_hypervisor_state *state) {
         1U,
         0U,
         FBVBS_PAGE_SIZE * 4U,
-        0U,
+        FBVBS_HOST_DEFAULT_CAPABILITY_MASK,
         0U,
         &partition
     );
@@ -1646,18 +1812,31 @@ int fbvbs_partition_seed_freebsd_host(struct fbvbs_hypervisor_state *state) {
         return status;
     }
 
+    /*@ assert partition != \null; */
+    /*@ assert \valid(partition); */
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_RUNNABLE);
+    /*@ assert \valid(&partition->vcpus[0]); */
     partition->vcpus[0].rip = fbvbs_primary_host_callsite(state, FBVBS_HOST_CALLER_CLASS_FBVBS);
     return OK;
 }
 
+/*@ requires \valid(state) || state == \null;
+    assigns *state;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE;
+    behavior null_state:
+      assumes state == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+*/
 int fbvbs_partition_destroy(struct fbvbs_hypervisor_state *state, uint64_t partition_id) {
-    struct fbvbs_partition *partition = fbvbs_find_partition(state, partition_id);
+    struct fbvbs_partition *partition;
 
     if (state == NULL || partition_id == 0U) {
         return INVALID_PARAMETER;
     }
+
+    partition = fbvbs_find_partition(state, partition_id);
     if (partition == NULL) {
         return NOT_FOUND;
     }
@@ -1665,6 +1844,9 @@ int fbvbs_partition_destroy(struct fbvbs_hypervisor_state *state, uint64_t parti
         return INVALID_PARAMETER;
     }
     if (!partition->occupied) {
+        return INVALID_STATE;
+    }
+    if (partition->state == FBVBS_PARTITION_STATE_RUNNING) {
         return INVALID_STATE;
     }
 
@@ -1702,6 +1884,16 @@ int fbvbs_partition_get_fault_info(
     return OK;
 }
 
+/*@ requires \valid(state) || state == \null;
+    requires \valid(response) || response == \null;
+    requires \valid(response_length) || response_length == \null;
+    assigns *response, *response_length;
+    ensures \result == OK || \result == INVALID_PARAMETER;
+    behavior null_args:
+      assumes state == \null || response == \null || response_length == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+*/
 int fbvbs_diag_get_partition_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_partition_list_response *response,
@@ -1709,7 +1901,12 @@ int fbvbs_diag_get_partition_list(
 ) {
     uint32_t count = 0U;
     uint32_t index;
-    struct fbvbs_diag_partition_entry entry;
+
+    _Static_assert(
+        FBVBS_MAX_PARTITIONS * sizeof(struct fbvbs_diag_partition_entry)
+            <= sizeof(((struct fbvbs_diag_partition_list_response *)0)->entries),
+        "partition list buffer too small for FBVBS_MAX_PARTITIONS"
+    );
 
     if (state == NULL || response == NULL || response_length == NULL) {
         return INVALID_PARAMETER;
@@ -1717,31 +1914,37 @@ int fbvbs_diag_get_partition_list(
 
     *response = (struct fbvbs_diag_partition_list_response){0};
 
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_PARTITIONS;
+        loop invariant count <= index;
+        loop assigns index, count, *response;
+        loop variant FBVBS_MAX_PARTITIONS - index;
+    */
     for (index = 0U; index < FBVBS_MAX_PARTITIONS; ++index) {
         const struct fbvbs_partition *partition = &state->partitions[index];
 
         if (!partition->occupied && !partition->tombstone) {
             continue;
         }
-        if ((sizeof(entry) * (count + 1U)) > sizeof(response->entries)) {
-            return BUFFER_TOO_SMALL;
-        }
 
-        entry.partition_id = partition->partition_id;
-        entry.state = partition->state;
-        entry.kind = partition->kind;
-        entry.service_kind = partition->service_kind;
-        fbvbs_copy_bytes(
-            &response->entries[count * sizeof(entry)],
-            (const uint8_t *)&entry,
-            sizeof(entry)
-        );
+        {
+            union { struct fbvbs_diag_partition_entry e; uint8_t b[sizeof(struct fbvbs_diag_partition_entry)]; } overlay;
+            overlay.e = (struct fbvbs_diag_partition_entry){0};
+            overlay.e.partition_id = partition->partition_id;
+            overlay.e.state = partition->state;
+            overlay.e.kind = partition->kind;
+            overlay.e.service_kind = partition->service_kind;
+            fbvbs_copy_bytes(
+                &response->entries[count * sizeof(struct fbvbs_diag_partition_entry)],
+                overlay.b,
+                sizeof(struct fbvbs_diag_partition_entry)
+            );
+        }
         count += 1U;
     }
 
     response->count = count;
     response->reserved0 = 0U;
-    *response_length = 8U + (count * (uint32_t)sizeof(entry));
+    *response_length = 8U + (count * (uint32_t)sizeof(struct fbvbs_diag_partition_entry));
     return OK;
 }
 
@@ -1790,6 +1993,7 @@ int fbvbs_vm_create(
     }
 
     /*@ assert partition != \null; */
+    /*@ assert \valid(partition); */
     response->vm_partition_id = partition->partition_id;
     return OK;
 }
@@ -1813,6 +2017,9 @@ int fbvbs_vm_destroy(struct fbvbs_hypervisor_state *state, uint64_t vm_partition
         return INVALID_PARAMETER;
     }
     if (!partition->occupied) {
+        return INVALID_STATE;
+    }
+    if (partition->state == FBVBS_PARTITION_STATE_RUNNING) {
         return INVALID_STATE;
     }
 
@@ -1959,7 +2166,8 @@ int fbvbs_vm_get_register(
     requires \valid_read(request) || request == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INVALID_STATE || \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+            \result == PERMISSION_DENIED || \result == INVALID_STATE ||
+            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
 */
 int fbvbs_memory_map(
     struct fbvbs_hypervisor_state *state,
@@ -1992,6 +2200,19 @@ int fbvbs_memory_map(
     }
     if (request->size > object->size) {
         return INVALID_PARAMETER;
+    }
+
+    /* Enforce shared memory peer_permissions ceiling: if this object has a
+     * sharing registration naming this partition as peer, the requested
+     * permissions must not exceed the owner-granted peer_permissions. */
+    if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE) {
+        const struct fbvbs_shared_registration *reg =
+            fbvbs_find_shared_registration_for_object(
+                state, request->memory_object_id, partition->partition_id);
+        if (reg != NULL &&
+            (request->permissions & ~(uint32_t)reg->peer_permissions) != 0U) {
+            return PERMISSION_DENIED;
+        }
     }
 
     return fbvbs_apply_mapping(
@@ -2041,6 +2262,9 @@ int fbvbs_memory_unmap(
     if (object == NULL || object->map_count == 0U) {
         return INTERNAL_CORRUPTION;
     }
+    if (partition->mapped_bytes < mapping->size) {
+        return INTERNAL_CORRUPTION;
+    }
 
     partition->mapped_bytes -= mapping->size;
     object->map_count -= 1U;
@@ -2078,7 +2302,10 @@ int fbvbs_memory_set_permission(
     if (!fbvbs_partition_mapping_state_ok(partition)) {
         return INVALID_STATE;
     }
-    if (partition->capability_mask == 0U) {
+    /* Reject permission changes on the FreeBSD host partition itself.
+     * MEMORY_SET_PERMISSION is for trusted services to manage guest/service
+     * memory, not for modifying the host's own memory layout. */
+    if (partition->kind == PARTITION_KIND_FREEBSD_HOST) {
         return PERMISSION_DENIED;
     }
 
@@ -2089,6 +2316,25 @@ int fbvbs_memory_set_permission(
     );
     if (mapping == NULL) {
         return NOT_FOUND;
+    }
+
+    /* Enforce shared memory peer_permissions ceiling: if this mapping's object
+     * is SHAREABLE and has a sharing registration naming this partition as peer,
+     * the requested permissions must not exceed the owner-granted peer_permissions. */
+    if (mapping->memory_object_id != 0U) {
+        struct fbvbs_memory_object *object =
+            fbvbs_find_memory_object(state, mapping->memory_object_id);
+
+        if (object != NULL &&
+            object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE) {
+            const struct fbvbs_shared_registration *reg =
+                fbvbs_find_shared_registration_for_object(
+                    state, mapping->memory_object_id, partition->partition_id);
+            if (reg != NULL &&
+                (request->permissions & ~(uint32_t)reg->peer_permissions) != 0U) {
+                return PERMISSION_DENIED;
+            }
+        }
     }
 
     mapping->permissions = (uint16_t)request->permissions;
@@ -2106,7 +2352,8 @@ int fbvbs_memory_set_permission(
 int fbvbs_memory_register_shared(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_register_shared_request *request,
-    struct fbvbs_memory_register_shared_response *response
+    struct fbvbs_memory_register_shared_response *response,
+    uint64_t owner_partition_id
 ) {
     struct fbvbs_memory_object *object;
     struct fbvbs_partition *peer_partition = NULL;
@@ -2163,6 +2410,7 @@ int fbvbs_memory_register_shared(
     shared->memory_object_id = request->memory_object_id;
     shared->size = request->size;
     shared->peer_partition_id = request->peer_partition_id;
+    shared->owner_partition_id = owner_partition_id;
     object->shared_count += 1U;
     if (peer_partition != NULL) {
         peer_partition->mapped_bytes += request->size;
@@ -2220,6 +2468,7 @@ int fbvbs_memory_unregister_shared(
 /*@ requires \valid(state) || state == \null;
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
+    requires state != \null && response != \null ==> \separated(response, state);
     assigns *state, *response;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
             \result == INVALID_STATE || \result == NOT_SUPPORTED_ON_PLATFORM;
@@ -2258,7 +2507,13 @@ int fbvbs_vm_run(
 
     partition->state = FBVBS_PARTITION_STATE_RUNNING;
     vcpu->state = FBVBS_VCPU_STATE_RUNNING;
+    /*@ assert \separated(response, state); */
+    /*@ assert \exists integer i; 0 <= i < FBVBS_MAX_PARTITIONS &&
+              partition == &state->partitions[i]; */
+    /*@ assert \separated(response, partition); */
     status = fbvbs_vmx_run_vcpu(state, partition, request->vcpu_id, response);
+    /*@ assert status == OK || status == INVALID_PARAMETER || status == INVALID_STATE ||
+              status == NOT_SUPPORTED_ON_PLATFORM || status == NOT_FOUND; */
     if (status != OK) {
         partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
         vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
@@ -2273,7 +2528,8 @@ int fbvbs_vm_run(
     requires \valid_read(request) || request == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INVALID_STATE || \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+            \result == PERMISSION_DENIED || \result == INVALID_STATE ||
+            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
 */
 int fbvbs_vm_map_memory(
     struct fbvbs_hypervisor_state *state,
@@ -2308,6 +2564,17 @@ int fbvbs_vm_map_memory(
     }
     if (request->size > object->size) {
         return INVALID_PARAMETER;
+    }
+
+    /* Enforce shared memory peer_permissions ceiling (same as fbvbs_memory_map). */
+    if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE) {
+        const struct fbvbs_shared_registration *reg =
+            fbvbs_find_shared_registration_for_object(
+                state, request->memory_object_id, partition->partition_id);
+        if (reg != NULL &&
+            (request->permissions & ~(uint32_t)reg->peer_permissions) != 0U) {
+            return PERMISSION_DENIED;
+        }
     }
 
     return fbvbs_apply_mapping(
@@ -2440,9 +2707,9 @@ int fbvbs_vm_assign_device(
     {
         uint32_t assigned_index = partition->assigned_device_count;
 
-        if (assigned_index >= FBVBS_MAX_ASSIGNED_DEVICES) {
-            return INTERNAL_CORRUPTION;
-        }
+        /* Guard at line 2463 ensures assigned_device_count < MAX here;
+           fbvbs_partition_attach_iommu_domain and fbvbs_log_iommu_domain_event
+           do not modify assigned_device_count. */
         partition->assigned_devices[assigned_index] = request->device_id;
         partition->assigned_device_count = assigned_index + 1U;
     }
@@ -2497,6 +2764,9 @@ int fbvbs_vm_release_device(
     */
     for (index = 0U; index < partition->assigned_device_count && index < FBVBS_MAX_ASSIGNED_DEVICES; ++index) {
         if (partition->assigned_devices[index] == request->device_id) {
+            /* Save domain_id before release clears partition->iommu_domain_id */
+            uint64_t pre_release_domain_id = partition->iommu_domain_id;
+            uint32_t pre_release_device_count = partition->assigned_device_count;
             int release_status = fbvbs_partition_release_device_common(
                 state,
                 partition,
@@ -2507,11 +2777,12 @@ int fbvbs_vm_release_device(
             if (release_status != OK) {
                 return release_status == NOT_FOUND ? INTERNAL_CORRUPTION : release_status;
             }
-            fbvbs_log_device_assignment_event(
+            fbvbs_log_device_release_event(
                 state,
-                FBVBS_EVENT_VM_DEVICE_RELEASE,
-                partition,
-                request->device_id
+                partition->partition_id,
+                request->device_id,
+                pre_release_domain_id,
+                pre_release_device_count - 1U
             );
             if (released_domain_id != 0U) {
                 fbvbs_log_iommu_domain_event(

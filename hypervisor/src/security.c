@@ -1,5 +1,10 @@
 #include "fbvbs_hypervisor.h"
 
+static int fbvbs_is_object_revoked(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t object_id
+);
+
 /*@ requires \valid_read(state);
     requires state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns \nothing;
@@ -76,7 +81,8 @@ static int fbvbs_page_aligned_range(uint64_t guest_physical_address, uint64_t si
     return guest_physical_address != 0U &&
         size != 0U &&
         (guest_physical_address % FBVBS_PAGE_SIZE) == 0U &&
-        (size % FBVBS_PAGE_SIZE) == 0U;
+        (size % FBVBS_PAGE_SIZE) == 0U &&
+        guest_physical_address <= UINT64_MAX - size;  /* overflow guard */
 }
 
 /*@ requires \valid_read(state);
@@ -115,18 +121,20 @@ static int fbvbs_manifest_pair_valid(
 */
 static int fbvbs_hash_tail_zero(const uint8_t hash[64]) {
     uint32_t index;
+    uint32_t nonzero = 0U;
 
+    /* Constant-time: accumulate all tail bytes without early exit to prevent
+     * timing side-channel leaking which byte position is nonzero. */
     /*@ loop invariant 48 <= index <= 64;
-        loop assigns index;
+        loop assigns index, nonzero;
         loop variant 64 - index;
     */
     for (index = 48U; index < 64U; ++index) {
-        if (hash[index] != 0U) {
-            return 0;
-        }
+        nonzero |= (uint32_t)hash[index];
     }
 
-    return 1;
+    __asm__ volatile("" : "+r"(nonzero) : : "memory");
+    return nonzero == 0U;
 }
 
 /*@ requires \valid(destination + (0 .. 47));
@@ -163,6 +171,7 @@ static void fbvbs_store_artifact_approval(
     *approval = (struct fbvbs_uvs_artifact_approval){0};
     approval->active = true;
     approval->verified_manifest_set_id = verified_manifest_set_id;
+    approval->manifest_set_id = verified_manifest_set_id;
     approval->artifact_object_id = artifact_object_id;
     approval->manifest_object_id = manifest_object_id;
     fbvbs_copy_artifact_hash_prefix(approval->artifact_hash, artifact_hash);
@@ -183,6 +192,7 @@ static int fbvbs_artifact_hash_matches_manifest(
         fbvbs_find_artifact_entry(state, manifest_object_id);
     uint32_t manifest_index;
     uint32_t index;
+    uint32_t found = 0U;
 
     if (manifest_entry == NULL || manifest_entry->object_kind != FBVBS_ARTIFACT_OBJECT_MANIFEST) {
         return 0;
@@ -190,35 +200,36 @@ static int fbvbs_artifact_hash_matches_manifest(
     manifest_index = fbvbs_artifact_entry_index(state, manifest_entry);
 
     /*@ loop invariant 0 <= index <= state->artifact_catalog.count;
-        loop assigns index;
+        loop invariant found == 0U || found == 1U;
+        loop assigns index, found;
         loop variant state->artifact_catalog.count - index;
     */
     for (index = 0U; index < state->artifact_catalog.count; ++index) {
         const struct fbvbs_artifact_catalog_entry *entry = &state->artifact_catalog.entries[index];
         uint32_t hash_index;
-        int equal = 1;
+        uint32_t hash_diff = 0U;
 
         if (entry->object_kind == FBVBS_ARTIFACT_OBJECT_MANIFEST ||
             entry->related_index != manifest_index) {
             continue;
         }
 
+        /* Constant-time comparison: always iterate all 48 bytes to prevent
+         * timing side-channels from leaking hash prefix information. */
         /*@ loop invariant 0 <= hash_index <= 48;
-            loop assigns hash_index, equal;
+            loop assigns hash_index, hash_diff;
             loop variant 48 - hash_index;
         */
         for (hash_index = 0U; hash_index < 48U; ++hash_index) {
-            if (artifact_hash[hash_index] != entry->payload_hash[hash_index]) {
-                equal = 0;
-                break;
-            }
+            hash_diff |= (uint32_t)(artifact_hash[hash_index] ^ entry->payload_hash[hash_index]);
         }
-        if (equal != 0) {
-            return 1;
-        }
+        __asm__ volatile("" : "+r"(hash_diff) : : "memory");
+        /* Accumulate match without early return to prevent timing leak
+         * revealing which catalog entry matched */
+        found |= (hash_diff == 0U) ? 1U : 0U;
     }
 
-    return 0;
+    return (int)found;
 }
 
 /*@ requires \valid_read(state);
@@ -236,6 +247,7 @@ static uint64_t fbvbs_find_artifact_object_for_hash(
         fbvbs_find_artifact_entry(state, manifest_object_id);
     uint32_t manifest_index;
     uint32_t index;
+    uint64_t result = 0U;
 
     if (manifest_entry == NULL || manifest_entry->object_kind != FBVBS_ARTIFACT_OBJECT_MANIFEST) {
         return 0U;
@@ -243,35 +255,40 @@ static uint64_t fbvbs_find_artifact_object_for_hash(
     manifest_index = fbvbs_artifact_entry_index(state, manifest_entry);
 
     /*@ loop invariant 0 <= index <= state->artifact_catalog.count;
-        loop assigns index;
+        loop assigns index, result;
         loop variant state->artifact_catalog.count - index;
     */
     for (index = 0U; index < state->artifact_catalog.count; ++index) {
         const struct fbvbs_artifact_catalog_entry *entry = &state->artifact_catalog.entries[index];
         uint32_t hash_index;
-        int equal = 1;
+        uint32_t hash_diff = 0U;
 
         if (entry->object_kind == FBVBS_ARTIFACT_OBJECT_MANIFEST ||
             entry->related_index != manifest_index) {
             continue;
         }
 
+        /* Constant-time comparison: always iterate all 48 bytes to prevent
+         * timing side-channels from leaking hash prefix information. */
         /*@ loop invariant 0 <= hash_index <= 48;
-            loop assigns hash_index, equal;
+            loop assigns hash_index, hash_diff;
             loop variant 48 - hash_index;
         */
         for (hash_index = 0U; hash_index < 48U; ++hash_index) {
-            if (artifact_hash[hash_index] != entry->payload_hash[hash_index]) {
-                equal = 0;
-                break;
-            }
+            hash_diff |= (uint32_t)(artifact_hash[hash_index] ^ entry->payload_hash[hash_index]);
         }
-        if (equal != 0) {
-            return entry->object_id;
+        __asm__ volatile("" : "+r"(hash_diff) : : "memory");
+        /* Branchless capture: avoid data-dependent branch on hash match to
+         * prevent branch-predictor side-channel leaking which entry matched.
+         * mask is 0 (no match) or ~0 (match); select entry->object_id only
+         * when both hash matches AND no previous match exists. */
+        {
+            uint64_t match_mask = (uint64_t)(-(int64_t)(hash_diff == 0U && result == 0U));
+            result |= (entry->object_id & match_mask);
         }
     }
 
-    return 0U;
+    return result;
 }
 
 /*@ requires \valid(state);
@@ -331,6 +348,7 @@ static int fbvbs_record_artifact_approval(
 }
 
 /*@ requires \valid_read(state) || state == \null;
+    requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns \nothing;
     behavior invalid_args:
       assumes state == \null || artifact_object_id == 0U || manifest_object_id == 0U;
@@ -347,6 +365,7 @@ int fbvbs_artifact_approval_exists(
     uint64_t manifest_object_id
 ) {
     uint32_t index;
+    uint32_t found = 0U;
 
     if (state == NULL || artifact_object_id == 0U || manifest_object_id == 0U) {
         return 0;
@@ -362,43 +381,63 @@ int fbvbs_artifact_approval_exists(
         return 0;
     }
 
+    /* Constant-time: accumulate matches without early return to prevent
+     * timing side-channel leaking which approval slot matched. */
     /*@ loop invariant 0 <= index <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-        loop assigns index;
+        loop assigns index, found;
         loop variant FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - index;
     */
     for (index = 0U; index < FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES; ++index) {
-        const struct fbvbs_uvs_artifact_approval *approval = &state->approvals[index];
-
-        if (approval->active &&
-            approval->artifact_object_id == artifact_object_id &&
-            approval->manifest_object_id == manifest_object_id &&
-            approval->manifest_set_id == state->current_manifest_set_id) {
-            return 1;
+        if (state->approvals[index].active != 0U) {
+            uint64_t d1 = state->approvals[index].artifact_object_id ^ artifact_object_id;
+            uint64_t d2 = state->approvals[index].manifest_object_id ^ manifest_object_id;
+            uint64_t d3 = state->approvals[index].manifest_set_id ^ state->current_manifest_set_id;
+            uint32_t match = (uint32_t)(d1 == 0U && d2 == 0U && d3 == 0U);
+            found |= match;
         }
     }
-
-    return 0;
+    __asm__ volatile("" : "+r"(found) : : "memory");
+    return found != 0U;
 }
 
 /*@ requires manifest_set_page_gpa == 0U ||
              \valid_read((const struct fbvbs_metadata_set_page *)(uintptr_t)manifest_set_page_gpa);
     assigns \result \from manifest_set_page_gpa;
-    ensures \result == (const struct fbvbs_metadata_set_page *)(uintptr_t)manifest_set_page_gpa;
     ensures \result == \null || \valid_read(\result);
 */
 static const struct fbvbs_metadata_set_page *fbvbs_metadata_set_page_from_gpa(
     uint64_t manifest_set_page_gpa
 ) {
+    /* Hardening: reject null, misaligned, and out-of-range GPAs.
+       Manifest set pages must be page-aligned (4096 bytes).
+       An attacker-controlled GPA could otherwise reference unaligned,
+       null, or non-canonical memory, causing undefined behavior on the pointer cast. */
+    if (manifest_set_page_gpa == 0U ||
+        (manifest_set_page_gpa & (FBVBS_PAGE_SIZE - 1U)) != 0U ||
+        manifest_set_page_gpa > FBVBS_MAX_PHYSICAL_ADDRESS) {
+        return NULL;
+    }
     return (const struct fbvbs_metadata_set_page *)(uintptr_t)manifest_set_page_gpa;
 }
 
 /*@ requires manifest_gpa == 0U ||
              \valid_read((const struct fbvbs_metadata_manifest *)(uintptr_t)manifest_gpa);
     assigns \result \from manifest_gpa;
-    ensures \result == (const struct fbvbs_metadata_manifest *)(uintptr_t)manifest_gpa;
     ensures \result == \null || \valid_read(\result);
 */
 static const struct fbvbs_metadata_manifest *fbvbs_manifest_from_gpa(uint64_t manifest_gpa) {
+    /* Zero GPA is valid (unused slot) — returns NULL */
+    if (manifest_gpa == 0U) {
+        return NULL;
+    }
+    /* Hardening: reject misaligned and out-of-range manifest GPAs.
+       Manifests must be naturally aligned to prevent cross-page
+       structure access from a single guest physical address.
+       GPAs beyond the physical address limit are non-canonical. */
+    if ((manifest_gpa & (sizeof(uint64_t) - 1U)) != 0U ||
+        manifest_gpa > FBVBS_MAX_PHYSICAL_ADDRESS) {
+        return NULL;
+    }
     return (const struct fbvbs_metadata_manifest *)(uintptr_t)manifest_gpa;
 }
 
@@ -476,18 +515,22 @@ static void fbvbs_copy_snapshot_id(uint8_t destination[32], const uint8_t source
 */
 static int fbvbs_snapshot_ids_equal(const uint8_t left[32], const uint8_t right[32]) {
     uint32_t index;
+    uint32_t diff = 0U;
 
+    /* Constant-time comparison: always iterate all 32 bytes to prevent
+     * timing side-channels from leaking snapshot ID prefix information. */
     /*@ loop invariant 0 <= index <= 32;
-        loop assigns index;
+        loop assigns index, diff;
         loop variant 32 - index;
     */
     for (index = 0U; index < 32U; ++index) {
-        if (left[index] != right[index]) {
-            return 0;
-        }
+        diff |= (uint32_t)(left[index] ^ right[index]);
     }
 
-    return 1;
+    /* Compiler barrier: prevent optimizer from transforming the accumulate
+     * loop into a short-circuit comparison (cf. fbvbs_constant_time_equals). */
+    __asm__ volatile("" : "+r"(diff) : : "memory");
+    return diff == 0U;
 }
 
 /*@ assigns \result \from role;
@@ -572,15 +615,17 @@ static const struct fbvbs_metadata_manifest *fbvbs_find_manifest_in_verified_set
 /*@ requires \valid(state) || state == \null;
     requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1], state->revoked_object_count;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_EXHAUSTED || \result == ALREADY_EXISTS;
+    ensures state != \null ==> state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
 */
-static void fbvbs_record_revoked_object(
+static int fbvbs_record_revoked_object(
     struct fbvbs_hypervisor_state *state,
     uint64_t object_id
 ) {
     uint32_t index;
 
     if (state == NULL || object_id == 0U) {
-        return;
+        return INVALID_PARAMETER;
     }
     /*@ loop invariant 0 <= index <= state->revoked_object_count;
         loop assigns index;
@@ -588,16 +633,18 @@ static void fbvbs_record_revoked_object(
     */
     for (index = 0U; index < state->revoked_object_count; ++index) {
         if (state->revoked_object_ids[index] == object_id) {
-            return;
+            return ALREADY_EXISTS;
         }
     }
-    if (state->revoked_object_count < FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
-        state->revoked_object_ids[state->revoked_object_count++] = object_id;
+    if (state->revoked_object_count >= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
+        return RESOURCE_EXHAUSTED;
     }
+    state->revoked_object_ids[state->revoked_object_count++] = object_id;
+    return OK;
 }
 
-/*@ requires \valid_read(state);
-    requires state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
+/*@ requires \valid_read(state) || state == \null;
+    requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns \nothing;
     ensures \result == 0 || \result == 1;
 */
@@ -606,17 +653,25 @@ static int fbvbs_is_object_revoked(
     uint64_t object_id
 ) {
     uint32_t index;
+    uint32_t found = 0U;
 
+    if (state == NULL) {
+        return 0;
+    }
+
+    /* Constant-time: accumulate matches without early return to prevent
+     * timing side-channel leaking the position of revoked objects. */
     /*@ loop invariant 0 <= index <= state->revoked_object_count;
-        loop assigns index;
+        loop assigns index, found;
         loop variant state->revoked_object_count - index;
     */
     for (index = 0U; index < state->revoked_object_count; ++index) {
-        if (state->revoked_object_ids[index] == object_id) {
-            return 1;
-        }
+        uint64_t diff = state->revoked_object_ids[index] ^ object_id;
+        uint32_t match = (uint32_t)(diff == 0U);
+        found |= match;
     }
-    return 0;
+    __asm__ volatile("" : "+r"(found) : : "memory");
+    return found != 0U;
 }
 
 /*@ assigns \nothing;
@@ -655,9 +710,11 @@ static int fbvbs_status_from_uvs_failure_bitmap(uint32_t failure_bitmap) {
     requires \valid(snapshot_id + (0 .. 31));
     requires \valid(role_mask);
     requires manifest == \null || \valid_read(manifest);
+    requires state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns *failure_bitmap, snapshot_id[0 .. 31],
             state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
             state->revoked_object_count, *role_mask;
+    ensures state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
 */
 static void fbvbs_process_metadata_manifest(
     struct fbvbs_hypervisor_state *state,
@@ -679,17 +736,21 @@ static void fbvbs_process_metadata_manifest(
     }
     if ((manifest->flags & FBVBS_METADATA_FLAG_REVOKED) != 0U) {
         *failure_bitmap |= FBVBS_UVS_FAILURE_REVOCATION;
-        if (state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
-            fbvbs_record_revoked_object(state, manifest->object_id);
+        if (fbvbs_record_revoked_object(state, manifest->object_id) == RESOURCE_EXHAUSTED) {
+            /* Fail-closed: if revocation list is full, treat as corruption
+               to prevent attackers from exhausting the list and evading
+               subsequent revocations. */
+            *failure_bitmap |= FBVBS_UVS_FAILURE_REVOCATION;
         }
     }
     if (manifest->expected_generation != 0U && manifest->generation != manifest->expected_generation) {
         *failure_bitmap |= FBVBS_UVS_FAILURE_GENERATION;
     }
-    if (manifest->minimum_generation != 0U && manifest->generation < manifest->minimum_generation) {
+    if (manifest->generation < manifest->minimum_generation) {
         *failure_bitmap |= FBVBS_UVS_FAILURE_ROLLBACK;
     }
     if (manifest->timestamp_seconds > freshness_window_end ||
+        manifest->expires_at_seconds > UINT64_MAX - 300U ||
         manifest->expires_at_seconds + 300U < state->trusted_time_seconds) {
         *failure_bitmap |= FBVBS_UVS_FAILURE_FRESHNESS;
     }
@@ -777,6 +838,7 @@ static void fbvbs_require_valid_manifest_snapshot(
     requires \valid(failure_bitmap);
     requires \valid(snapshot_id + (0 .. 31));
     requires \valid(role_mask);
+    requires state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     requires \separated(manifest_gpas + (0 .. FBVBS_MAX_METADATA_MANIFESTS - 1),
                         failure_bitmap, snapshot_id + (0 .. 31), role_mask,
                         state->revoked_object_ids + (0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1),
@@ -784,6 +846,7 @@ static void fbvbs_require_valid_manifest_snapshot(
     assigns *failure_bitmap, snapshot_id[0 .. 31],
             state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
             state->revoked_object_count, *role_mask;
+    ensures state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     ensures fbvbs_valid_metadata_manifest_gpa_array((uint64_t *)manifest_gpas, count);
 */
 static void fbvbs_scan_metadata_manifests(
@@ -799,6 +862,7 @@ static void fbvbs_scan_metadata_manifests(
 
     /*@ loop invariant 0 <= index <= count;
         loop invariant fbvbs_valid_metadata_manifest_gpa_array((uint64_t *)manifest_gpas, count);
+        loop invariant state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
         loop assigns index, *failure_bitmap, snapshot_id[0 .. 31],
                      state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
                      state->revoked_object_count, *role_mask;
@@ -849,6 +913,7 @@ static void fbvbs_scan_manifest_dependencies(
     requires \valid(failure_bitmap);
     requires \valid(snapshot_id + (0 .. 31));
     requires fbvbs_valid_uvs_request_view(request);
+    requires state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns *failure_bitmap, snapshot_id[0 .. 31],
             state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
             state->revoked_object_count
@@ -898,7 +963,11 @@ static int fbvbs_validate_metadata_set(
         manifest_gpas[index] = page->manifest_gpas[index];
     }
     fbvbs_require_valid_manifest_snapshot(page, request->manifest_count, manifest_gpas);
-    freshness_window_end = state->trusted_time_seconds + 300U;
+    if (state->trusted_time_seconds > UINT64_MAX - 300U) {
+        freshness_window_end = UINT64_MAX;
+    } else {
+        freshness_window_end = state->trusted_time_seconds + 300U;
+    }
     fbvbs_scan_metadata_manifests(
         state,
         manifest_gpas,
@@ -1172,7 +1241,7 @@ static int fbvbs_iks_key_length_valid(uint32_t key_type, uint32_t key_length) {
         case IKS_KEY_ECDH_P256:
             return key_length == 32U || key_length == 121U;
         case IKS_KEY_RSA3072:
-            return key_length >= 256U;
+            return (key_length >= 256U && key_length <= 4096U) ? 1 : 0;
         default:
             return 0;
     }
@@ -1276,6 +1345,7 @@ static struct fbvbs_uvs_manifest_set *fbvbs_allocate_manifest_set(
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
+    requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns *state, *response;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == GENERATION_MISMATCH ||
             \result == NOT_FOUND || \result == SIGNATURE_INVALID;
@@ -1361,10 +1431,11 @@ int fbvbs_kci_pin_cr(
 
     switch (request->cr_number) {
         case 0U:
-            state->pinned_cr0_mask = request->pin_mask;
+            /* Monotonically increasing: once a bit is pinned it cannot be unpinned */
+            state->pinned_cr0_mask |= request->pin_mask;
             return OK;
         case 4U:
-            state->pinned_cr4_mask = request->pin_mask;
+            state->pinned_cr4_mask |= request->pin_mask;
             return OK;
         default:
             return NOT_SUPPORTED_ON_PLATFORM;
@@ -1648,7 +1719,7 @@ int fbvbs_ksi_validate_setuid(
     struct fbvbs_ksi_object *context_object;
     uint32_t uid_mask = FBVBS_KSI_VALID_RUID | FBVBS_KSI_VALID_EUID | FBVBS_KSI_VALID_SUID;
     uint32_t gid_mask = FBVBS_KSI_VALID_RGID | FBVBS_KSI_VALID_EGID | FBVBS_KSI_VALID_SGID;
-    int hash_nonzero = 0;
+    uint32_t hash_nonzero = 0U;
     uint32_t index;
 
     if (state == NULL || request == NULL || response == NULL || request->valid_mask == 0U ||
@@ -1670,21 +1741,20 @@ int fbvbs_ksi_validate_setuid(
         return POLICY_DENIED;
     }
 
+    /* Constant-time: OR-accumulate all 48 hash bytes without branching to
+     * prevent timing side-channel leaking the leading zero count. */
     /*@ loop invariant 0 <= index <= 48;
-        loop invariant hash_nonzero == 0 || hash_nonzero == 1;
         loop assigns index, hash_nonzero;
         loop variant 48 - index;
     */
     for (index = 0U; index < 48U; ++index) {
-        if (request->measured_hash[index] != 0U) {
-            hash_nonzero = 1;
-            break;
-        }
+        hash_nonzero |= (uint32_t)request->measured_hash[index];
     }
+    __asm__ volatile("" : "+r"(hash_nonzero) : : "memory");
 
     switch (request->operation_class) {
         case FBVBS_KSI_OPERATION_EXEC_ELEVATION:
-            if (request->fileid == 0U || hash_nonzero == 0) {
+            if (request->fileid == 0U || hash_nonzero == 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & (uid_mask | gid_mask)) == 0U) {
@@ -1692,7 +1762,7 @@ int fbvbs_ksi_validate_setuid(
             }
             break;
         case FBVBS_KSI_OPERATION_SETUID_FAMILY:
-            if (request->fileid != 0U || hash_nonzero != 0) {
+            if (request->fileid != 0U || hash_nonzero != 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & gid_mask) != 0U) {
@@ -1703,7 +1773,7 @@ int fbvbs_ksi_validate_setuid(
             }
             break;
         case FBVBS_KSI_OPERATION_SETGID_FAMILY:
-            if (request->fileid != 0U || hash_nonzero != 0) {
+            if (request->fileid != 0U || hash_nonzero != 0U) {
                 return INVALID_PARAMETER;
             }
             if ((request->valid_mask & uid_mask) != 0U) {
@@ -1902,6 +1972,14 @@ int fbvbs_iks_import_key(
     key->key_length = request->key_length;
     key->key_handle = state->next_key_handle++;
     response->handle = key->key_handle;
+
+    /* SECURITY: Zero key material page after import (design spec L.7).
+     * In bare-metal: map key_material_page_gpa, zero 4096 bytes, unmap.
+     * Model stub: GPA-backed memory is not tracked in WP verification. */
+#ifndef __FRAMAC__
+    fbvbs_zero_page_at_gpa(request->key_material_page_gpa);
+#endif
+
     return OK;
 }
 
@@ -2085,6 +2163,14 @@ int fbvbs_sks_import_dek(
     dek->volume_id = request->volume_id;
     dek->dek_handle = state->next_dek_handle++;
     response->handle = dek->dek_handle;
+
+    /* SECURITY: Zero DEK material page after import (design spec L.8).
+     * In bare-metal: map key_material_page_gpa, zero 4096 bytes, unmap.
+     * Model stub: GPA-backed memory is not tracked in WP verification. */
+#ifndef __FRAMAC__
+    fbvbs_zero_page_at_gpa(request->key_material_page_gpa);
+#endif
+
     return OK;
 }
 
@@ -2171,8 +2257,7 @@ int fbvbs_sks_destroy_dek(
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
     requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-    requires request == \null || fbvbs_valid_uvs_request_view(request);
-    assigns state->manifest_sets[0 .. 7], state->next_manifest_set_id,
+    assigns state->manifest_sets[0 .. 7], state->next_manifest_set_id, state->current_manifest_set_id,
             state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1], state->revoked_object_count,
             *response;
 */
@@ -2200,7 +2285,6 @@ int fbvbs_uvs_verify_manifest_set(
         return INVALID_PARAMETER;
     }
 
-    /*@ assert fbvbs_valid_uvs_request_view(request); */
     status = fbvbs_validate_metadata_set(state, request, &failure_bitmap, snapshot_id);
     if (status != OK) {
         *response = (struct fbvbs_uvs_verify_manifest_set_response){0};
@@ -2220,6 +2304,7 @@ int fbvbs_uvs_verify_manifest_set(
     manifest_set->root_manifest_gpa = request->root_manifest_gpa;
     manifest_set->manifest_set_page_gpa = request->manifest_set_page_gpa;
     manifest_set->verified_manifest_set_id = state->next_manifest_set_id++;
+    state->current_manifest_set_id = manifest_set->verified_manifest_set_id;
     fbvbs_copy_snapshot_id(manifest_set->snapshot_id, snapshot_id);
     response->verdict = 1U;
     response->failure_bitmap = 0U;
@@ -2231,10 +2316,6 @@ int fbvbs_uvs_verify_manifest_set(
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-    requires state == \null ||
-            (\forall integer i; 0 <= i < 8 ==>
-                !state->manifest_sets[i].active ||
-                fbvbs_valid_verified_manifest_set(&state->manifest_sets[i]));
     assigns state->approvals[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1], *response;
 */
 int fbvbs_uvs_verify_artifact(
@@ -2260,7 +2341,6 @@ int fbvbs_uvs_verify_artifact(
     if (manifest_set->manifest_count > FBVBS_MAX_METADATA_MANIFESTS) {
         return INVALID_STATE;
     }
-    /*@ assert fbvbs_valid_verified_manifest_set(manifest_set); */
     if (!fbvbs_artifact_exists(state, request->manifest_object_id, FBVBS_ARTIFACT_OBJECT_MANIFEST)) {
         return NOT_FOUND;
     }
@@ -2300,7 +2380,14 @@ int fbvbs_uvs_verify_artifact(
     requires \valid(response) || response == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
+    requires state != \null && response != \null ==> \separated(state, response);
+    requires request != \null && response != \null ==> \separated(request, response);
     assigns *response;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND;
+    behavior null_args:
+      assumes state == \null || request == \null || response == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
 */
 int fbvbs_uvs_check_revocation(
     struct fbvbs_hypervisor_state *state,

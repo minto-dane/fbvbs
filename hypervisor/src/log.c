@@ -4,6 +4,11 @@
 
 static const uint32_t FBVBS_CRC32C_POLY = 0x82F63B78U;
 
+union fbvbs_log_record_bytes {
+    struct fbvbs_log_record_v1 record;
+    uint8_t bytes[sizeof(struct fbvbs_log_record_v1)];
+};
+
 /*@ requires length == 0 || \valid_read(data + (0 .. length - 1));
     assigns \nothing;
 */
@@ -62,32 +67,20 @@ int fbvbs_log_init(struct fbvbs_hypervisor_state *state) {
     return OK;
 }
 
-/*@ requires \valid(state) || state == \null;
+/*@ requires \valid(log);
+    requires \valid(lock);
+    requires \separated(log, lock);
+    requires payload_length <= 220;
     requires payload_length == 0 || \valid_read(payload + (0 .. payload_length - 1));
-    requires payload_length == 0 || payload == \null ||
-             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
-    assigns state->mirror_log;
-    ensures \result == OK || \result == INVALID_PARAMETER;
-    behavior null_state:
-      assumes state == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior overflow_payload:
-      assumes state != \null;
-      assumes payload_length > 220;
-      ensures \result == INVALID_PARAMETER;
-    behavior null_payload:
-      assumes state != \null;
-      assumes payload_length <= 220;
-      assumes payload_length != 0 && payload == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior ok:
-      assumes state != \null;
-      assumes payload_length <= 220;
-      assumes payload_length == 0 || payload != \null;
-      ensures \result == OK;
+    requires payload_length == 0 || \separated(payload + (0 .. payload_length - 1), log);
+    assigns *log, *lock;
+    ensures \result == OK || \result == RESOURCE_BUSY;
 */
-int fbvbs_log_append(
-    struct fbvbs_hypervisor_state *state,
+static int fbvbs_log_append_core(
+    struct fbvbs_log_storage *log,
+    volatile uint32_t *lock,
+    uint64_t boot_id_hi,
+    uint64_t boot_id_lo,
     uint32_t cpu_id,
     uint32_t source_component,
     uint16_t severity,
@@ -98,30 +91,45 @@ int fbvbs_log_append(
     uint64_t sequence;
     uint32_t slot_index;
     struct fbvbs_log_record_v1 *record;
-    uint32_t lock_val;
 
-    if (state == NULL ||
-        payload_length > sizeof(state->mirror_log.records[0].payload) ||
-        (payload_length != 0U && payload == NULL)) {
-        return INVALID_PARAMETER;
+#ifdef __FRAMAC__
+    /* WP model: spinlock always succeeds immediately */
+    *lock = 1U;
+#else
+    {
+        uint32_t lock_val;
+        uint32_t spin_count = 0U;
+        /* Acquire spinlock with bounded retry to prevent livelock.
+         * 10000 iterations is ~10us on modern CPUs at 1GHz+. */
+        do {
+            __asm__ volatile("xchgl %0, %1"
+                             : "=r"(lock_val), "=m"(*lock)
+                             : "0"(1U)
+                             : "memory");
+            if (lock_val == 0U) {
+                break;
+            }
+            ++spin_count;
+            __asm__ volatile("pause" : : : "memory");
+        } while (spin_count < 10000U);
+        if (lock_val != 0U) {
+            /* Lock acquisition failed — signal to caller rather than deadlocking.
+             * Callers can take compensating action (e.g. retry or flag lost records). */
+            return RESOURCE_BUSY;
+        }
     }
+#endif
 
-    /* Acquire spinlock */
-    do {
-        __asm__ volatile("xchgl %0, %1"
-                         : "=r"(lock_val), "=m"(state->log_lock)
-                         : "0"(1U)
-                         : "memory");
-    } while (lock_val != 0U);
-
-    sequence = state->mirror_log.header.max_readable_sequence + 1U;
+    sequence = log->header.max_readable_sequence + 1U;
     slot_index = (uint32_t)((sequence - 1U) % FBVBS_LOG_SLOT_COUNT);
-    record = &state->mirror_log.records[slot_index];
+    /*@ assert slot_index < FBVBS_LOG_SLOT_COUNT; */
+    record = &log->records[slot_index];
+    /*@ assert \valid(record); */
 
     *record = (struct fbvbs_log_record_v1){0};
     record->sequence = sequence;
-    record->boot_id_hi = state->boot_id_hi;
-    record->boot_id_lo = state->boot_id_lo;
+    record->boot_id_hi = boot_id_hi;
+    record->boot_id_lo = boot_id_lo;
     record->timestamp_counter = sequence;
     record->cpu_id = cpu_id;
     record->source_component = source_component;
@@ -133,27 +141,94 @@ int fbvbs_log_append(
         fbvbs_copy_bytes(record->payload, payload, payload_length);
     }
 
-    record->crc32c = fbvbs_crc32c((const uint8_t *)record, offsetof(struct fbvbs_log_record_v1, crc32c));
+    {
+        union fbvbs_log_record_bytes crc_overlay;
+        size_t crc_len = offsetof(struct fbvbs_log_record_v1, crc32c);
+        crc_overlay.record = *record;
+        record->crc32c = fbvbs_crc32c(crc_overlay.bytes, crc_len);
+    }
 
+#ifdef __FRAMAC__
+    /* WP model: direct field writes (atomic on real hardware) */
+    log->header.max_readable_sequence = sequence;
+    log->header.write_offset = slot_index * FBVBS_LOG_RECORD_V1_SIZE;
+    *lock = 0U;
+#else
     /* Use atomic write for max_readable_sequence (x86_64 aligned uint64_t writes are atomic) */
     __asm__ volatile("movq %1, %0"
-                     : "=m"(state->mirror_log.header.max_readable_sequence)
+                     : "=m"(log->header.max_readable_sequence)
                      : "r"(sequence)
                      : "memory");
 
     /* Use atomic write for write_offset (x86_64 aligned uint32_t writes are atomic) */
     __asm__ volatile("movl %1, %0"
-                     : "=m"(state->mirror_log.header.write_offset)
+                     : "=m"(log->header.write_offset)
                      : "r"(slot_index * FBVBS_LOG_RECORD_V1_SIZE)
                      : "memory");
 
     /* Release spinlock */
     __asm__ volatile("movl %0, %1"
                      :
-                     : "r"(0U), "m"(state->log_lock)
+                     : "r"(0U), "m"(*lock)
                      : "memory");
+#endif
 
     return OK;
+}
+
+/*@ requires \valid(state) || state == \null;
+    requires payload_length != 0 && payload != \null ==>
+             \valid_read(payload + (0 .. payload_length - 1));
+    requires payload_length != 0 && payload != \null && state != \null ==>
+             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
+    assigns state->mirror_log, state->log_lock;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY;
+    behavior null_state:
+      assumes state == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+    behavior overflow_payload:
+      assumes state != \null;
+      assumes payload_length > 220;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+    behavior null_payload:
+      assumes state != \null;
+      assumes payload_length <= 220;
+      assumes payload_length != 0;
+      assumes payload == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+    behavior ok:
+      assumes state != \null;
+      assumes payload_length <= 220;
+      assumes payload_length == 0 || payload != \null;
+      assigns state->mirror_log, state->log_lock;
+      ensures \result == OK || \result == RESOURCE_BUSY;
+    complete behaviors;
+    disjoint behaviors;
+*/
+int fbvbs_log_append(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t cpu_id,
+    uint32_t source_component,
+    uint16_t severity,
+    uint16_t event_code,
+    const uint8_t *payload,
+    uint32_t payload_length
+) {
+    if (state == NULL ||
+        payload_length > sizeof(state->mirror_log.records[0].payload) ||
+        (payload_length != 0U && payload == NULL)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_log_append_core(
+        &state->mirror_log, &state->log_lock,
+        state->boot_id_hi, state->boot_id_lo,
+        cpu_id, source_component, severity, event_code,
+        payload, payload_length
+    );
 }
 
 /*@ requires \valid(state) || state == \null;

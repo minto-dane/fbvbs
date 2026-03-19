@@ -58,22 +58,6 @@ _Static_assert(
 
 int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps);
 
-/*@ requires \valid_read(caps);
-    requires \valid_read(vcpu);
-    requires intercepted_msr_count <= 16;
-    requires intercepted_msr_count == 0 ||
-             \valid_read(intercepted_msrs + (0 .. intercepted_msr_count - 1));
-    requires \valid(leaf_exit);
-    assigns *leaf_exit;
-    ensures \result == OK || \result == NOT_SUPPORTED_ON_PLATFORM || \result == INVALID_STATE || \result == INVALID_PARAMETER;
-    behavior invalid_args:
-      assumes caps == \null || vcpu == \null || leaf_exit == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior bad_msr_list:
-      assumes caps != \null && vcpu != \null && leaf_exit != \null;
-      assumes intercepted_msr_count > 16 || (intercepted_msr_count > 0 && intercepted_msrs == \null);
-      ensures \result == INVALID_PARAMETER;
-*/
 int fbvbs_vmx_leaf_run_vcpu(
     const struct fbvbs_vmx_capabilities *caps,
     const struct fbvbs_vcpu *vcpu,

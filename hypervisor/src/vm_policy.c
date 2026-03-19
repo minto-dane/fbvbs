@@ -49,6 +49,8 @@ static void fbvbs_vmx_cr_access_exit(
 
     payload.s = (struct fbvbs_vm_exit_cr_access){0};
     payload.s.cr_number = leaf_exit->cr_number;
+    /* Leaf VMX layer does not provide access_type (MOV-to-CR vs MOV-from-CR);
+     * bare-metal would decode from VMX exit qualification bits 5:4. */
     payload.s.access_type = FBVBS_VM_CR_ACCESS_WRITE;
     payload.s.value = leaf_exit->value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
@@ -77,9 +79,11 @@ static void fbvbs_vmx_pio_exit(
 
     payload.s = (struct fbvbs_vm_exit_pio){0};
     payload.s.port = leaf_exit->port;
-    payload.s.access_size = leaf_exit->access_size;
+    payload.s.width = leaf_exit->access_size;
     payload.s.is_write = leaf_exit->is_write;
-    payload.s.value = (uint32_t)leaf_exit->value;
+    /* Leaf simulation: single-rep only; bare-metal uses ECX for REP count */
+    payload.s.count = 1U;
+    payload.s.value = leaf_exit->value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -106,10 +110,11 @@ static void fbvbs_vmx_mmio_exit(
 
     payload.s = (struct fbvbs_vm_exit_mmio){0};
     payload.s.guest_physical_address = leaf_exit->guest_physical_address;
-    payload.s.access_size = leaf_exit->access_size;
+    payload.s.width = leaf_exit->access_size;
     payload.s.is_write = leaf_exit->is_write;
     payload.s.reserved0 = 0U;
-    payload.s.value = (uint32_t)leaf_exit->value;
+    payload.s.reserved1 = 0U;
+    payload.s.value = leaf_exit->value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -135,9 +140,9 @@ static void fbvbs_vmx_msr_access_exit(
     } payload;
 
     payload.s = (struct fbvbs_vm_exit_msr_access){0};
-    payload.s.msr_address = leaf_exit->msr_address;
-    payload.s.access_type = FBVBS_VM_MSR_ACCESS_WRITE;
-    payload.s.value = 0U;
+    payload.s.msr = leaf_exit->msr_address;
+    payload.s.is_write = leaf_exit->is_write;
+    payload.s.value = leaf_exit->value;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -149,10 +154,9 @@ static void fbvbs_vmx_msr_access_exit(
     requires vcpu_id < partition->vcpu_count;
     requires vcpu_id < FBVBS_MAX_VCPUS;
     requires \valid(response);
-    requires \separated(state, response);
-    requires \separated(partition, response);
     assigns *state, *partition, *response;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND;
+    ensures \result == OK || \result == INVALID_PARAMETER ||
+            \result == NOT_FOUND || \result == INVALID_STATE;
     ensures response->exit_reason == FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
 */
 static int fbvbs_vmx_unclassified_fault_exit(
@@ -204,7 +208,10 @@ static void fbvbs_vmx_ept_violation_exit(
 
     payload.s = (struct fbvbs_vm_exit_ept_violation){0};
     payload.s.guest_physical_address = leaf_exit->guest_physical_address;
-    payload.s.access_type = FBVBS_VM_EPT_ACCESS_EXECUTE;
+    /* TODO: leaf_exit struct lacks access_bits field; bare-metal would decode
+     * from VMX exit qualification.  Hardcoded EXECUTE until leaf layer provides
+     * the actual read/write/execute access type that caused the EPT violation. */
+    payload.s.access_bits = FBVBS_VM_EPT_ACCESS_EXECUTE;
     payload.s.reserved0 = 0U;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
@@ -215,18 +222,23 @@ static void fbvbs_vmx_ept_violation_exit(
 /*@ requires \valid(state) || state == \null;
     requires \valid(partition) || partition == \null;
     requires \valid(response) || response == \null;
-    requires partition != \null ==> partition->vcpu_count <= FBVBS_MAX_VCPUS;
-    requires state != \null ==> state->intercepted_msr_count <= 16;
-    requires \separated(state, response);
+    requires state != \null && partition != \null && response != \null ==>
+             \separated(response, partition);
     assigns *state, *partition, *response;
     ensures \result == OK || \result == INVALID_PARAMETER ||
             \result == INVALID_STATE || \result == NOT_SUPPORTED_ON_PLATFORM ||
             \result == NOT_FOUND;
     behavior null_args:
       assumes state == \null || partition == \null || response == \null;
+      assigns \nothing;
       ensures \result == INVALID_PARAMETER;
+    behavior bad_vcpu_count:
+      assumes state != \null && partition != \null && response != \null;
+      assumes partition->vcpu_count > FBVBS_MAX_VCPUS;
+      ensures \result == INVALID_STATE;
     behavior bad_vcpu:
       assumes state != \null && partition != \null && response != \null;
+      assumes partition->vcpu_count <= FBVBS_MAX_VCPUS;
       assumes vcpu_id >= partition->vcpu_count;
       ensures \result == INVALID_PARAMETER;
 */
@@ -254,11 +266,16 @@ int fbvbs_vmx_run_vcpu(
     /*@ assert partition->vcpu_count <= FBVBS_MAX_VCPUS; */
     /*@ assert vcpu_id < FBVBS_MAX_VCPUS; */
     vcpu = &partition->vcpus[vcpu_id];
-    /*@ assert \valid_read(vcpu); */
-    /*@ assert state->intercepted_msr_count <= 16; */
-    /*@ assert state->intercepted_msr_count == 0 ||
-              \valid_read(state->intercepted_msrs + (0 .. state->intercepted_msr_count - 1)); */
+    /*@ assert \valid(vcpu); */
+    /*@ assert \separated(vcpu, response); */
     *response = (struct fbvbs_vm_run_response){0};
+
+    /* VM entry mitigations (Section 21.3): L1D flush + restore guest SPEC_CTRL.
+     * Must execute immediately before VM entry to minimize the window where
+     * fill buffers or L1D contain host data visible to speculation. */
+    fbvbs_vmentry_mitigate(
+        &state->cpu_security.worst_case_vuln, &state->spec_ctrl);
+
     status = fbvbs_vmx_leaf_run_vcpu(
         &state->vmx_caps,
         vcpu,
@@ -269,10 +286,19 @@ int fbvbs_vmx_run_vcpu(
         partition->mapped_bytes,
         &leaf_exit
     );
+
+    /* VM exit mitigations (Section 21.2): IBPB + RSB fill + PBRSB + BHB clear
+     * + save/restore SPEC_CTRL + VERW.  Unconditional IBPB (is_cross_partition=1)
+     * for government-level isolation — cross-partition tracking is inherently
+     * racy under SMT and insufficient against nation-state adversaries. */
+    fbvbs_vmexit_mitigate(
+        &state->cpu_security.worst_case_vuln, &state->spec_ctrl, 1U);
+
     if (status != OK) {
         return status;
     }
 
+    /*@ assert \separated(vcpu, response, &leaf_exit); */
     switch (leaf_exit.exit_reason) {
         case FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT:
             fbvbs_vmx_external_interrupt_exit(vcpu, response, &leaf_exit);
@@ -295,7 +321,7 @@ int fbvbs_vmx_run_vcpu(
         case FBVBS_VM_EXIT_REASON_SHUTDOWN:
             response->exit_reason = FBVBS_VM_EXIT_REASON_SHUTDOWN;
             response->exit_length = 0U;
-            vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+            vcpu->state = FBVBS_VCPU_STATE_FAULTED;
             return OK;
         case FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT:
             /*@ assert vcpu_id < FBVBS_MAX_VCPUS; */
@@ -306,6 +332,7 @@ int fbvbs_vmx_run_vcpu(
             vcpu->state = FBVBS_VCPU_STATE_BLOCKED;
             return OK;
         default:
+            vcpu->state = FBVBS_VCPU_STATE_FAULTED;
             return INVALID_STATE;
     }
 }

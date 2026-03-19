@@ -66,8 +66,8 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     fbvbs_leaf_zero_caps(caps);
 
 #if defined(__x86_64__) || defined(_M_X64)
-    /* Check for CPUID support */
-    eax = 0U;
+    /* CPUID leaf 1: basic feature flags */
+    eax = 1U;
     ecx = 0U;
     __asm__ volatile("cpuid"
                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
@@ -102,14 +102,14 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
         caps->cet_available = 1U;
     }
 
-    /* Check for HLAT support (CPUID.80000008H:EBX.HLAT[bit 1]) */
-    eax = 0x80000008U;
-    ecx = 0U;
+    /* Check for HLAT support (CPUID.(EAX=7,ECX=2):EAX[bit 5]) */
+    eax = 7U;
+    ecx = 2U;
     __asm__ volatile("cpuid"
                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                      : "0"(eax), "2"(ecx)
                      : "memory");
-    if (ebx & (1U << 1)) {
+    if (eax & (1U << 5)) {
         caps->hlat_available = 1U;
     }
 
@@ -121,29 +121,43 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     return OK;
 }
 
-/*@ requires \valid(caps) || caps == \null;
-    requires \valid(vcpu) || vcpu == \null;
+/*@ requires \valid_read(caps) || caps == \null;
+    requires \valid_read(vcpu) || vcpu == \null;
     requires \valid(leaf_exit) || leaf_exit == \null;
-    requires intercepted_msr_count == 0 ||
+    requires intercepted_msr_count == 0 || intercepted_msrs == \null ||
+             intercepted_msr_count > FBVBS_MAX_INTERCEPTED_MSRS ||
              \valid_read(intercepted_msrs + (0 .. intercepted_msr_count - 1));
-    assigns *leaf_exit;
     behavior null_args:
       assumes caps == \null || vcpu == \null || leaf_exit == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior null_msr_array:
-      assumes caps != \null && vcpu != \null && leaf_exit != \null;
-      assumes intercepted_msr_count != 0 && intercepted_msrs == \null;
+      assigns \nothing;
       ensures \result == INVALID_PARAMETER;
     behavior not_supported:
       assumes caps != \null && vcpu != \null && leaf_exit != \null;
       assumes caps->vmx_supported == 0;
-      assumes intercepted_msr_count == 0 || intercepted_msrs != \null;
+      assigns \nothing;
       ensures \result == NOT_SUPPORTED_ON_PLATFORM;
+    behavior bad_msr_count:
+      assumes caps != \null && vcpu != \null && leaf_exit != \null;
+      assumes caps->vmx_supported != 0;
+      assumes intercepted_msr_count > FBVBS_MAX_INTERCEPTED_MSRS;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+    behavior null_msr_array:
+      assumes caps != \null && vcpu != \null && leaf_exit != \null;
+      assumes caps->vmx_supported != 0;
+      assumes intercepted_msr_count <= FBVBS_MAX_INTERCEPTED_MSRS;
+      assumes intercepted_msr_count != 0 && intercepted_msrs == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
     behavior ok:
       assumes caps != \null && vcpu != \null && leaf_exit != \null;
       assumes caps->vmx_supported != 0;
+      assumes intercepted_msr_count <= FBVBS_MAX_INTERCEPTED_MSRS;
       assumes intercepted_msr_count == 0 || intercepted_msrs != \null;
+      assigns *leaf_exit;
       ensures \result == OK;
+    complete behaviors;
+    disjoint behaviors;
 */
 int fbvbs_vmx_leaf_run_vcpu(
     const struct fbvbs_vmx_capabilities *caps,

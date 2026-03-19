@@ -12,33 +12,40 @@ static void test_probe_reports_capabilities(void) {
     struct fbvbs_vmx_capabilities caps;
 
     assert(fbvbs_vmx_probe(&caps) == OK);
-    assert(caps.vmx_supported == 1U);
-    assert(caps.hlat_available == 0U);
+    /* VMX availability depends on hardware — just verify probe succeeds
+     * and boolean fields are well-formed (0 or 1) */
+    assert(caps.vmx_supported == 0U || caps.vmx_supported == 1U);
+    assert(caps.hlat_available == 0U || caps.hlat_available == 1U);
     assert(caps.iommu_available == 0U);
-    assert(caps.mbec_available == 0U);
+    assert(caps.mbec_available == 0U || caps.mbec_available == 1U);
 }
 
 static void test_leaf_run_rejects_invalid_inputs(void) {
-    struct fbvbs_vmx_capabilities caps;
-    struct fbvbs_vcpu vcpu;
+    struct fbvbs_vmx_capabilities caps = {0};
+    struct fbvbs_vcpu vcpu = {0};
     struct fbvbs_vmx_leaf_exit leaf_exit;
 
-    assert(fbvbs_vmx_probe(&caps) == OK);
+    /* NULL pointer checks (before vmx_supported check) */
+    caps.vmx_supported = 1U;
     assert(fbvbs_vmx_leaf_run_vcpu(NULL, &vcpu, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == INVALID_PARAMETER);
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, NULL, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == INVALID_PARAMETER);
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, NULL, 0U, 4096U, NULL) == INVALID_PARAMETER);
+    /* NULL intercepted_msrs with count > 0 */
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, NULL, 1U, 4096U, &leaf_exit) == INVALID_PARAMETER);
+    /* VMX not supported */
     caps.vmx_supported = 0U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == NOT_SUPPORTED_ON_PLATFORM);
 }
 
 static void test_leaf_run_models_expected_exit_reasons(void) {
-    struct fbvbs_vmx_capabilities caps;
+    struct fbvbs_vmx_capabilities caps = {0};
     struct fbvbs_vcpu vcpu = {0};
     struct fbvbs_vmx_leaf_exit leaf_exit;
     uint32_t intercepted_msr = 0xC0000080U;
 
-    assert(fbvbs_vmx_probe(&caps) == OK);
+    /* Set VMX supported explicitly — these tests exercise simulation logic,
+     * not real hardware detection */
+    caps.vmx_supported = 1U;
 
     vcpu.pending_interrupt_delivery = 1U;
     vcpu.pending_interrupt_vector = 48U;

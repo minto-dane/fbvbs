@@ -1,0 +1,28 @@
+# Build artifacts
+hypervisor/build/
+*.o
+*.d
+*.elf
+*.bin
+*.map
+*.lst
+
+# npm
+package-lock.json
+
+# Frama-C
+.frama-c/
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
