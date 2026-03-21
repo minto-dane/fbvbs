@@ -989,4 +989,29 @@ _Static_assert(offsetof(struct fbvbs_diag_device_list_response, entries) == 8, "
 _Static_assert(sizeof(struct fbvbs_ksi_create_target_set_request) == 4024, "fbvbs_ksi_create_target_set_request size mismatch");
 _Static_assert(offsetof(struct fbvbs_ksi_create_target_set_request, target_object_ids) == 8, "fbvbs_ksi_create_target_set_request target_object_ids offset mismatch");
 
+/* VM exit payload structs — ensure they fit in exit_payload[4032] and have stable sizes */
+_Static_assert(sizeof(struct fbvbs_vm_exit_external_interrupt) == 8, "exit interrupt size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_cr_access) == 16, "exit cr_access size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_pio) == 16, "exit pio size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_mmio) == 24, "exit mmio size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_msr_access) == 16, "exit msr_access size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_ept_violation) == 16, "exit ept_violation size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_unclassified_fault) == 24, "exit unclassified_fault size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_external_interrupt) <= 4032, "payload exceeds exit_payload");
+_Static_assert(sizeof(struct fbvbs_vm_exit_cr_access) <= 4032, "payload exceeds exit_payload");
+_Static_assert(sizeof(struct fbvbs_vm_exit_mmio) <= 4032, "payload exceeds exit_payload");
+_Static_assert(sizeof(struct fbvbs_vm_exit_unclassified_fault) <= 4032, "payload exceeds exit_payload");
+
+/* Response structs used in handlers — guard against ABI drift */
+_Static_assert(sizeof(struct fbvbs_memory_allocate_object_request) == 16, "alloc_object_request size");
+_Static_assert(sizeof(struct fbvbs_memory_map_request) == 40, "map_request size");
+_Static_assert(sizeof(struct fbvbs_audit_mirror_info_response) == 16, "mirror_info_response size");
+_Static_assert(sizeof(struct fbvbs_audit_boot_id_response) == 16, "boot_id_response size");
+_Static_assert(sizeof(struct fbvbs_partition_status_response) == 16, "partition_status_response size");
+_Static_assert(sizeof(struct fbvbs_partition_fault_info_response) == 24, "fault_info_response size");
+
+/* Diag entry buffer guards: max_entries * entry_size must fit in entries[4032] */
+_Static_assert(FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES * 64U <= 4032U, "artifact entries exceed response buffer");
+_Static_assert(FBVBS_MAX_DEVICE_CATALOG_ENTRIES * 12U <= 4032U, "device entries exceed response buffer");
+
 #endif

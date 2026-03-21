@@ -1,4 +1,10 @@
+#include <stdint.h>
+
 #include "fbvbs_hypervisor.h"
+
+/* Guard: callsite count field is uint16_t — ensure max entries fits */
+_Static_assert(FBVBS_MAX_HOST_CALLSITE_ENTRIES <= UINT16_MAX,
+               "callsite count must fit in uint16_t");
 
 struct fbvbs_hypervisor_state g_fbvbs_hypervisor;
 
@@ -218,6 +224,9 @@ const struct fbvbs_manifest_profile *fbvbs_find_host_manifest_profile(
     ensures state->boot_id_hi == 0x4642564253560000ULL;
     ensures state->boot_id_lo == 0x0000000000000001ULL;
 */
+/* MODEL ONLY: Deterministic boot IDs for the verification model.
+ * Production MUST replace with RDRAND-seeded or platform RNG values
+ * to provide uniqueness across boots for replay prevention. */
 static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
     state->boot_id_hi = 0x4642564253560000ULL;
     state->boot_id_lo = 0x0000000000000001ULL;
@@ -226,6 +235,11 @@ static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
 /*@ requires \valid(hash + (0 .. 47));
     assigns hash[0 .. 47];
 */
+/* MODEL ONLY: This generates deterministic seed hashes for the formal
+ * verification model. It is NOT a cryptographic hash — it applies a single
+ * SHA-256 compression round without FIPS 180-4 padding, and extends the
+ * 32-byte output to 48 bytes via XOR. Production deployments MUST replace
+ * this with real SHA-256 over actual artifact content (image bytes). */
 static void fbvbs_seed_hash(uint8_t hash[48], uint8_t tag) {
     uint32_t index;
     uint32_t sha_state[8];
@@ -1161,6 +1175,9 @@ int fbvbs_diag_get_artifact_list(
     if (state == NULL || response == NULL || response_length == NULL) {
         return INVALID_PARAMETER;
     }
+    if (state->artifact_catalog.count > FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES) {
+        return INVALID_PARAMETER;
+    }
 
     /*@ assert state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES; */
     *response = (struct fbvbs_diag_artifact_list_response){0};
@@ -1217,6 +1234,9 @@ int fbvbs_diag_get_device_list(
     uint32_t index;
 
     if (state == NULL || response == NULL || response_length == NULL) {
+        return INVALID_PARAMETER;
+    }
+    if (state->device_catalog.count > FBVBS_MAX_DEVICE_CATALOG_ENTRIES) {
         return INVALID_PARAMETER;
     }
 

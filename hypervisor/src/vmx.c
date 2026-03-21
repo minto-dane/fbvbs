@@ -52,12 +52,13 @@ static uint32_t fbvbs_leaf_synthetic_ept_access_bits(const struct fbvbs_vcpu *vc
 }
 
 /*@ requires \valid(caps) || caps == \null;
-    assigns *caps;
     behavior null_ptr:
       assumes caps == \null;
+      assigns \nothing;
       ensures \result == INVALID_PARAMETER;
     behavior valid_ptr:
       assumes caps != \null;
+      assigns *caps;
       ensures \result == OK;
     complete behaviors;
     disjoint behaviors;

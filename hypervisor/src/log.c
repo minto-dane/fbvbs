@@ -1,6 +1,11 @@
 #include <stddef.h>
+#include <stdint.h>
 
 #include "fbvbs_hypervisor.h"
+
+/* Guard: max slot_index * record_size must fit in uint32_t for write_offset */
+_Static_assert((uint64_t)(FBVBS_LOG_SLOT_COUNT - 1U) * FBVBS_LOG_RECORD_V1_SIZE <= UINT32_MAX,
+               "write_offset must fit in uint32_t");
 
 static const uint32_t FBVBS_CRC32C_POLY = 0x82F63B78U;
 
@@ -103,7 +108,7 @@ static int fbvbs_log_append_core(
          * 10000 iterations is ~10us on modern CPUs at 1GHz+. */
         do {
             __asm__ volatile("xchgl %0, %1"
-                             : "=r"(lock_val), "=m"(*lock)
+                             : "=r"(lock_val), "+m"(*lock)
                              : "0"(1U)
                              : "memory");
             if (lock_val == 0U) {
@@ -124,9 +129,9 @@ static int fbvbs_log_append_core(
 #ifdef __FRAMAC__
         *lock = 0U;
 #else
-        __asm__ volatile("movl %0, %1"
-                         :
-                         : "r"(0U), "m"(*lock)
+        __asm__ volatile("movl %1, %0"
+                         : "=m"(*lock)
+                         : "r"(0U)
                          : "memory");
 #endif
         return RESOURCE_EXHAUSTED;
@@ -178,10 +183,10 @@ static int fbvbs_log_append_core(
                      : "r"(slot_index * FBVBS_LOG_RECORD_V1_SIZE)
                      : "memory");
 
-    /* Release spinlock */
-    __asm__ volatile("movl %0, %1"
-                     :
-                     : "r"(0U), "m"(*lock)
+    /* Release spinlock — use output constraint to signal the store */
+    __asm__ volatile("movl %1, %0"
+                     : "=m"(*lock)
+                     : "r"(0U)
                      : "memory");
 #endif
 

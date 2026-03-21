@@ -514,7 +514,8 @@ int fbvbs_memory_map(
 );
 int fbvbs_memory_unmap(
     struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_memory_unmap_request *request
+    const struct fbvbs_memory_unmap_request *request,
+    uint64_t requester_partition_id
 );
 int fbvbs_memory_set_permission(
     struct fbvbs_hypervisor_state *state,
@@ -534,7 +535,8 @@ int fbvbs_memory_release_object(
 );
 int fbvbs_memory_unregister_shared(
     struct fbvbs_hypervisor_state *state,
-    uint64_t shared_object_id
+    uint64_t shared_object_id,
+    uint64_t requester_partition_id
 );
 int fbvbs_kci_verify_module(
     struct fbvbs_hypervisor_state *state,

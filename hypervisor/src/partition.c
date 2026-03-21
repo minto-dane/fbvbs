@@ -471,13 +471,13 @@ static struct fbvbs_shared_registration *fbvbs_find_shared_registration(
     return NULL;
 }
 
-/*@ requires \valid(state);
-    assigns \result \from memory_object_id, peer_partition_id, state->shared_objects[0 .. FBVBS_MAX_SHARED_OBJECTS - 1];
-    ensures \result == \null ||
-            (\exists integer i; 0 <= i < FBVBS_MAX_SHARED_OBJECTS && \result == &state->shared_objects[i]);
+/*@ requires \valid_read(state);
+    assigns \result \from memory_object_id, peer_partition_id,
+            state->shared_objects[0 .. FBVBS_MAX_SHARED_OBJECTS - 1];
+    ensures \result == \null || \valid_read(\result);
 */
-static struct fbvbs_shared_registration *fbvbs_find_shared_registration_for_object(
-    struct fbvbs_hypervisor_state *state,
+static const struct fbvbs_shared_registration *fbvbs_find_shared_registration_for_object(
+    const struct fbvbs_hypervisor_state *state,
     uint64_t memory_object_id,
     uint64_t peer_partition_id
 ) {
@@ -705,11 +705,20 @@ static int fbvbs_share_registration_allows_mapping(
         return 1;
     }
 
+    /* First try an exact match (targeted registration for this peer). */
     reg = fbvbs_find_shared_registration_for_object(
         state,
         object->memory_object_id,
         target_partition_id
     );
+    /* Fall back to broadcast registration (peer_partition_id == 0). */
+    if (reg == NULL) {
+        reg = fbvbs_find_shared_registration_for_object(
+            state,
+            object->memory_object_id,
+            0U
+        );
+    }
     if (reg == NULL) {
         return 0;
     }
@@ -1039,18 +1048,42 @@ static void fbvbs_partition_release_shared_registrations(
         if (shared->peer_partition_id != partition_id && shared->owner_partition_id != partition_id) {
             continue;
         }
-        if (shared->owner_partition_id == partition_id &&
-            shared->peer_partition_id != 0U &&
-            shared->peer_partition_id != partition_id) {
-            struct fbvbs_partition *peer_partition =
-                fbvbs_find_partition(state, shared->peer_partition_id);
+        if (shared->owner_partition_id == partition_id) {
+            if (shared->peer_partition_id != 0U &&
+                shared->peer_partition_id != partition_id) {
+                /* Targeted registration: release peer's mappings. */
+                struct fbvbs_partition *peer_partition =
+                    fbvbs_find_partition(state, shared->peer_partition_id);
 
-            if (peer_partition != NULL && peer_partition->occupied) {
-                fbvbs_partition_release_object_mappings(
-                    state,
-                    peer_partition,
-                    shared->memory_object_id
-                );
+                if (peer_partition != NULL && peer_partition->occupied) {
+                    fbvbs_partition_release_object_mappings(
+                        state,
+                        peer_partition,
+                        shared->memory_object_id
+                    );
+                }
+            } else if (shared->peer_partition_id == 0U) {
+                /* Broadcast registration: scan ALL partitions for mappings. */
+                uint32_t pi;
+
+                /*@ loop invariant 0 <= pi <= FBVBS_MAX_PARTITIONS;
+                    loop assigns pi,
+                                 state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mapped_bytes,
+                                 state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1],
+                                 state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1].map_count;
+                    loop variant FBVBS_MAX_PARTITIONS - pi;
+                */
+                for (pi = 0U; pi < FBVBS_MAX_PARTITIONS; ++pi) {
+                    struct fbvbs_partition *p = &state->partitions[pi];
+
+                    if (p->occupied && p->partition_id != partition_id) {
+                        fbvbs_partition_release_object_mappings(
+                            state,
+                            p,
+                            shared->memory_object_id
+                        );
+                    }
+                }
             }
         }
         if (shared->memory_object_id != 0U) {
@@ -2059,17 +2092,18 @@ int fbvbs_memory_map(
     requires \valid_read(request) || request == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INVALID_STATE || \result == INTERNAL_CORRUPTION;
+            \result == INVALID_STATE || \result == PERMISSION_DENIED || \result == INTERNAL_CORRUPTION;
 */
 int fbvbs_memory_unmap(
     struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_memory_unmap_request *request
+    const struct fbvbs_memory_unmap_request *request,
+    uint64_t requester_partition_id
 ) {
     struct fbvbs_partition *partition;
     struct fbvbs_memory_mapping *mapping;
     struct fbvbs_memory_object *object;
 
-    if (state == NULL || request == NULL) {
+    if (state == NULL || request == NULL || requester_partition_id == 0U) {
         return INVALID_PARAMETER;
     }
     if (!fbvbs_range_valid(request->guest_physical_address, request->size)) {
@@ -2093,6 +2127,13 @@ int fbvbs_memory_unmap(
     if (object == NULL || object->map_count == 0U) {
         return INTERNAL_CORRUPTION;
     }
+
+    /* Only the object owner or the target partition itself may unmap. */
+    if (requester_partition_id != object->owner_partition_id &&
+        requester_partition_id != partition->partition_id) {
+        return PERMISSION_DENIED;
+    }
+
     if (partition->mapped_bytes < mapping->size) {
         return INTERNAL_CORRUPTION;
     }
@@ -2107,7 +2148,8 @@ int fbvbs_memory_unmap(
     requires \valid_read(request) || request == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INVALID_STATE || \result == PERMISSION_DENIED;
+            \result == INVALID_STATE || \result == PERMISSION_DENIED ||
+            \result == INTERNAL_CORRUPTION;
 */
 int fbvbs_memory_set_permission(
     struct fbvbs_hypervisor_state *state,
@@ -2157,20 +2199,21 @@ int fbvbs_memory_set_permission(
         struct fbvbs_memory_object *object =
             fbvbs_find_memory_object(state, mapping->memory_object_id);
 
-        if (object != NULL) {
-            if (requester_partition_id != object->owner_partition_id) {
-                return PERMISSION_DENIED;
-            }
-            if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE &&
-                !fbvbs_share_registration_allows_mapping(
-                    state,
-                    object,
-                    partition->partition_id,
-                    request->size,
-                    request->permissions
-                )) {
-                return PERMISSION_DENIED;
-            }
+        if (object == NULL) {
+            return INTERNAL_CORRUPTION;
+        }
+        if (requester_partition_id != object->owner_partition_id) {
+            return PERMISSION_DENIED;
+        }
+        if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE &&
+            !fbvbs_share_registration_allows_mapping(
+                state,
+                object,
+                partition->partition_id,
+                request->size,
+                request->permissions
+            )) {
+            return PERMISSION_DENIED;
         }
     }
 
@@ -2260,17 +2303,17 @@ int fbvbs_memory_register_shared(
 /*@ requires \valid(state) || state == \null;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
-            \result == INTERNAL_CORRUPTION || \result == RESOURCE_BUSY;
+            \result == PERMISSION_DENIED || \result == INTERNAL_CORRUPTION || \result == RESOURCE_BUSY;
 */
 int fbvbs_memory_unregister_shared(
     struct fbvbs_hypervisor_state *state,
-    uint64_t shared_object_id
+    uint64_t shared_object_id,
+    uint64_t requester_partition_id
 ) {
     struct fbvbs_shared_registration *shared;
     struct fbvbs_memory_object *object;
-    struct fbvbs_partition *related_partition = NULL;
 
-    if (state == NULL || shared_object_id == 0U) {
+    if (state == NULL || shared_object_id == 0U || requester_partition_id == 0U) {
         return INVALID_PARAMETER;
     }
 
@@ -2278,21 +2321,44 @@ int fbvbs_memory_unregister_shared(
     if (shared == NULL) {
         return NOT_FOUND;
     }
+    if (shared->owner_partition_id != requester_partition_id) {
+        return PERMISSION_DENIED;
+    }
 
     object = fbvbs_find_memory_object(state, shared->memory_object_id);
     if (object == NULL || object->shared_count == 0U) {
         return INTERNAL_CORRUPTION;
     }
+
+    /* For targeted registrations, check only the named peer partition.
+     * For broadcast registrations (peer_partition_id == 0), scan ALL
+     * partitions for dangling mappings to this object. */
     if (shared->peer_partition_id != 0U) {
-        related_partition = fbvbs_find_partition(state, shared->peer_partition_id);
-    } else if (shared->owner_partition_id != 0U) {
-        related_partition = fbvbs_find_partition(state, shared->owner_partition_id);
+        struct fbvbs_partition *peer =
+            fbvbs_find_partition(state, shared->peer_partition_id);
+
+        if (peer != NULL && peer->occupied &&
+            fbvbs_partition_has_object_mapping(peer, shared->memory_object_id) != 0) {
+            return RESOURCE_BUSY;
+        }
+    } else {
+        uint32_t pi;
+
+        /*@ loop invariant 0 <= pi <= FBVBS_MAX_PARTITIONS;
+            loop assigns pi;
+            loop variant FBVBS_MAX_PARTITIONS - pi;
+        */
+        for (pi = 0U; pi < FBVBS_MAX_PARTITIONS; ++pi) {
+            const struct fbvbs_partition *p = &state->partitions[pi];
+
+            if (p->occupied &&
+                p->partition_id != shared->owner_partition_id &&
+                fbvbs_partition_has_object_mapping(p, shared->memory_object_id) != 0) {
+                return RESOURCE_BUSY;
+            }
+        }
     }
-    if (related_partition != NULL &&
-        related_partition->occupied &&
-        fbvbs_partition_has_object_mapping(related_partition, shared->memory_object_id) != 0) {
-        return RESOURCE_BUSY;
-    }
+
     object->shared_count -= 1U;
     *shared = (struct fbvbs_shared_registration){0};
     return OK;
@@ -2377,7 +2443,8 @@ int fbvbs_vm_map_memory(
     }
     if (request->reserved0 != 0U ||
         !fbvbs_range_valid(request->guest_physical_address, request->size) ||
-        !fbvbs_permissions_valid(request->permissions)) {
+        !fbvbs_permissions_valid(request->permissions) ||
+        !fbvbs_wx_safe(request->permissions)) {
         return INVALID_PARAMETER;
     }
 
@@ -2505,8 +2572,8 @@ int fbvbs_vm_assign_device(
     if (!fbvbs_partition_device_mutation_state_ok(partition, 0)) {
         return INVALID_STATE;
     }
-    if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
-        return INVALID_STATE;
+    if (partition->assigned_device_count >= FBVBS_MAX_ASSIGNED_DEVICES) {
+        return RESOURCE_EXHAUSTED;
     }
     if (!fbvbs_device_exists(state, request->device_id)) {
         return NOT_FOUND;
@@ -2551,6 +2618,9 @@ int fbvbs_vm_release_device(
     }
     if (!fbvbs_partition_device_mutation_state_ok(partition, 1)) {
         return INVALID_STATE;
+    }
+    if (partition->assigned_device_count == 0U) {
+        return NOT_FOUND;
     }
     if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
         return INVALID_STATE;

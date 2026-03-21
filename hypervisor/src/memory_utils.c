@@ -48,7 +48,7 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
     size_t index;
     uint32_t accumulator = 0U;
 
-    if (a == NULL || b == NULL) {
+    if (a == NULL || b == NULL || length == 0U) {
         return 0;
     }
 
@@ -72,7 +72,7 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
     size_t index;
     uint32_t accumulator = 0U;
 
-    if (buffer == NULL) {
+    if (buffer == NULL || length == 0U) {
         return 0;
     }
 

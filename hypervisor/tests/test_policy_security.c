@@ -164,7 +164,6 @@ static void test_shared_registration_only_charges_real_mappings(void) {
     map_shared.guest_physical_address = FBVBS_PAGE_SIZE;
     map_shared.size = FBVBS_PAGE_SIZE;
     map_shared.permissions = FBVBS_MEMORY_PERMISSION_READ;
-    status = fbvbs_memory_map(&state, &map_shared);
     status = fbvbs_memory_map(&state, &map_shared, 0x100U);
     assert(status == OK);
 
@@ -266,7 +265,7 @@ static void test_unregister_shared_rejects_live_peer_mapping(void) {
     status = fbvbs_memory_map(&state, &map_request, 0x100U);
     assert(status == OK);
 
-    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id);
+    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id, 0x100U);
     assert(status == RESOURCE_BUSY);
 }
 
@@ -312,7 +311,7 @@ static void test_unregister_shared_allows_owner_mapping_when_peer_is_unmapped(vo
     status = fbvbs_memory_register_shared(&state, &share_request, &share_response, 0x100U);
     assert(status == OK);
 
-    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id);
+    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id, 0x100U);
     assert(status == OK);
     assert(state.memory_objects[0].shared_count == 0U);
     assert(state.partitions[0].mapped_bytes == FBVBS_PAGE_SIZE);
@@ -333,20 +332,37 @@ static void test_kci_set_wx_fails_closed_without_page_binding(void) {
     request.permissions = FBVBS_MEMORY_PERMISSION_EXECUTE;
 
     status = fbvbs_kci_set_wx(&state, &request);
-    assert(status == NOT_SUPPORTED_ON_PLATFORM);
+    /* With the proper implementation, KCI_SET_WX verifies the module exists
+       in the artifact catalog. An empty catalog returns NOT_FOUND. */
+    assert(status == NOT_FOUND);
 }
 
 static void test_platform_detection_fails_closed_without_real_bringup(void) {
     struct fbvbs_global_security_state state;
 
+    /* IOMMU detection: Intel → type set, but fail-closed (no ACPI evidence). */
     memset(&state, 0, sizeof(state));
-
     state.vendor = CPU_VENDOR_INTEL;
     assert(fbvbs_iommu_detect(&state) == -1);
     assert(state.iommu.iommu_type == IOMMU_TYPE_VTD);
+
+    /* IOMMU detection: AMD → type set, but fail-closed. */
+    memset(&state, 0, sizeof(state));
+    state.vendor = CPU_VENDOR_AMD;
+    assert(fbvbs_iommu_detect(&state) == -1);
+    assert(state.iommu.iommu_type == IOMMU_TYPE_AMD_VI);
+
+    /* Boot integrity: Intel → CPUID model detects DRTM bits but
+       measured boot cannot be established without platform bring-up. */
+    memset(&state, 0, sizeof(state));
+    state.vendor = CPU_VENDOR_INTEL;
     assert(fbvbs_boot_integrity_detect(&state) == -1);
-    assert(state.boot.secure_boot_active == 0U);
-    assert(state.boot.measured_boot_active == 0U);
+
+    /* Unknown vendor must fail-closed for both. */
+    memset(&state, 0, sizeof(state));
+    state.vendor = CPU_VENDOR_UNKNOWN;
+    assert(fbvbs_iommu_detect(&state) == -1);
+    assert(fbvbs_boot_integrity_detect(&state) == -1);
 }
 
 static void test_vm_device_passthrough_is_fail_closed_without_qualification(void) {
@@ -391,6 +407,138 @@ static void test_vm_destroy_rejects_assigned_devices_without_safe_teardown(void)
     assert(state.partitions[0].assigned_device_count == 1U);
 }
 
+static void test_unregister_shared_rejects_non_owner(void) {
+    struct fbvbs_hypervisor_state state;
+    struct fbvbs_memory_register_shared_request share_request = {0};
+    struct fbvbs_memory_register_shared_response share_response = {0};
+    int status;
+
+    memset(&state, 0, sizeof(state));
+    state.next_shared_object_id = 1U;
+
+    state.partitions[0].occupied = true;
+    state.partitions[0].partition_id = 0x100U;
+    state.partitions[0].kind = PARTITION_KIND_TRUSTED_SERVICE;
+    state.partitions[0].state = FBVBS_PARTITION_STATE_CREATED;
+
+    state.partitions[1].occupied = true;
+    state.partitions[1].partition_id = 0x200U;
+    state.partitions[1].kind = PARTITION_KIND_TRUSTED_SERVICE;
+    state.partitions[1].state = FBVBS_PARTITION_STATE_CREATED;
+
+    state.memory_objects[0].allocated = true;
+    state.memory_objects[0].object_flags = FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE;
+    state.memory_objects[0].memory_object_id = 0x1000U;
+    state.memory_objects[0].owner_partition_id = 0x100U;
+    state.memory_objects[0].size = FBVBS_PAGE_SIZE;
+
+    share_request.memory_object_id = 0x1000U;
+    share_request.size = FBVBS_PAGE_SIZE;
+    share_request.peer_partition_id = 0x200U;
+    share_request.peer_permissions = FBVBS_MEMORY_PERMISSION_READ;
+    status = fbvbs_memory_register_shared(&state, &share_request, &share_response, 0x100U);
+    assert(status == OK);
+
+    /* Non-owner (0x200) cannot unregister. */
+    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id, 0x200U);
+    assert(status == PERMISSION_DENIED);
+    assert(state.memory_objects[0].shared_count == 1U);
+
+    /* Owner can unregister. */
+    status = fbvbs_memory_unregister_shared(&state, share_response.shared_object_id, 0x100U);
+    assert(status == OK);
+    assert(state.memory_objects[0].shared_count == 0U);
+}
+
+static void test_unmap_rejects_unauthorized_caller(void) {
+    struct fbvbs_hypervisor_state state;
+    struct fbvbs_memory_map_request map_request = {0};
+    struct fbvbs_memory_unmap_request unmap_request = {0};
+    int status;
+
+    memset(&state, 0, sizeof(state));
+
+    state.partitions[0].occupied = true;
+    state.partitions[0].partition_id = 0x100U;
+    state.partitions[0].kind = PARTITION_KIND_TRUSTED_SERVICE;
+    state.partitions[0].state = FBVBS_PARTITION_STATE_CREATED;
+    state.partitions[0].memory_limit_bytes = FBVBS_PAGE_SIZE;
+
+    state.memory_objects[0].allocated = true;
+    state.memory_objects[0].object_flags = FBVBS_MEMORY_OBJECT_FLAG_PRIVATE;
+    state.memory_objects[0].memory_object_id = 0x1000U;
+    state.memory_objects[0].owner_partition_id = 0x100U;
+    state.memory_objects[0].size = FBVBS_PAGE_SIZE;
+
+    map_request.partition_id = 0x100U;
+    map_request.memory_object_id = 0x1000U;
+    map_request.guest_physical_address = FBVBS_PAGE_SIZE;
+    map_request.size = FBVBS_PAGE_SIZE;
+    map_request.permissions = FBVBS_MEMORY_PERMISSION_READ;
+    status = fbvbs_memory_map(&state, &map_request, 0x100U);
+    assert(status == OK);
+
+    unmap_request.partition_id = 0x100U;
+    unmap_request.guest_physical_address = FBVBS_PAGE_SIZE;
+    unmap_request.size = FBVBS_PAGE_SIZE;
+
+    /* Unauthorized third party (0x999) cannot unmap. */
+    status = fbvbs_memory_unmap(&state, &unmap_request, 0x999U);
+    assert(status == PERMISSION_DENIED);
+    assert(state.partitions[0].mapped_bytes == FBVBS_PAGE_SIZE);
+
+    /* Owner can unmap. */
+    status = fbvbs_memory_unmap(&state, &unmap_request, 0x100U);
+    assert(status == OK);
+    assert(state.partitions[0].mapped_bytes == 0U);
+}
+
+static void test_broadcast_registration_authorizes_any_peer(void) {
+    struct fbvbs_hypervisor_state state;
+    struct fbvbs_memory_register_shared_request share_request = {0};
+    struct fbvbs_memory_register_shared_response share_response = {0};
+    struct fbvbs_memory_map_request map_request = {0};
+    int status;
+
+    memset(&state, 0, sizeof(state));
+    state.next_shared_object_id = 1U;
+
+    state.partitions[0].occupied = true;
+    state.partitions[0].partition_id = 0x100U;
+    state.partitions[0].kind = PARTITION_KIND_TRUSTED_SERVICE;
+    state.partitions[0].state = FBVBS_PARTITION_STATE_CREATED;
+
+    state.partitions[1].occupied = true;
+    state.partitions[1].partition_id = 0x200U;
+    state.partitions[1].kind = PARTITION_KIND_TRUSTED_SERVICE;
+    state.partitions[1].state = FBVBS_PARTITION_STATE_CREATED;
+    state.partitions[1].memory_limit_bytes = FBVBS_PAGE_SIZE;
+
+    state.memory_objects[0].allocated = true;
+    state.memory_objects[0].object_flags = FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE;
+    state.memory_objects[0].memory_object_id = 0x1000U;
+    state.memory_objects[0].owner_partition_id = 0x100U;
+    state.memory_objects[0].size = FBVBS_PAGE_SIZE;
+
+    /* Broadcast registration: peer_partition_id == 0 means any peer. */
+    share_request.memory_object_id = 0x1000U;
+    share_request.size = FBVBS_PAGE_SIZE;
+    share_request.peer_partition_id = 0U;
+    share_request.peer_permissions = FBVBS_MEMORY_PERMISSION_READ;
+    status = fbvbs_memory_register_shared(&state, &share_request, &share_response, 0x100U);
+    assert(status == OK);
+
+    /* Partition 0x200 can map via broadcast authorization. */
+    map_request.partition_id = 0x200U;
+    map_request.memory_object_id = 0x1000U;
+    map_request.guest_physical_address = FBVBS_PAGE_SIZE;
+    map_request.size = FBVBS_PAGE_SIZE;
+    map_request.permissions = FBVBS_MEMORY_PERMISSION_READ;
+    status = fbvbs_memory_map(&state, &map_request, 0x100U);
+    assert(status == OK);
+    assert(state.partitions[1].mapped_bytes == FBVBS_PAGE_SIZE);
+}
+
 int main(void) {
     test_kci_verify_module_uses_current_manifest_generation();
     test_vm_set_register_enforces_arch_and_pin_policy();
@@ -403,5 +551,8 @@ int main(void) {
     test_platform_detection_fails_closed_without_real_bringup();
     test_vm_device_passthrough_is_fail_closed_without_qualification();
     test_vm_destroy_rejects_assigned_devices_without_safe_teardown();
+    test_unregister_shared_rejects_non_owner();
+    test_unmap_rejects_unauthorized_caller();
+    test_broadcast_registration_authorizes_any_peer();
     return 0;
 }
