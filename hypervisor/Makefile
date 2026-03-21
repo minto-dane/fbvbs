@@ -33,7 +33,12 @@ ALL_SOURCES := $(CORE_SOURCES) \
     src/vm_policy.c \
     src/boot_multiboot.c \
     src/iommu_vtd.c \
-    src/iommu_amdvi.c
+    src/iommu_amdvi.c \
+    src/early_init.c \
+    src/vmcs_setup.c
+
+# UEFI sources (MS ABI, separate compilation flags)
+UEFI_SOURCES := src/uefi_entry.c
 
 # Frama-C WP sources: excludes memory_utils.c (void* incompatible
 # with Typed+Cast model) and boot_multiboot.c (void* casts for
@@ -54,7 +59,15 @@ FRAMA_C_WP_SOURCES := \
 HOST_CFLAGS := $(COMMON_WARNINGS) $(HARDENING_FLAGS) -O2 $(INCLUDES)
 ANALYZER_CFLAGS := $(HOST_CFLAGS) -fanalyzer
 
+# UEFI uses MS ABI and CHAR16 literals; relax -Wpedantic
+UEFI_CFLAGS := -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
+               -Wstrict-prototypes -Wmissing-prototypes \
+               -Wshadow -Wundef -std=c11 \
+               $(HARDENING_FLAGS) -O2 $(INCLUDES)
+UEFI_ANALYZER_CFLAGS := $(UEFI_CFLAGS) -fanalyzer
+
 ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(ALL_SOURCES))
+UEFI_ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(UEFI_SOURCES))
 HOST_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/host_%.o,$(ALL_SOURCES))
 
 TEST_BINS := \
@@ -81,8 +94,8 @@ FRAMAC_WP_FLAGS := \
 
 all: analyze
 
-analyze: $(ANALYZER_OBJECTS)
-	@echo "GCC -fanalyzer: all $(words $(ALL_SOURCES)) sources passed."
+analyze: $(ANALYZER_OBJECTS) $(UEFI_ANALYZER_OBJECTS)
+	@echo "GCC -fanalyzer: all $(words $(ALL_SOURCES) $(UEFI_SOURCES)) sources passed."
 
 test: $(TEST_BINS)
 	$(BUILD_DIR)/fbvbs_leaf_boundary_tests
@@ -101,6 +114,13 @@ clean:
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
+
+# UEFI sources need relaxed flags (MS ABI, CHAR16)
+$(BUILD_DIR)/analyze_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
+	$(CC) $(UEFI_ANALYZER_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/host_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
+	$(CC) $(UEFI_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/analyze_%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(ANALYZER_CFLAGS) -c $< -o $@

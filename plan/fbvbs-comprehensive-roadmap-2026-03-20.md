@@ -25,6 +25,10 @@
 | ブートパーサ | boot_multiboot.c | ~250 | WP対象外 | multiboot2 parse |
 | IOMMU VT-d | iommu_vtd.c | ~900 | WP対象外 | DMAR パーサ + レジスタ制御 (Phase 0B-1/0B-2) |
 | IOMMU AMD-Vi | iommu_amdvi.c | ~470 | WP対象外 | IVRS パーサ + レジスタ制御 (Phase 0B-3) |
+| UEFI エントリ | uefi_entry.c | ~260 | WP対象外 | UEFI アプリケーション (Phase 1-1) |
+| 早期初期化 | early_init.c | ~230 | WP対象外 | Post-ExitBootServices 初期化 (Phase 1-1) |
+| EFI 型定義 | fbvbs_efi.h | ~280 | N/A | UEFI 型・構造体定義 |
+| VMCS セットアップ | vmcs_setup.c | ~500 | WP対象外 | VMCS フィールド定義 + deprivilege (Phase 1-3) |
 
 **WP検証合計:** 6,260+ proved goals (99.5%+), 34 timeouts, 0 smoke failures
 
@@ -179,38 +183,57 @@
 - REQ-0006 (起動時検証・測定)
 - REQ-0360–0362 (DRTM, Boot Guard/PSB, TPM)
 
-#### 1-1. UEFI アプリケーション
+#### 1-1. UEFI アプリケーション ✅
 
-**新規ファイル:** `boot/uefi_entry.c`, `boot/uefi_boot.c`
-
-**アクション:**
-1. UEFI application エントリポイント (EFI_MAIN)
-2. EFI_BOOT_SERVICES を使った メモリマップ取得
-3. マイクロハイパーバイザーイメージの配置
-4. ページテーブル初期設定（identity mapping）
-5. GDT/IDT 初期設定
-6. VMX/SVM 有効化判定
-
-#### 1-2. ベアメタル初期化（boot.S）
-
-**新規ファイル:** `boot/boot.S`, `boot/early_init.c`
+**新規ファイル:** `hypervisor/include/fbvbs_efi.h`, `hypervisor/src/uefi_entry.c`, `hypervisor/src/early_init.c`
 
 **アクション:**
-1. x86_64 long mode 確認
-2. CR0/CR4 初期ビット設定
-3. VMX enable (CR4.VMXE → VMXON)
-4. 初期 VMCS/VMCB 構築
-5. ハイパーバイザースタック確保
-6. BSP CPU セキュリティ初期化呼び出し
+1. ✅ UEFI application エントリポイント (`efi_main`) — MS ABI、EFI_SYSTEM_TABLE 受け取り
+2. ✅ EFI_BOOT_SERVICES を使った メモリマップ取得 — `get_memory_map()` + ExitBootServices retry
+3. ✅ ACPI RSDP 発見 — EFI Configuration Table から ACPI 2.0 GUID 検索
+4. ✅ ハイパーバイザースタック割り当て — `allocate_pages()` (64 KiB)
+5. ✅ `fbvbs_efi.h` — 最小 UEFI 型定義（EDK2/gnu-efi 非依存）
+6. ✅ ExitBootServices → `fbvbs_efi_to_hypervisor()` 遷移
+7. ✅ `early_init.c` — EFI メモリマップ処理、VMX/SVM 検出、serial debug output
+8. ページテーブル初期設定（identity mapping）— PRODUCTION NOTE（boot.S と同等ロジック必要）
+9. GDT/IDT 初期設定 — PRODUCTION NOTE（アセンブリ必要）
+10. VMX/SVM 有効化 — PRODUCTION NOTE（CR4.VMXE/EFER.SVME、アセンブリ必要）
 
-#### 1-3. FreeBSD deprivilege
+#### 1-2. ベアメタル初期化（boot.S） ✅（Multiboot2 パス実装済み）
+
+**既存ファイル:** `hypervisor/src/boot.S` (Multiboot2), `hypervisor/src/early_init.c` (UEFI)
 
 **アクション:**
-1. FreeBSD カーネルイメージをゲストメモリ領域に配置
-2. EPT/NPT ページテーブル構築
-3. FreeBSD を VMX non-root / SVM guest として起動
-4. VM exit ハンドラチェーンへの接続
-5. 一次監査ログ初期化（UART 経路）
+1. ✅ x86_64 long mode 確認 — boot.S `check_long_mode`
+2. ✅ CR0/CR4 初期ビット設定 — boot.S (CR0.PG|WP|PE, CR4.PAE, EFER.LME|NXE)
+3. VMX enable (CR4.VMXE → VMXON) — PRODUCTION NOTE（要アセンブリ）
+4. 初期 VMCS/VMCB 構築 — Phase 1-3 で実装
+5. ✅ ハイパーバイザースタック確保 — boot.S (16KiB BSS) + uefi_entry.c (64KiB allocated)
+6. ✅ BSP CPU セキュリティ初期化呼び出し — kernel.c `fbvbs_hypervisor_init`
+7. ✅ W^X ページテーブル — boot.S `setup_page_tables_wx` (identity mapped, NX, guard page)
+8. ✅ GDT (64-bit flat model) — boot.S `gdt64`
+
+#### 1-3. FreeBSD deprivilege ✅（VMCS構成ロジック実装済み）
+
+**新規ファイル:** `hypervisor/src/vmcs_setup.c`
+
+**アクション:**
+1. FreeBSD カーネルイメージをゲストメモリ領域に配置 — PRODUCTION NOTE（EPT構築後に実装）
+2. ✅ VMCS フィールドエンコーディング定義（Intel SDM Appendix B 完全対応）
+3. ✅ VM実行制御ビット定義（Pin/Primary/Secondary/Exit/Entry controls）
+4. ✅ `fbvbs_vmcs_build_host_config()` — FreeBSD deprivilege 用 VMCS 構成
+   - Pin: 外部割り込みExiting + NMI Exiting + Virtual NMIs
+   - Primary: HLT/CR3/DR/MSR bitmap Exiting + Secondary activate
+   - Secondary: EPT + VPID + RDTSCP + INVPCID + XSAVES
+   - Exit: 64-bit host + EFER save/load
+   - Entry: 64-bit guest + EFER load
+   - Exception bitmap: #DB, #BP, #UD, #MC
+   - CR0/CR4 guest-host mask = pinned security bits
+5. ✅ `fbvbs_vmcs_apply()` — VMWRITE シーケンス文書化（要アセンブリ）
+6. ✅ `fbvbs_deprivilege_host()` — CPU 状態キャプチャ→VMCS構築→VMLAUNCH シーケンス文書化
+7. EPT/NPT ページテーブル構築 — Phase 2 で HLAT 統合と併せて実装
+8. VM exit ハンドラチェーン — PRODUCTION NOTE（アセンブリ vmexit_handler 必要）
+9. ✅ 一次監査ログ初期化（UART 経路） — early_init.c `serial_print`
 
 #### 1-4. DRTM 統合（高保証構成）
 

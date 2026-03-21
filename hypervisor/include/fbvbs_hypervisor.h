@@ -736,4 +736,22 @@ int fbvbs_dispatch_hypercall(
     struct fbvbs_trap_registers *registers
 );
 
+/* ================================================================
+ * VMCS setup and host deprivilege (vmcs_setup.c)
+ * ================================================================ */
+
+struct fbvbs_vmcs_config;
+
+/*@ requires \valid_read(config);
+    assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config);
+
+/*@ requires \valid(state);
+    assigns *state;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state);
+
 #endif
