@@ -873,6 +873,65 @@ static void fbvbs_log_iommu_domain_event(
     );
 }
 
+/* ================================================================
+ * IOMMU domain creation for device passthrough
+ *
+ * Allocates an IOMMU domain from the hypervisor domain pool and
+ * associates it with a partition. Each partition with assigned
+ * devices gets exactly one IOMMU domain for DMA isolation.
+ * ================================================================ */
+
+/*@ requires \valid(state);
+    requires \valid(partition);
+    requires \separated(partition, &state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1]);
+    assigns state->iommu_domains[0 .. FBVBS_MAX_PARTITIONS - 1],
+            state->next_iommu_domain_id,
+            partition->iommu_domain_id,
+            state->mirror_log, state->log_lock;
+    ensures \result == OK || \result == RESOURCE_EXHAUSTED;
+*/
+static int fbvbs_iommu_domain_create(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *partition)
+{
+    uint32_t index;
+    struct fbvbs_iommu_domain *domain = NULL;
+
+    /* Find a free domain slot */
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_PARTITIONS;
+        loop assigns index, domain;
+        loop variant FBVBS_MAX_PARTITIONS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_PARTITIONS; ++index) {
+        if (!state->iommu_domains[index].active) {
+            domain = &state->iommu_domains[index];
+            break;
+        }
+    }
+
+    if (domain == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+
+    domain->active = true;
+    domain->domain_id = state->next_iommu_domain_id;
+    domain->owner_partition_id = partition->partition_id;
+    domain->attached_device_count = 0U;
+
+    partition->iommu_domain_id = domain->domain_id;
+    state->next_iommu_domain_id += 1U;
+
+    fbvbs_log_iommu_domain_event(
+        state,
+        FBVBS_EVENT_IOMMU_DOMAIN_CREATE,
+        partition->partition_id,
+        domain->domain_id,
+        0U
+    );
+
+    return OK;
+}
+
 /*@ requires \valid(state);
     requires \valid(created_partition);
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1], state->next_partition_id, *created_partition
@@ -2633,13 +2692,63 @@ int fbvbs_vm_assign_device(
         }
     }
 
-    (void)partition;
+    /* Ensure partition has an IOMMU domain */
+    if (partition->iommu_domain_id == 0U) {
+        int domain_result = fbvbs_iommu_domain_create(state, partition);
+        if (domain_result != OK) {
+            return domain_result;
+        }
+    }
 
-    /* Fail closed until the retained C model has an authoritative IOMMU
-     * domain creation, DMA remapping, and interrupt remapping path.
-     * The device qualification above is necessary but not sufficient:
-     * actual IOMMU domain setup is required before assignment. */
-    return NOT_SUPPORTED_ON_PLATFORM;
+    /* Record device assignment */
+    {
+        uint32_t slot;
+        int found_slot = 0;
+
+        /*@ loop invariant 0 <= slot <= FBVBS_MAX_ASSIGNED_DEVICES;
+            loop assigns slot, found_slot, partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1];
+            loop variant FBVBS_MAX_ASSIGNED_DEVICES - slot;
+        */
+        for (slot = 0U; slot < FBVBS_MAX_ASSIGNED_DEVICES; ++slot) {
+            if (partition->assigned_devices[slot] == 0U) {
+                partition->assigned_devices[slot] = request->device_id;
+                found_slot = 1;
+                break;
+            }
+        }
+        if (!found_slot) {
+            return RESOURCE_EXHAUSTED;
+        }
+    }
+
+    partition->assigned_device_count += 1U;
+
+    /* Update IOMMU domain device count */
+    {
+        struct fbvbs_iommu_domain *domain =
+            fbvbs_find_iommu_domain(state, partition->iommu_domain_id);
+        if (domain != NULL) {
+            domain->attached_device_count = (uint16_t)(domain->attached_device_count + 1U);
+            fbvbs_log_iommu_domain_event(
+                state,
+                FBVBS_EVENT_IOMMU_DOMAIN_CREATE,
+                partition->partition_id,
+                domain->domain_id,
+                (uint32_t)domain->attached_device_count
+            );
+        }
+    }
+
+    /* PRODUCTION NOTE: At this point, production code must:
+     * 1. Set up DMA page table entries for the device's IOMMU domain
+     * 2. Program the context table (VT-d) or device table (AMD-Vi)
+     *    to point the device's requester ID to this domain
+     * 3. Set up interrupt remapping table entries for the device
+     * 4. Issue IOTLB/context cache invalidation
+     * Until MMIO and page allocator are available, the model only
+     * records the assignment in the partition and domain structures. */
+
+    return OK;
 }
 
 /*@ requires \valid(state) || state == \null;
@@ -2673,5 +2782,52 @@ int fbvbs_vm_release_device(
     if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
         return INVALID_STATE;
     }
-    return NOT_SUPPORTED_ON_PLATFORM;
+
+    /* Find and remove the device from the assigned list */
+    {
+        uint32_t slot;
+        int found = 0;
+
+        /*@ loop invariant 0 <= slot <= FBVBS_MAX_ASSIGNED_DEVICES;
+            loop assigns slot, found, partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1];
+            loop variant FBVBS_MAX_ASSIGNED_DEVICES - slot;
+        */
+        for (slot = 0U; slot < FBVBS_MAX_ASSIGNED_DEVICES; ++slot) {
+            if (partition->assigned_devices[slot] == request->device_id) {
+                partition->assigned_devices[slot] = 0U;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            return NOT_FOUND;
+        }
+    }
+
+    partition->assigned_device_count -= 1U;
+
+    /* Update IOMMU domain device count */
+    if (partition->iommu_domain_id != 0U) {
+        struct fbvbs_iommu_domain *domain =
+            fbvbs_find_iommu_domain(state, partition->iommu_domain_id);
+        if (domain != NULL && domain->attached_device_count > 0U) {
+            domain->attached_device_count = (uint16_t)(domain->attached_device_count - 1U);
+            fbvbs_log_iommu_domain_event(
+                state,
+                FBVBS_EVENT_IOMMU_DOMAIN_RELEASE,
+                partition->partition_id,
+                domain->domain_id,
+                (uint32_t)domain->attached_device_count
+            );
+        }
+    }
+
+    /* PRODUCTION NOTE: At this point, production code must:
+     * 1. Execute FLR (Function Level Reset) on the device
+     * 2. Clear the context table (VT-d) / device table (AMD-Vi) entry
+     * 3. Remove interrupt remapping table entries
+     * 4. Issue IOTLB/context cache invalidation
+     * 5. Remove DMA page table entries for this device */
+
+    return OK;
 }

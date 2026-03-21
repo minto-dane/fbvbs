@@ -422,6 +422,28 @@ int fbvbs_cpu_compute_global_mitigations(
 int fbvbs_iommu_detect(struct fbvbs_global_security_state *state);
 
 /*@ requires \valid(state);
+    assigns state->iommu;
+*/
+int fbvbs_vtd_detect(struct fbvbs_global_security_state *state);
+
+/*@ requires \valid(state);
+    assigns state->iommu;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_vtd_init(struct fbvbs_global_security_state *state);
+
+/*@ requires \valid(state);
+    assigns state->iommu;
+*/
+int fbvbs_amdvi_detect(struct fbvbs_global_security_state *state);
+
+/*@ requires \valid(state);
+    assigns state->iommu;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_amdvi_init(struct fbvbs_global_security_state *state);
+
+/*@ requires \valid(state);
     assigns state->boot;
 */
 int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state);

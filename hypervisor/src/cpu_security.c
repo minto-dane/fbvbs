@@ -775,28 +775,13 @@ int fbvbs_iommu_detect(struct fbvbs_global_security_state *state)
     state->iommu = (struct fbvbs_iommu_state){0};
 
     if (state->vendor == CPU_VENDOR_INTEL) {
-        state->iommu.iommu_type = IOMMU_TYPE_VTD;
+        return fbvbs_vtd_detect(state);
     } else if (state->vendor == CPU_VENDOR_AMD) {
-        state->iommu.iommu_type = IOMMU_TYPE_AMD_VI;
+        return fbvbs_amdvi_detect(state);
     } else {
         state->iommu.iommu_type = IOMMU_TYPE_NONE;
         return -1;
     }
-
-#ifdef __FRAMAC__
-    /* Model only: set default IOMMU capabilities for WP code path coverage.
-     * Production requires ACPI DMAR (Intel VT-d) or IVRS (AMD-Vi) parsing
-     * to establish DMA remapping, interrupt remapping, and ACS capability
-     * before the hypervisor can claim DMA isolation. */
-    state->iommu.dma_remapping = 1;
-    state->iommu.interrupt_remapping = 1;
-    state->iommu.acs_available = 1;
-    return 0;
-#else
-    /* Fail-closed: a hostile-environment hypervisor must not claim DMA
-     * isolation without authoritative evidence from ACPI table parsing. */
-    return -1;
-#endif
 }
 
 /* ================================================================

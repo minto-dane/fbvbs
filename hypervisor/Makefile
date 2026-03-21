@@ -31,7 +31,9 @@ ALL_SOURCES := $(CORE_SOURCES) \
     src/security.c \
     src/kernel.c \
     src/vm_policy.c \
-    src/boot_multiboot.c
+    src/boot_multiboot.c \
+    src/iommu_vtd.c \
+    src/iommu_amdvi.c
 
 # Frama-C WP sources: excludes memory_utils.c (void* incompatible
 # with Typed+Cast model) and boot_multiboot.c (void* casts for

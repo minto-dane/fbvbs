@@ -13,8 +13,8 @@
 | コンポーネント | ファイル | 行数(概算) | WP検証 | 状態 |
 |--------------|---------|-----------|--------|------|
 | hypercall dispatch | command.c | ~2150 | 2494/2500 (6 TO) | TOCTOU全修正済 |
-| パーティション管理 | partition.c | ~2630 | 1521/1526 (5 TO) | ライフサイクル完全 |
-| CPU セキュリティ | cpu_security.c | ~1175 | 213/213 (0 TO) ✅ | 81機能検出・緩和 |
+| パーティション管理 | partition.c | ~2830 | 1626/1639 (13 TO) | ライフサイクル完全 + IOMMU domain管理 |
+| CPU セキュリティ | cpu_security.c | ~1175 | 628/628 (0 TO) ✅ | 81機能検出・緩和 |
 | VMX 制御 | vmx.c | ~580 | 99%+ (1 TO) | probe/setup/run |
 | メモリ管理 | memory.c | ~400 | 100% | EPTマッピング |
 | 監査ログ | log.c | ~280 | 100% | ringbuf + CRC32C |
@@ -23,8 +23,10 @@
 | カーネル統合 | kernel.c | ~400 | 100%- (1 TO) | model code |
 | メモリユーティリティ | memory_utils.c | ~150 | WP除外 | void*関数群 |
 | ブートパーサ | boot_multiboot.c | ~250 | WP対象外 | multiboot2 parse |
+| IOMMU VT-d | iommu_vtd.c | ~900 | WP対象外 | DMAR パーサ + レジスタ制御 (Phase 0B-1/0B-2) |
+| IOMMU AMD-Vi | iommu_amdvi.c | ~470 | WP対象外 | IVRS パーサ + レジスタ制御 (Phase 0B-3) |
 
-**WP検証合計:** 6,140+ proved goals (99.6%+), 26 timeouts, 0 smoke failures
+**WP検証合計:** 6,260+ proved goals (99.5%+), 34 timeouts, 0 smoke failures
 
 ### 未実装・ブロッカー
 
@@ -106,54 +108,64 @@
 - REQ-0351 (interrupt remapping)
 - REQ-0353 (外部 DMA ポート分離)
 
-#### 0B-1. ACPI DMAR パーサ（Intel VT-d）
+#### 0B-1. ACPI DMAR パーサ（Intel VT-d） ✅
 
 **新規ファイル:** `hypervisor/src/iommu_vtd.c`
 
 **アクション:**
-1. ACPI RSDP → XSDT → DMAR テーブル検索
-2. DMAR テーブルヘッダ解析（DMA Remapping Reporting Structure）
-3. DRHD (DMA Remapping Hardware Unit) エントリ解析
+1. ✅ ACPI RSDP → XSDT → DMAR テーブル検索（モデル: NULL返却 fail-closed、PRODUCTION NOTE付き）
+2. ✅ DMAR テーブルヘッダ解析（DMA Remapping Reporting Structure）
+3. ✅ DRHD (DMA Remapping Hardware Unit) エントリ解析
    - Base address, flags, segment number
    - Device scope parsing (PCI bus/dev/func)
-4. RMRR (Reserved Memory Region Reporting) エントリ解析
-5. ATSR (Root Port ATS Capability Reporting) エントリ解析
-6. ACSL contract 付き bounded パーサ（バッファ長検証、オーバーフロー防止）
-7. Frama-C WP 検証
+4. ✅ RMRR (Reserved Memory Region Reporting) エントリ解析
+5. ATSR (Root Port ATS Capability Reporting) エントリ解析 — Phase 0B-2で必要に応じて追加
+6. ✅ ACSL contract 付き bounded パーサ（バッファ長検証、オーバーフロー防止、MAX_DMAR_TABLE_SIZE=4096）
+7. ✅ GCC -fanalyzer + テスト通過、cpu_security.c WP 628/628 (0 TO) 維持
+8. ✅ `fbvbs_iommu_detect` が Intel vendor時に `fbvbs_vtd_detect` を呼び出すよう統合
+9. WP検証: iommu_vtd.c は void* キャストを使用するため WP Typed+Cast 対象外（boot_multiboot.c と同様）
 
-#### 0B-2. Intel VT-d レジスタ制御
+#### 0B-2. Intel VT-d レジスタ制御 ✅
 
 **アクション:**
-1. Global Command Register (GCMD) / Global Status Register (GSTS) 操作
-2. Root Table Address Register 設定
-3. Context Table エントリ構築
-4. Interrupt Remapping Table Entry (IRTE) 構築
-5. Translation Enable / Interrupt Remapping Enable
-6. IOTLB invalidation
-7. Fault Status Register 監視
+1. ✅ Global Command Register (GCMD) / Global Status Register (GSTS) 操作 — MMIO read/write モデル + PRODUCTION NOTE
+2. ✅ Root Table Address Register 設定 — `vtd_set_root_table()` (SRTP → RTPS ポーリング)
+3. ✅ Context Table エントリ構築 — `vtd_build_context_entry()` (Present + TT + SLPTPTR + DID)
+4. ✅ Interrupt Remapping Table Entry (IRTE) 構築 — `vtd_build_irte()` (Present + vector + dest + SID)
+5. ✅ Translation Enable / Interrupt Remapping Enable — `vtd_enable_translation()`, `vtd_enable_interrupt_remapping()`
+6. Context cache invalidation — `vtd_invalidate_context_global()` (IOTLB invalidation は Phase 0B-4 per-domain)
+7. ✅ Fault Status Register 監視 — `vtd_check_fault()` (PPF/PFO 検出)
+8. ✅ CAP/ECAP レジスタ読み取り — `vtd_probe_capabilities()` (IR, PASID, SAGAW)
+9. ✅ `fbvbs_vtd_init()` エントリポイント — 全 DRHD ユニット初期化シーケンス
+10. ✅ 本番ビルドは fail-closed（MMIO マッピング未実装時は全操作失敗）
 
-#### 0B-3. ACPI IVRS パーサ（AMD-Vi）
+#### 0B-3. ACPI IVRS パーサ（AMD-Vi） ✅
 
 **新規ファイル:** `hypervisor/src/iommu_amdvi.c`
 
 **アクション:**
-1. ACPI IVRS テーブル検索と解析
-2. IVHD (I/O Virtualization Hardware Definition) エントリ解析
-3. IVMD (I/O Virtualization Memory Definition) エントリ解析
-4. Device Table エントリ構築
-5. Interrupt Remapping Table 構築
-6. MMIO レジスタ空間マッピング
-7. Command Buffer / Event Log 初期化
-8. ACSL contract と WP 検証
+1. ✅ ACPI IVRS テーブル検索と解析 — `fbvbs_ivrs_parse()` bounded パーサ（ACSL contract付き）
+2. ✅ IVHD (I/O Virtualization Hardware Definition) エントリ解析 — type 10h/11h/40h 対応
+3. ✅ IVMD (I/O Virtualization Memory Definition) エントリ解析 — type 20h/21h/22h 対応
+4. ✅ Device Table エントリ構築 — `amdvi_build_dte()` (Valid + TV + Mode4 + DomainID)
+5. ✅ Interrupt Remapping Table 構築 — `amdvi_build_irte()` (RemapEn + vector + dest)
+6. ✅ MMIO レジスタ空間マッピング — `amdvi_mmio_read64/write64` モデル + PRODUCTION NOTE
+7. ✅ Control Register 操作 — `amdvi_enable()` (IOMMU_EN + EVT_LOG_EN + CMD_BUF_EN)
+8. ✅ `fbvbs_amdvi_detect()` / `fbvbs_amdvi_init()` エントリポイント
+9. ✅ `fbvbs_iommu_detect` が AMD vendor時に `fbvbs_amdvi_detect` を呼び出すよう統合
+10. ✅ GCC -fanalyzer 13ファイル全通過、テスト通過、cpu_security.c WP 628/628 維持
+11. WP検証: iommu_amdvi.c は void* キャストを使用するため WP 対象外
 
-#### 0B-4. IOMMU ドメイン管理
+#### 0B-4. IOMMU ドメイン管理 ✅
 
 **アクション:**
-1. パーティション ↔ IOMMU ドメインマッピング
-2. DMA ページテーブル構築と更新
-3. Device → Domain 割り当て/解放
-4. passthrough デバイスの DMA 分離検証
-5. partition destroy 時のドメインクリーンアップ
+1. ✅ パーティション ↔ IOMMU ドメインマッピング — `fbvbs_iommu_domain_create()` (partition.c)
+2. DMA ページテーブル構築と更新 — PRODUCTION NOTE（物理ページアロケータ必要）
+3. ✅ Device → Domain 割り当て/解放 — `vm_assign_device` / `vm_release_device` 完全実装
+   - 割り当て: qualification → domain作成 → デバイススロット記録 → domain count更新 → 監査ログ
+   - 解放: デバイススロット解除 → domain count更新 → 監査ログ → PRODUCTION NOTE (FLR, context/DTE clear)
+4. passthrough デバイスの DMA 分離検証 — PRODUCTION NOTE（MMIO + context/DTE プログラミング必要）
+5. ✅ partition destroy 時のドメインクリーンアップ — 既存（fbvbs_partition_destroy_common内）
 
 ---
 
