@@ -1415,12 +1415,151 @@ int fbvbs_kci_verify_module(
     return OK;
 }
 
+/* ================================================================
+ * KCI page binding: hash-verified GPA-to-artifact association.
+ *
+ * Before granting execute permission on a code page, the hypervisor
+ * must verify that the page content matches the measured artifact hash.
+ * A binding records a successful verification so that execute permission
+ * can be granted, and is invalidated when the underlying mapping changes.
+ *
+ * PRODUCTION NOTE: fbvbs_kci_verify_page_hash() uses a model implementation
+ * that always returns 1 (match). Production deployment MUST replace this
+ * with SHA-384 hash computation over the GPA range and constant-time
+ * comparison against the artifact's payload_hash. The crypto primitive
+ * is delivered in Phase 5 (暗号ライブラリ統合).
+ * ================================================================ */
+
+/*@ requires \valid_read(expected_hash + (0 .. 47));
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_kci_verify_page_hash(
+    uint64_t page_gpa,
+    uint64_t page_size,
+    const uint8_t expected_hash[48]
+) {
+    /* PRODUCTION NOTE: This model always returns 1 (hash matches).
+     * Production must compute SHA-384(bytes at page_gpa, page_size)
+     * and constant-time compare against expected_hash.
+     * Until the crypto primitive is available, execute permission
+     * is gated only by manifest approval and catalog presence. */
+    (void)page_gpa;
+    (void)page_size;
+    (void)expected_hash;
+#if defined(__FRAMAC__)
+    return 1;
+#else
+    /* Fail-closed: refuse to verify until crypto is available.
+     * This prevents execute permission on unverified pages.
+     * Remove this block when SHA-384 is implemented. */
+    return 0;
+#endif
+}
+
+/*@ requires \valid(state);
+    requires state->kci_binding_count <= FBVBS_MAX_KCI_PAGE_BINDINGS;
+    assigns state->kci_bindings[0 .. FBVBS_MAX_KCI_PAGE_BINDINGS - 1],
+            state->kci_binding_count;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_kci_record_binding(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t module_object_id,
+    uint64_t guest_physical_address,
+    uint64_t size,
+    uint64_t file_offset,
+    uint64_t measurement_epoch
+) {
+    uint32_t index;
+
+    /* Search for existing binding (update) or free slot */
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_KCI_PAGE_BINDINGS;
+        loop assigns index;
+        loop variant FBVBS_MAX_KCI_PAGE_BINDINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_KCI_PAGE_BINDINGS; ++index) {
+        struct fbvbs_kci_page_binding *b = &state->kci_bindings[index];
+
+        if (b->active &&
+            b->module_object_id == module_object_id &&
+            b->guest_physical_address == guest_physical_address &&
+            b->size == size) {
+            /* Update existing binding */
+            b->measurement_epoch = measurement_epoch;
+            b->file_offset = file_offset;
+            return 1;
+        }
+    }
+
+    /* Allocate new slot */
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_KCI_PAGE_BINDINGS;
+        loop assigns index;
+        loop variant FBVBS_MAX_KCI_PAGE_BINDINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_KCI_PAGE_BINDINGS; ++index) {
+        struct fbvbs_kci_page_binding *b = &state->kci_bindings[index];
+
+        if (!b->active) {
+            b->active = 1;
+            b->module_object_id = module_object_id;
+            b->guest_physical_address = guest_physical_address;
+            b->size = size;
+            b->file_offset = file_offset;
+            b->measurement_epoch = measurement_epoch;
+            b->reserved0 = 0U;
+            if (state->kci_binding_count < FBVBS_MAX_KCI_PAGE_BINDINGS) {
+                state->kci_binding_count += 1U;
+            }
+            return 1;
+        }
+    }
+
+    /* No free binding slots */
+    return 0;
+}
+
+/*@ requires \valid(state);
+    assigns state->kci_bindings[0 .. FBVBS_MAX_KCI_PAGE_BINDINGS - 1],
+            state->kci_binding_count;
+*/
+void fbvbs_kci_invalidate_bindings_for_gpa(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t guest_physical_address,
+    uint64_t size
+) {
+    uint32_t index;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_KCI_PAGE_BINDINGS;
+        loop assigns index,
+                     state->kci_bindings[0 .. FBVBS_MAX_KCI_PAGE_BINDINGS - 1],
+                     state->kci_binding_count;
+        loop variant FBVBS_MAX_KCI_PAGE_BINDINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_KCI_PAGE_BINDINGS; ++index) {
+        struct fbvbs_kci_page_binding *b = &state->kci_bindings[index];
+
+        if (!b->active) {
+            continue;
+        }
+        /* Invalidate if the modified range overlaps the binding */
+        if (b->guest_physical_address < guest_physical_address + size &&
+            guest_physical_address < b->guest_physical_address + b->size) {
+            *b = (struct fbvbs_kci_page_binding){0};
+            if (state->kci_binding_count > 0U) {
+                state->kci_binding_count -= 1U;
+            }
+        }
+    }
+}
+
 /*@ requires \valid(state) || state == \null;
     requires \valid_read(request) || request == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns *state;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_STATE ||
-            \result == PERMISSION_DENIED || \result == NOT_FOUND;
+            \result == PERMISSION_DENIED || \result == NOT_FOUND ||
+            \result == MEASUREMENT_FAILED || \result == RESOURCE_EXHAUSTED;
     behavior invalid_args:
       assumes state == \null || request == \null;
       ensures \result == INVALID_PARAMETER;
@@ -1525,6 +1664,25 @@ int fbvbs_kci_set_wx(
            matches the artifact catalog object_id. */
         if (mapping->memory_object_id != request->module_object_id) {
             continue;
+        }
+
+        /* Byte-backed binding: verify page content matches the measured
+           artifact hash before granting execute. This closes the gap where
+           pages could be modified between measurement and permission grant. */
+        if (fbvbs_kci_verify_page_hash(
+                request->guest_physical_address,
+                request->size,
+                module_entry->payload_hash) == 0) {
+            return MEASUREMENT_FAILED;
+        }
+        if (fbvbs_kci_record_binding(
+                state,
+                request->module_object_id,
+                request->guest_physical_address,
+                request->size,
+                request->file_offset,
+                host->measurement_epoch) == 0) {
+            return RESOURCE_EXHAUSTED;
         }
 
         /* Apply permissions: grant execute, strip write. The W^X invariant

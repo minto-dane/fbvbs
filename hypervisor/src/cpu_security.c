@@ -205,55 +205,20 @@ static uint32_t detect_vendor(void)
  * CPU feature detection
  * ================================================================ */
 
-/*@ requires \valid(profile);
-    requires cpu_id < FBVBS_MAX_CPUS;
-    assigns *profile;
-    ensures \result == 0;
-    ensures profile->initialized == 1;
-    ensures profile->vendor == CPU_VENDOR_INTEL
-         || profile->vendor == CPU_VENDOR_AMD
-         || profile->vendor == CPU_VENDOR_UNKNOWN;
+/*@ requires \valid(f);
+    assigns f->has_pcid, f->has_aesni, f->has_vmx,
+            f->has_nx, f->has_svm,
+            f->has_smep, f->has_smap, f->has_cet_ss, f->has_umip,
+            f->has_pku, f->has_pks, f->has_la57, f->has_cet_ibt,
+            f->has_md_clear, f->has_mcu_opt_ctrl, f->has_ibpb, f->has_stibp,
+            f->has_lass, f->has_fred, f->has_bhi_ctrl;
 */
-int fbvbs_cpu_detect_features(uint32_t cpu_id,
-                              struct fbvbs_cpu_security_profile *profile)
+static void detect_common_features(struct fbvbs_cpuid_features *f)
 {
     uint32_t eax, ebx, ecx, edx;
-    struct fbvbs_cpuid_features *f = &profile->features;
 
-    /* cpu_id < FBVBS_MAX_CPUS guaranteed by ACSL requires */
-
-    /* Zero-initialize entire profile */
-    *profile = (struct fbvbs_cpu_security_profile){0};
-    profile->cpu_id = cpu_id;
-
-    /* Vendor detection */
-    profile->vendor = detect_vendor();
-    /*@ assert profile->vendor == CPU_VENDOR_INTEL
-         || profile->vendor == CPU_VENDOR_AMD
-         || profile->vendor == CPU_VENDOR_UNKNOWN; */
-
-    /* Family/model/stepping from CPUID leaf 1 */
+    /* Basic features from CPUID leaf 1 */
     cpuid_query(1, 0, &eax, &ebx, &ecx, &edx);
-    {
-        uint32_t base_family = (eax >> 8) & 0xFU;
-        uint32_t ext_family  = (eax >> 20) & 0xFFU;
-        uint32_t base_model  = (eax >> 4) & 0xFU;
-        uint32_t ext_model   = (eax >> 16) & 0xFU;
-
-        if (base_family == 0xFU) {
-            profile->family = base_family + ext_family;
-        } else {
-            profile->family = base_family;
-        }
-        if (base_family == 0x6U || base_family == 0xFU) {
-            profile->model = (ext_model << 4) | base_model;
-        } else {
-            profile->model = base_model;
-        }
-        profile->stepping = eax & 0xFU;
-    }
-
-    /* Basic features from leaf 1 */
     f->has_pcid  = (ecx >> 17) & 1U;
     f->has_aesni = (ecx >> 25) & 1U;
     f->has_vmx   = (ecx >> 5)  & 1U;
@@ -290,65 +255,130 @@ int fbvbs_cpu_detect_features(uint32_t cpu_id,
         cpuid_query(7, 2, &eax, &ebx, &ecx, &edx);
         f->has_bhi_ctrl = (edx >> 4) & 1U;
     }
+}
+
+/*@ requires \valid(f);
+    assigns f->has_npt, f->has_lbr_virt, f->has_vmcb_clean,
+            f->has_decode_assists, f->has_pause_filter, f->has_avic,
+            f->has_vgif, f->has_sss_check, f->has_gmet, f->has_vnmi,
+            f->has_amd_ibpb, f->has_amd_stibp, f->has_amd_ssbd,
+            f->has_amd_ibpb_ret, f->has_autoibrs,
+            f->has_sev, f->has_sev_es, f->has_sev_snp, f->has_sme;
+*/
+static void detect_amd_features(struct fbvbs_cpuid_features *f)
+{
+    uint32_t eax, ebx, ecx, edx;
+
+    /* SVM features: CPUID Fn8000_000A */
+    if (cpuid_extended_leaf_supported(0x8000000AU) != 0) {
+        cpuid_query(0x8000000AU, 0, &eax, &ebx, &ecx, &edx);
+        f->has_npt            = (edx >> 0)  & 1U;
+        f->has_lbr_virt       = (edx >> 1)  & 1U;
+        f->has_vmcb_clean     = (edx >> 5)  & 1U;
+        f->has_decode_assists = (edx >> 7)  & 1U;
+        f->has_pause_filter   = (edx >> 10) & 1U;
+        f->has_avic           = (edx >> 13) & 1U;
+        f->has_vgif           = (edx >> 16) & 1U;
+        f->has_sss_check      = (edx >> 19) & 1U;
+        f->has_gmet           = (edx >> 24) & 1U;
+        f->has_vnmi           = (edx >> 25) & 1U;
+    }
+
+    /* AMD speculative mitigations: CPUID Fn8000_0008 */
+    if (cpuid_extended_leaf_supported(0x80000008U) != 0) {
+        cpuid_query(0x80000008U, 0, &eax, &ebx, &ecx, &edx);
+        f->has_amd_ibpb     = (ebx >> 12) & 1U;
+        f->has_amd_stibp    = (ebx >> 15) & 1U;
+        f->has_amd_ssbd     = (ebx >> 24) & 1U;
+        f->has_amd_ibpb_ret = (ebx >> 30) & 1U;
+    }
+
+    /* AMD extended features: CPUID Fn8000_0021 */
+    if (cpuid_extended_leaf_supported(0x80000021U) != 0) {
+        cpuid_query(0x80000021U, 0, &eax, &ebx, &ecx, &edx);
+        f->has_autoibrs = (eax >> 8) & 1U;
+    }
+
+    /* AMD SEV: CPUID Fn8000_001F */
+    if (cpuid_extended_leaf_supported(0x8000001FU) != 0) {
+        cpuid_query(0x8000001FU, 0, &eax, &ebx, &ecx, &edx);
+        f->has_sev     = (eax >> 1) & 1U;
+        f->has_sev_es  = (eax >> 3) & 1U;
+        f->has_sev_snp = (eax >> 4) & 1U;
+        f->has_sme     = (eax >> 0) & 1U;
+    }
+}
+
+/*@ requires \valid(profile);
+    requires cpu_id < FBVBS_MAX_CPUS;
+    assigns *profile;
+    ensures \result == 0;
+    ensures profile->initialized == 1;
+    ensures profile->vendor == CPU_VENDOR_INTEL
+         || profile->vendor == CPU_VENDOR_AMD
+         || profile->vendor == CPU_VENDOR_UNKNOWN;
+*/
+int fbvbs_cpu_detect_features(uint32_t cpu_id,
+                              struct fbvbs_cpu_security_profile *profile)
+{
+    uint32_t eax, ebx, ecx, edx;
+    uint32_t vendor;
+
+    /* Zero-initialize entire profile */
+    *profile = (struct fbvbs_cpu_security_profile){0};
+    profile->cpu_id = cpu_id;
+
+    /* Vendor detection */
+    vendor = detect_vendor();
+    profile->vendor = vendor;
+    /*@ assert vendor == CPU_VENDOR_INTEL
+         || vendor == CPU_VENDOR_AMD
+         || vendor == CPU_VENDOR_UNKNOWN; */
+
+    /* Family/model/stepping from CPUID leaf 1 */
+    cpuid_query(1, 0, &eax, &ebx, &ecx, &edx);
+    {
+        uint32_t base_family = (eax >> 8) & 0xFU;
+        uint32_t ext_family  = (eax >> 20) & 0xFFU;
+        uint32_t base_model  = (eax >> 4) & 0xFU;
+        uint32_t ext_model   = (eax >> 16) & 0xFU;
+
+        if (base_family == 0xFU) {
+            profile->family = base_family + ext_family;
+        } else {
+            profile->family = base_family;
+        }
+        if (base_family == 0x6U || base_family == 0xFU) {
+            profile->model = (ext_model << 4) | base_model;
+        } else {
+            profile->model = base_model;
+        }
+        profile->stepping = eax & 0xFU;
+    }
+
+    /* Common features (leaf 1, extended, structured) */
+    detect_common_features(&profile->features);
+    /*@ assert profile->vendor == vendor; */
 
     /* Read microcode revision (Intel: CPUID.1 after wrmsr 0x8B; AMD: MSR 0x8B directly) */
     {
         uint64_t ucode_rev = msr_read(0x0000008BU);
-        if (profile->vendor == CPU_VENDOR_AMD) {
+        if (vendor == CPU_VENDOR_AMD) {
             profile->microcode_version = (uint32_t)(ucode_rev & 0xFFFFFFFFU);
         } else {
             profile->microcode_version = (uint32_t)(ucode_rev >> 32);
         }
     }
 
-    profile->smt_enabled = (uint32_t)detect_smt_enabled(profile->vendor);
+    profile->smt_enabled = (uint32_t)detect_smt_enabled(vendor);
 
     /* AMD-specific extended features */
-    if (profile->vendor == CPU_VENDOR_AMD) {
-        /* SVM features: CPUID Fn8000_000A */
-        if (cpuid_extended_leaf_supported(0x8000000AU) != 0) {
-            cpuid_query(0x8000000AU, 0, &eax, &ebx, &ecx, &edx);
-            f->has_npt            = (edx >> 0)  & 1U;
-            f->has_lbr_virt       = (edx >> 1)  & 1U;
-            f->has_vmcb_clean     = (edx >> 5)  & 1U;
-            f->has_decode_assists = (edx >> 7)  & 1U;
-            f->has_pause_filter   = (edx >> 10) & 1U;
-            f->has_avic           = (edx >> 13) & 1U;
-            f->has_vgif           = (edx >> 16) & 1U;
-            f->has_sss_check      = (edx >> 19) & 1U;
-            f->has_gmet           = (edx >> 24) & 1U;
-            f->has_vnmi           = (edx >> 25) & 1U;
-        }
-
-        /* AMD speculative mitigations: CPUID Fn8000_0008 */
-        if (cpuid_extended_leaf_supported(0x80000008U) != 0) {
-            cpuid_query(0x80000008U, 0, &eax, &ebx, &ecx, &edx);
-            f->has_amd_ibpb     = (ebx >> 12) & 1U;
-            f->has_amd_stibp    = (ebx >> 15) & 1U;
-            f->has_amd_ssbd     = (ebx >> 24) & 1U;
-            f->has_amd_ibpb_ret = (ebx >> 30) & 1U;
-        }
-
-        /* AMD extended features: CPUID Fn8000_0021 */
-        if (cpuid_extended_leaf_supported(0x80000021U) != 0) {
-            cpuid_query(0x80000021U, 0, &eax, &ebx, &ecx, &edx);
-            f->has_autoibrs = (eax >> 8) & 1U;
-        }
-
-        /* AMD SEV: CPUID Fn8000_001F */
-        if (cpuid_extended_leaf_supported(0x8000001FU) != 0) {
-            cpuid_query(0x8000001FU, 0, &eax, &ebx, &ecx, &edx);
-            f->has_sev     = (eax >> 1) & 1U;
-            f->has_sev_es  = (eax >> 3) & 1U;
-            f->has_sev_snp = (eax >> 4) & 1U;
-            f->has_sme     = (eax >> 0) & 1U;
-        }
+    if (vendor == CPU_VENDOR_AMD) {
+        detect_amd_features(&profile->features);
     }
 
     profile->initialized = 1;
-    /*@ assert profile->vendor == CPU_VENDOR_INTEL
-         || profile->vendor == CPU_VENDOR_AMD
-         || profile->vendor == CPU_VENDOR_UNKNOWN; */
+    /*@ assert profile->vendor == vendor; */
     return 0;
 }
 
@@ -555,6 +585,49 @@ static int has_vendor_mismatch(
 }
 
 /* ================================================================
+ * Worst-case vulnerability merge helper
+ * ================================================================ */
+
+/*@ requires \valid(wc);
+    requires \valid_read(v);
+    requires \separated(wc, v);
+    assigns *wc;
+*/
+static void merge_worst_case_vuln(struct fbvbs_vuln_profile *wc,
+                                  const struct fbvbs_vuln_profile *v)
+{
+    /* Worst case: if ANY CPU is vulnerable, require mitigation */
+    if (v->need_l1d_flush != 0U)         { wc->need_l1d_flush = 1; }
+    if (v->need_verw != 0U)              { wc->need_verw = 1; }
+    if (v->need_rsb_fill != 0U)          { wc->need_rsb_fill = 1; }
+    if (v->need_pbrsb_sequence != 0U)    { wc->need_pbrsb_sequence = 1; }
+    if (v->need_bhb_clear != 0U)         { wc->need_bhb_clear = 1; }
+    if (v->need_tsx_disable != 0U)       { wc->need_tsx_disable = 1; }
+    if (v->need_srso_mitigation != 0U)   { wc->need_srso_mitigation = 1; }
+    if (v->need_retbleed_mitigation != 0U) { wc->need_retbleed_mitigation = 1; }
+    if (v->need_lfence_serialize != 0U)  { wc->need_lfence_serialize = 1; }
+
+    /* Immunity: only immune if ALL CPUs are immune (AND merge) */
+    if (v->immune_meltdown == 0U)   { wc->immune_meltdown = 0; }
+    if (v->immune_l1tf == 0U)       { wc->immune_l1tf = 0; }
+    if (v->immune_mds == 0U)        { wc->immune_mds = 0; }
+    if (v->immune_taa == 0U)        { wc->immune_taa = 0; }
+    if (v->immune_ssb == 0U)        { wc->immune_ssb = 0; }
+    if (v->immune_pbrsb == 0U)      { wc->immune_pbrsb = 0; }
+    if (v->immune_gds == 0U)        { wc->immune_gds = 0; }
+    if (v->immune_rfds == 0U)       { wc->immune_rfds = 0; }
+    if (v->immune_bhi == 0U)        { wc->immune_bhi = 0; }
+    if (v->immune_mmio_stale == 0U) { wc->immune_mmio_stale = 0; }
+    if (v->immune_srso == 0U)       { wc->immune_srso = 0; }
+    if (v->immune_retbleed == 0U)   { wc->immune_retbleed = 0; }
+
+    /* AND-merge arch_capabilities across all CPUs: only trust
+       capabilities present on every CPU */
+    wc->arch_capabilities_lo &= v->arch_capabilities_lo;
+    wc->arch_capabilities_hi &= v->arch_capabilities_hi;
+}
+
+/* ================================================================
  * Global mitigation computation (worst-case across all CPUs)
  * ================================================================ */
 
@@ -604,37 +677,7 @@ int fbvbs_cpu_compute_global_mitigations(
         loop variant cpu_count - i;
     */
     for (i = 1; i < cpu_count; i++) {
-        const struct fbvbs_vuln_profile *v = &profiles[i].vuln;
-
-        /* Worst case: if ANY CPU is vulnerable, require mitigation */
-        if (v->need_l1d_flush != 0U)         { wc->need_l1d_flush = 1; }
-        if (v->need_verw != 0U)              { wc->need_verw = 1; }
-        if (v->need_rsb_fill != 0U)          { wc->need_rsb_fill = 1; }
-        if (v->need_pbrsb_sequence != 0U)    { wc->need_pbrsb_sequence = 1; }
-        if (v->need_bhb_clear != 0U)         { wc->need_bhb_clear = 1; }
-        if (v->need_tsx_disable != 0U)       { wc->need_tsx_disable = 1; }
-        if (v->need_srso_mitigation != 0U)   { wc->need_srso_mitigation = 1; }
-        if (v->need_retbleed_mitigation != 0U) { wc->need_retbleed_mitigation = 1; }
-        if (v->need_lfence_serialize != 0U)  { wc->need_lfence_serialize = 1; }
-
-        /* Immunity: only immune if ALL CPUs are immune (AND merge) */
-        if (v->immune_meltdown == 0U)   { wc->immune_meltdown = 0; }
-        if (v->immune_l1tf == 0U)       { wc->immune_l1tf = 0; }
-        if (v->immune_mds == 0U)        { wc->immune_mds = 0; }
-        if (v->immune_taa == 0U)        { wc->immune_taa = 0; }
-        if (v->immune_ssb == 0U)        { wc->immune_ssb = 0; }
-        if (v->immune_pbrsb == 0U)      { wc->immune_pbrsb = 0; }
-        if (v->immune_gds == 0U)        { wc->immune_gds = 0; }
-        if (v->immune_rfds == 0U)       { wc->immune_rfds = 0; }
-        if (v->immune_bhi == 0U)        { wc->immune_bhi = 0; }
-        if (v->immune_mmio_stale == 0U) { wc->immune_mmio_stale = 0; }
-        if (v->immune_srso == 0U)       { wc->immune_srso = 0; }
-        if (v->immune_retbleed == 0U)   { wc->immune_retbleed = 0; }
-
-        /* AND-merge arch_capabilities across all CPUs: only trust
-           capabilities present on every CPU */
-        wc->arch_capabilities_lo &= v->arch_capabilities_lo;
-        wc->arch_capabilities_hi &= v->arch_capabilities_hi;
+        merge_worst_case_vuln(wc, &profiles[i].vuln);
 
         /* AND-merge feature flags across all CPUs */
         if (profiles[i].features.has_bhi_ctrl == 0U)   { all_have_bhi_ctrl = 0; }
@@ -809,31 +852,18 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
 }
 
 /* ================================================================
- * CPU profile consistency verification
+ * CPU profile consistency verification — split into focused helpers
+ * to reduce WP solver pressure on large sequential comparisons.
  * ================================================================ */
 
-/*@ requires \valid_read(profile_a);
-    requires \valid_read(profile_b);
-    requires profile_a->initialized == 1;
-    requires profile_b->initialized == 1;
+/*@ requires \valid_read(fa) && \valid_read(fb);
     assigns \nothing;
     ensures \result == 0 || \result == 1;
 */
-int fbvbs_cpu_verify_consistency(
-    const struct fbvbs_cpu_security_profile *profile_a,
-    const struct fbvbs_cpu_security_profile *profile_b)
+static int features_match_common(
+    const struct fbvbs_cpuid_features *fa,
+    const struct fbvbs_cpuid_features *fb)
 {
-    if (profile_a->vendor != profile_b->vendor) { return 0; }
-    if (profile_a->family != profile_b->family) { return 0; }
-    if (profile_a->model  != profile_b->model)  { return 0; }
-    if (profile_a->stepping != profile_b->stepping) { return 0; }
-    if (profile_a->microcode_version != profile_b->microcode_version) { return 0; }
-    if (profile_a->smt_enabled != profile_b->smt_enabled) { return 0; }
-
-    /* Feature flags must match for security-critical features */
-    const struct fbvbs_cpuid_features *fa = &profile_a->features;
-    const struct fbvbs_cpuid_features *fb = &profile_b->features;
-
     if (fa->has_smep         != fb->has_smep)         { return 0; }
     if (fa->has_smap         != fb->has_smap)         { return 0; }
     if (fa->has_cet_ss       != fb->has_cet_ss)       { return 0; }
@@ -851,6 +881,20 @@ int fbvbs_cpu_verify_consistency(
     if (fa->has_bhi_ctrl     != fb->has_bhi_ctrl)     { return 0; }
     if (fa->has_vmx          != fb->has_vmx)          { return 0; }
     if (fa->has_svm          != fb->has_svm)          { return 0; }
+    if (fa->has_pcid         != fb->has_pcid)         { return 0; }
+    if (fa->has_aesni        != fb->has_aesni)        { return 0; }
+    if (fa->has_nx           != fb->has_nx)           { return 0; }
+    return 1;
+}
+
+/*@ requires \valid_read(fa) && \valid_read(fb);
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int features_match_amd(
+    const struct fbvbs_cpuid_features *fa,
+    const struct fbvbs_cpuid_features *fb)
+{
     if (fa->has_npt          != fb->has_npt)          { return 0; }
     if (fa->has_gmet         != fb->has_gmet)         { return 0; }
     if (fa->has_avic         != fb->has_avic)         { return 0; }
@@ -870,26 +914,55 @@ int fbvbs_cpu_verify_consistency(
     if (fa->has_sev_es       != fb->has_sev_es)       { return 0; }
     if (fa->has_sev_snp      != fb->has_sev_snp)      { return 0; }
     if (fa->has_sme          != fb->has_sme)          { return 0; }
-    if (fa->has_pcid         != fb->has_pcid)         { return 0; }
-    if (fa->has_aesni        != fb->has_aesni)        { return 0; }
-    if (fa->has_nx           != fb->has_nx)           { return 0; }
+    return 1;
+}
 
-    /* Vulnerability profiles must match — all 12 immunity flags */
-    const struct fbvbs_vuln_profile *a = &profile_a->vuln;
-    const struct fbvbs_vuln_profile *b = &profile_b->vuln;
+/*@ requires \valid_read(a) && \valid_read(b);
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int vuln_profiles_match(
+    const struct fbvbs_vuln_profile *a,
+    const struct fbvbs_vuln_profile *b)
+{
+    if (a->immune_meltdown   != b->immune_meltdown)   { return 0; }
+    if (a->immune_l1tf       != b->immune_l1tf)       { return 0; }
+    if (a->immune_mds        != b->immune_mds)        { return 0; }
+    if (a->immune_taa        != b->immune_taa)        { return 0; }
+    if (a->immune_ssb        != b->immune_ssb)        { return 0; }
+    if (a->immune_pbrsb      != b->immune_pbrsb)      { return 0; }
+    if (a->immune_gds        != b->immune_gds)        { return 0; }
+    if (a->immune_rfds       != b->immune_rfds)       { return 0; }
+    if (a->immune_bhi        != b->immune_bhi)        { return 0; }
+    if (a->immune_mmio_stale != b->immune_mmio_stale) { return 0; }
+    if (a->immune_srso       != b->immune_srso)       { return 0; }
+    if (a->immune_retbleed   != b->immune_retbleed)   { return 0; }
+    return 1;
+}
 
-    if (a->immune_meltdown != b->immune_meltdown ||
-        a->immune_l1tf != b->immune_l1tf ||
-        a->immune_mds != b->immune_mds ||
-        a->immune_taa != b->immune_taa ||
-        a->immune_ssb != b->immune_ssb ||
-        a->immune_pbrsb != b->immune_pbrsb ||
-        a->immune_gds != b->immune_gds ||
-        a->immune_rfds != b->immune_rfds ||
-        a->immune_bhi != b->immune_bhi ||
-        a->immune_mmio_stale != b->immune_mmio_stale ||
-        a->immune_srso != b->immune_srso ||
-        a->immune_retbleed != b->immune_retbleed) {
+/*@ requires \valid_read(profile_a);
+    requires \valid_read(profile_b);
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+int fbvbs_cpu_verify_consistency(
+    const struct fbvbs_cpu_security_profile *profile_a,
+    const struct fbvbs_cpu_security_profile *profile_b)
+{
+    if (profile_a->vendor != profile_b->vendor) { return 0; }
+    if (profile_a->family != profile_b->family) { return 0; }
+    if (profile_a->model  != profile_b->model)  { return 0; }
+    if (profile_a->stepping != profile_b->stepping) { return 0; }
+    if (profile_a->microcode_version != profile_b->microcode_version) { return 0; }
+    if (profile_a->smt_enabled != profile_b->smt_enabled) { return 0; }
+
+    if (features_match_common(&profile_a->features, &profile_b->features) == 0) {
+        return 0;
+    }
+    if (features_match_amd(&profile_a->features, &profile_b->features) == 0) {
+        return 0;
+    }
+    if (vuln_profiles_match(&profile_a->vuln, &profile_b->vuln) == 0) {
         return 0;
     }
 

@@ -428,8 +428,6 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state);
 
 /*@ requires \valid_read(profile_a);
     requires \valid_read(profile_b);
-    requires profile_a->initialized == 1;
-    requires profile_b->initialized == 1;
     assigns \nothing;
     ensures \result == 0 || \result == 1;
 */

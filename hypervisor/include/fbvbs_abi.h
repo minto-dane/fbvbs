@@ -933,6 +933,17 @@ struct fbvbs_device_catalog_entry {
     uint16_t segment;
     uint8_t bus;
     uint8_t slot_function;
+    /* Device qualification flags (REQ-0352, REQ-0904) */
+    uint8_t has_acs;           /* ACS (Access Control Services) capability present */
+    uint8_t has_flr;           /* FLR (Function Level Reset) support */
+    uint8_t has_msix;          /* MSI-X capability present */
+    uint8_t qualified;         /* Device passes qualification matrix */
+    uint16_t vendor_id;
+    uint16_t device_id_pci;    /* PCI device ID (distinct from FBVBS device_id) */
+    uint16_t acs_cap;          /* ACS capability register value */
+    uint16_t acs_ctrl;         /* ACS control register value */
+    uint16_t msix_table_size;  /* MSI-X table size (0 if no MSI-X) */
+    uint16_t reserved_qual0;
 };
 
 struct fbvbs_diag_device_list_response {

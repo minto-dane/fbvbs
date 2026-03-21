@@ -243,6 +243,23 @@ struct fbvbs_memory_map_entry {
     uint32_t reserved;
 };
 
+/* KCI page binding: tracks which GPA ranges have been hash-verified
+   against a measured artifact, authorizing execute permission grant.
+   Bindings are invalidated when the underlying mapping changes. */
+#ifndef FBVBS_MAX_KCI_PAGE_BINDINGS
+#define FBVBS_MAX_KCI_PAGE_BINDINGS 64
+#endif
+
+struct fbvbs_kci_page_binding {
+    uint32_t active;
+    uint32_t reserved0;
+    uint64_t module_object_id;
+    uint64_t guest_physical_address;
+    uint64_t size;
+    uint64_t file_offset;
+    uint64_t measurement_epoch;
+};
+
 struct fbvbs_hypervisor_state {
     uint64_t next_partition_id;
     uint64_t next_measurement_digest_id;
@@ -281,6 +298,8 @@ struct fbvbs_hypervisor_state {
     uint64_t pinned_cr0_value;
     uint64_t pinned_cr4_mask;
     uint64_t pinned_cr4_value;
+    struct fbvbs_kci_page_binding kci_bindings[FBVBS_MAX_KCI_PAGE_BINDINGS];
+    uint32_t kci_binding_count;
     uint32_t intercepted_msrs[FBVBS_MAX_INTERCEPTED_MSRS];
     uint32_t intercepted_msr_count;
     struct fbvbs_artifact_catalog artifact_catalog;
@@ -364,6 +383,10 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
 
 uint32_t fbvbs_crc32c(const uint8_t *data, size_t length);
 int fbvbs_log_init(struct fbvbs_hypervisor_state *state);
+/*@ assigns state->mirror_log, state->log_lock;
+    ensures \result == OK || \result == INVALID_PARAMETER ||
+            \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
+*/
 int fbvbs_log_append(
     struct fbvbs_hypervisor_state *state,
     uint32_t cpu_id,
@@ -385,10 +408,21 @@ int fbvbs_configure_host_callsite_table(
     const uint64_t *allowed_offsets,
     uint32_t count
 );
+/*@ requires \valid_read(state) || state == \null;
+    assigns \nothing;
+*/
 uint64_t fbvbs_primary_host_callsite(
     const struct fbvbs_hypervisor_state *state,
     uint8_t caller_class
 );
+/*@ requires \valid_read(state) || state == \null;
+    assigns \nothing;
+    ensures \result == \null || \valid_read(\result);
+    ensures \result != \null ==>
+            \result->active &&
+            \result->component_type == component_type &&
+            \result->object_id == object_id;
+*/
 const struct fbvbs_manifest_profile *fbvbs_find_manifest_profile_for_object(
     const struct fbvbs_hypervisor_state *state,
     uint8_t component_type,
@@ -406,6 +440,16 @@ int fbvbs_ingest_boot_catalog(
     uint32_t profile_count
 );
 
+/*@ requires \valid(state) || state == \null;
+    requires \valid(partition) || partition == \null;
+    requires \valid(response) || response == \null;
+    requires state != \null && partition != \null && response != \null ==>
+             \separated(response, partition);
+    assigns *state, *partition, *response;
+    ensures \result == OK || \result == INVALID_PARAMETER ||
+            \result == INVALID_STATE || \result == NOT_SUPPORTED_ON_PLATFORM ||
+            \result == NOT_FOUND;
+*/
 int fbvbs_vmx_run_vcpu(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition,
@@ -546,6 +590,15 @@ int fbvbs_kci_verify_module(
 int fbvbs_kci_set_wx(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_set_wx_request *request
+);
+/*@ requires \valid(state);
+    assigns state->kci_bindings[0 .. FBVBS_MAX_KCI_PAGE_BINDINGS - 1],
+            state->kci_binding_count;
+*/
+void fbvbs_kci_invalidate_bindings_for_gpa(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t guest_physical_address,
+    uint64_t size
 );
 int fbvbs_kci_pin_cr(
     struct fbvbs_hypervisor_state *state,

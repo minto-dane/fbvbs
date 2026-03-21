@@ -2138,6 +2138,10 @@ int fbvbs_memory_unmap(
         return INTERNAL_CORRUPTION;
     }
 
+    /* Invalidate any KCI page bindings covering the unmapped range */
+    fbvbs_kci_invalidate_bindings_for_gpa(
+        state, mapping->guest_physical_address, mapping->size);
+
     partition->mapped_bytes -= mapping->size;
     object->map_count -= 1U;
     *mapping = (struct fbvbs_memory_mapping){0};
@@ -2217,6 +2221,12 @@ int fbvbs_memory_set_permission(
         }
     }
 
+    /* Invalidate any KCI page bindings if write permission is being granted
+       (defense-in-depth: writable pages invalidate prior hash verification) */
+    if ((request->permissions & FBVBS_MEMORY_PERMISSION_WRITE) != 0U) {
+        fbvbs_kci_invalidate_bindings_for_gpa(
+            state, request->guest_physical_address, request->size);
+    }
     mapping->permissions = (uint16_t)request->permissions;
     return OK;
 }
@@ -2587,10 +2597,48 @@ int fbvbs_vm_assign_device(
         );
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+
+    /* Device qualification check (REQ-0352, REQ-0904):
+     * Reject devices that lack required isolation capabilities.
+     * A device must:
+     *   1. Pass the qualification matrix (qualified == 1)
+     *   2. Have FLR support (for clean reset on reassign/revoke)
+     *   3. Have ACS support (to prevent peer-to-peer DMA bypass)
+     * Without these guarantees, device passthrough is unsafe. */
+    {
+        uint32_t d_idx;
+        const struct fbvbs_device_catalog_entry *dev = NULL;
+
+        /*@ loop invariant 0 <= d_idx <= state->device_catalog.count;
+            loop assigns d_idx, dev;
+            loop variant state->device_catalog.count - d_idx;
+        */
+        for (d_idx = 0U; d_idx < state->device_catalog.count; ++d_idx) {
+            if (state->device_catalog.entries[d_idx].device_id == request->device_id) {
+                dev = &state->device_catalog.entries[d_idx];
+                break;
+            }
+        }
+        if (dev == NULL) {
+            return NOT_FOUND;
+        }
+        if (!dev->qualified) {
+            return NOT_SUPPORTED_ON_PLATFORM;
+        }
+        if (!dev->has_flr) {
+            return NOT_SUPPORTED_ON_PLATFORM;
+        }
+        if (!dev->has_acs) {
+            return NOT_SUPPORTED_ON_PLATFORM;
+        }
+    }
+
     (void)partition;
 
-    /* Fail closed until the retained C model has an authoritative device
-     * qualification path for ACS, interrupt remapping, and reset/FLR. */
+    /* Fail closed until the retained C model has an authoritative IOMMU
+     * domain creation, DMA remapping, and interrupt remapping path.
+     * The device qualification above is necessary but not sufficient:
+     * actual IOMMU domain setup is required before assignment. */
     return NOT_SUPPORTED_ON_PLATFORM;
 }
 
