@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "fbvbs_abi.h"
+#include "fbvbs_concurrency.h"
 #include "fbvbs_cpu_security.h"
 #include "fbvbs_leaf_vmx.h"
 
@@ -78,6 +79,13 @@ struct fbvbs_partition {
     struct fbvbs_aligned_command_page command_pages[FBVBS_MAX_VCPUS];
     struct fbvbs_vcpu vcpus[FBVBS_MAX_VCPUS];
     struct fbvbs_memory_mapping mappings[FBVBS_MAX_MEMORY_MAPPINGS];
+
+    /* Watchdog / liveness monitoring (Phase 1-9).
+     * Tracks consecutive preemption timer VM exits per partition.
+     * When consecutive_timer_exits exceeds FBVBS_WATCHDOG_MAX_CONSECUTIVE,
+     * the partition is faulted (fail-safe halt). */
+    uint32_t consecutive_timer_exits;
+    uint32_t watchdog_faults_total;
 };
 
 struct fbvbs_log_storage {
@@ -315,6 +323,15 @@ struct fbvbs_hypervisor_state {
     uint32_t boot_sub_partition;
     volatile uint32_t log_lock;  /* Spinlock for log operations */
 
+    /* Log rate limiter (Phase 0A-5): per-event-class counters.
+     * Indexed by event_code >> 4 (upper nibble), giving 16 classes.
+     * When a class exceeds FBVBS_RATE_LIMIT_THRESHOLD in one window,
+     * subsequent events are dropped and a summary record is emitted.
+     * High-severity events (CRITICAL/ALERT) are exempt from limiting. */
+    uint32_t log_rate_counts[FBVBS_RATE_LIMIT_CLASSES];
+    uint32_t log_rate_dropped[FBVBS_RATE_LIMIT_CLASSES];
+    uint64_t log_rate_window_sequence;  /* sequence at window start */
+
     /* CPU security subsystem (Section 21): per-CPU detection, vulnerability
      * profiling, and VM exit/entry mitigation state.  Initialized once at
      * boot by fbvbs_hypervisor_init, then immutable except for spec_ctrl. */
@@ -388,6 +405,29 @@ int fbvbs_log_init(struct fbvbs_hypervisor_state *state);
             \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
 */
 int fbvbs_log_append(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t cpu_id,
+    uint32_t source_component,
+    uint16_t severity,
+    uint16_t event_code,
+    const uint8_t *payload,
+    uint32_t payload_length
+);
+/* Rate-limited log append: drops events exceeding per-class threshold,
+ * emits RATE_LIMIT_SUMMARY on window rotation. CRITICAL/ALERT exempt. */
+/*@ requires \valid(state) || state == \null;
+    requires payload_length != 0 && payload != \null ==>
+             \valid_read(payload + (0 .. payload_length - 1));
+    requires payload_length != 0 && payload != \null && state != \null ==>
+             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
+    assigns state->mirror_log, state->log_lock,
+            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_window_sequence;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
+                      \result == RESOURCE_EXHAUSTED;
+*/
+int fbvbs_log_append_rate_limited(
     struct fbvbs_hypervisor_state *state,
     uint32_t cpu_id,
     uint32_t source_component,
@@ -743,7 +783,6 @@ int fbvbs_dispatch_hypercall(
 struct fbvbs_vmcs_config;
 
 /*@ requires \valid_read(config);
-    assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config);
@@ -753,5 +792,364 @@ int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config);
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state);
+
+/* ---- VMX Security Controls (vmx_controls.c) ---- */
+
+struct fbvbs_vmx_security_controls {
+    uint32_t pin_controls_or;
+    uint32_t primary_proc_or;
+    uint32_t secondary_proc_or;
+    uint64_t tertiary_proc_or;
+    uint32_t entry_controls_or;
+    uint32_t exit_controls_or;
+    uint32_t preemption_timer_value;
+    uint32_t notify_window;
+    uint64_t host_s_cet;
+    uint64_t host_ssp;
+    uint64_t guest_s_cet;
+    uint32_t msr_bitmap_valid;
+    uint32_t reserved0;
+};
+
+/*@ requires \valid(controls);
+    requires \valid_read(caps);
+    assigns *controls;
+    ensures \result == 0;
+*/
+int fbvbs_vmx_build_security_controls(
+    struct fbvbs_vmx_security_controls *controls,
+    const struct fbvbs_vmx_capabilities *caps);
+
+/* ---- HLAT (Hypervisor-managed Linear Address Translation) ---- */
+
+/*@ requires \valid(state);
+    requires (kernel_text_base & 4095) == 0;
+    requires kernel_text_size > 0;
+    requires (kernel_text_size & 4095) == 0;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_hlat_init_for_partition(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t kernel_text_base,
+    uint64_t kernel_text_size);
+
+/*@ requires \valid(state);
+    requires (module_base & 4095) == 0;
+    requires module_size > 0;
+    requires (module_size & 4095) == 0;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_hlat_add_kld_module(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t module_object_id,
+    uint64_t module_base,
+    uint64_t module_size);
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_hlat_remove_kld_module(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t module_object_id);
+
+/*@ requires \valid(state);
+    assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_hlat_handle_fault(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t faulting_linear_address);
+
+void fbvbs_hlat_cleanup_partition(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id);
+
+/* ---- Intel MBEC (Mode-Based Execute Control, hlat.c) ---- */
+
+/*@ requires \valid(controls_or);
+    requires \valid_read(caps);
+    assigns *controls_or;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_mbec_build_config(
+    uint32_t *controls_or,
+    const struct fbvbs_vmx_capabilities *caps);
+
+/* ---- AMD NPT Translation Integrity (amd_npt.c) ---- */
+
+/*@ requires \valid(state);
+    requires (kernel_text_base & 4095) == 0;
+    requires kernel_text_size > 0;
+    requires (kernel_text_size & 4095) == 0;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_npt_init_for_partition(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t kernel_text_base,
+    uint64_t kernel_text_size);
+
+/*@ requires \valid(state);
+    requires (module_base & 4095) == 0;
+    requires module_size > 0;
+    requires (module_size & 4095) == 0;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_npt_add_kld_module(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t module_object_id,
+    uint64_t module_base,
+    uint64_t module_size);
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_npt_remove_kld_module(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t module_object_id);
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_npt_handle_fault_exit(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t faulting_gpa,
+    uint64_t error_code);
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_npt_handle_invlpg_exit(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t linear_addr);
+
+void fbvbs_npt_cleanup_partition(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id);
+
+/* ---- EPT (Extended Page Tables, memory.c) ---- */
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_ept_create_root(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id);
+
+/*@ requires \valid(state);
+    requires (gpa & 4095) == 0;
+    requires size > 0;
+    requires (size & 4095) == 0;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_ept_map_region(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t gpa,
+    uint64_t size,
+    uint16_t permissions);
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_ept_unmap_region(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t gpa,
+    uint64_t size);
+
+void fbvbs_ept_cleanup_partition(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id);
+
+uint64_t fbvbs_ept_get_root(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id);
+
+/* ---- AMD GMET (Guest Mode Execute Trap, amd_npt.c) ---- */
+
+/*@ requires \valid(npt_control_or);
+    assigns *npt_control_or;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_gmet_build_config(uint64_t *npt_control_or);
+
+/* Phase 1-8: RDRAND/RDSEED entropy */
+int fbvbs_cpu_has_rdrand(void);
+int fbvbs_cpu_has_rdseed(void);
+int fbvbs_rdrand64(uint64_t *out);
+int fbvbs_rdseed64(uint64_t *out);
+int fbvbs_entropy_seed_boot_ids(struct fbvbs_hypervisor_state *state);
+
+/* Phase 1-1: IDT + exception handler (idt.c) */
+int fbvbs_idt_init(void);
+void fbvbs_handle_de(const void *frame);
+void fbvbs_handle_db(const void *frame);
+void fbvbs_handle_nmi(const void *frame);
+void fbvbs_handle_bp(const void *frame);
+void fbvbs_handle_ud(const void *frame);
+void fbvbs_handle_df(const void *frame, uint64_t error_code);
+void fbvbs_handle_gp(const void *frame, uint64_t error_code);
+void fbvbs_handle_pf(const void *frame, uint64_t error_code);
+void fbvbs_handle_mc(const void *frame);
+uint64_t fbvbs_ist_stack_top_nmi(void);
+uint64_t fbvbs_ist_stack_top_df(void);
+uint64_t fbvbs_ist_stack_top_mc(void);
+
+/* Phase 1-7: xAPIC/x2APIC virtualization (apic.c) */
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1 || \result == 2;
+*/
+int fbvbs_apic_detect_mode(void);
+int fbvbs_apic_get_mode(void);
+
+struct fbvbs_apic_virt_config {
+    uint32_t secondary_proc_or;
+    uint32_t pin_controls_or;
+    uint32_t apic_mode;
+    uint32_t reserved0;
+    uint64_t apic_access_page;
+};
+
+/*@ requires \valid(config);
+    requires \valid_read(caps);
+    assigns *config;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_apic_build_virt_config(
+    struct fbvbs_apic_virt_config *config,
+    const struct fbvbs_vmx_capabilities *caps);
+
+int fbvbs_apic_init_partition(uint32_t apic_id);
+int fbvbs_apic_handle_vm_exit_eoi(void);
+int fbvbs_apic_inject_vector(uint32_t vector);
+int fbvbs_apic_timer_tick(void);
+
+/* Phase 1-9: Watchdog / liveness monitor */
+/*@ requires \valid(state);
+    requires partition_idx < FBVBS_MAX_PARTITIONS;
+    assigns state->partitions[partition_idx].consecutive_timer_exits,
+            state->partitions[partition_idx].watchdog_faults_total,
+            state->partitions[partition_idx].state,
+            state->partitions[partition_idx].last_fault_code,
+            state->partitions[partition_idx].last_fault_source_component,
+            state->partitions[partition_idx].last_fault_detail0,
+            state->partitions[partition_idx].last_fault_detail1,
+            state->mirror_log, state->log_lock;
+    ensures \result == 0 || \result == 1;
+*/
+int fbvbs_watchdog_on_timer_exit(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t partition_idx);
+
+/*@ requires \valid(state);
+    requires partition_idx < FBVBS_MAX_PARTITIONS;
+    assigns state->partitions[partition_idx].consecutive_timer_exits;
+*/
+void fbvbs_watchdog_on_voluntary_exit(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t partition_idx);
+
+/* Phase 0C: Physical page frame allocator */
+int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
+                          uint32_t map_count);
+int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size);
+uint64_t fbvbs_page_alloc(void);
+int fbvbs_page_free(uint64_t phys_addr);
+uint32_t fbvbs_page_alloc_free_count(void);
+uint32_t fbvbs_page_alloc_total_pages(void);
+
+/* Phase 1-11: State structure size guards.
+ * Hypervisor state must fit in a known region.  If struct grows beyond
+ * 2 MiB something is wrong (accidental array size explosion, etc.).
+ * The actual layout has guard pages around it (Phase 1-11 runtime). */
+#define FBVBS_MAX_HV_STATE_SIZE (2U * 1024U * 1024U)
+_Static_assert(sizeof(struct fbvbs_hypervisor_state) < FBVBS_MAX_HV_STATE_SIZE,
+               "fbvbs_hypervisor_state exceeds 2 MiB — review array sizing");
+
+/* Partition struct size guard — each partition should not exceed 64 KiB */
+_Static_assert(sizeof(struct fbvbs_partition) < 65536U,
+               "fbvbs_partition exceeds 64 KiB — review sub-struct sizing");
+
+/* Log storage must fit exactly SLOT_COUNT records plus header */
+_Static_assert(sizeof(struct fbvbs_log_storage) ==
+               sizeof(struct fbvbs_log_ring_header_v1) +
+               FBVBS_LOG_SLOT_COUNT * sizeof(struct fbvbs_log_record_v1),
+               "log storage size mismatch");
+
+/* Memory object size guard */
+_Static_assert(sizeof(struct fbvbs_memory_object) <= 256U,
+               "fbvbs_memory_object exceeds 256 bytes");
+
+/* IOMMU domain size guard */
+_Static_assert(sizeof(struct fbvbs_iommu_domain) <= 64U,
+               "fbvbs_iommu_domain exceeds 64 bytes");
+
+/* CPU security profile size guard (includes features + vuln + CR pins + boot) */
+_Static_assert(sizeof(struct fbvbs_cpu_security_profile) <= 512U,
+               "fbvbs_cpu_security_profile exceeds 512 bytes");
+
+/* VMX capabilities size guard (ABI stability) */
+_Static_assert(sizeof(struct fbvbs_vmx_capabilities) == 32U,
+               "fbvbs_vmx_capabilities ABI drift — update all consumers");
+
+/* Shared registration size guard */
+_Static_assert(sizeof(struct fbvbs_shared_registration) <= 64U,
+               "fbvbs_shared_registration exceeds 64 bytes");
+
+/* Command page must be exactly one page (4 KiB) */
+_Static_assert(sizeof(struct fbvbs_aligned_command_page) == FBVBS_PAGE_SIZE,
+               "aligned_command_page must be exactly one page");
+
+/* Phase 1-11: Memory Layout Documentation.
+ *
+ * The hypervisor's global state (g_fbvbs_hypervisor) is placed in BSS.
+ * At runtime, the memory layout should be:
+ *
+ *   [Guard page — 4 KiB, unmapped/not-present in EPT]
+ *   [g_fbvbs_hypervisor — sizeof(fbvbs_hypervisor_state)]
+ *   [Guard page — 4 KiB, unmapped/not-present in EPT]
+ *   [Hypervisor stack — 16-64 KiB, depending on boot path]
+ *   [Guard page — 4 KiB, unmapped/not-present in EPT]
+ *   [IST stacks — 3 x 4 KiB for NMI, DF, MC]
+ *   [Guard pages — between each IST stack]
+ *
+ * Guard pages prevent stack overflow and state corruption from
+ * overwriting adjacent regions. The linker script must place
+ * FBVBS_GUARD_PAGE_SIZE gaps around each critical region.
+ *
+ * PRODUCTION NOTE: The linker script (fbvbs.lds) must define:
+ *   __guard_before_state, __guard_after_state,
+ *   __guard_before_stack, __guard_after_stack
+ * and the early_init code must mark these as not-present in the
+ * hypervisor's own page tables. */
+#define FBVBS_GUARD_PAGE_SIZE 4096U
+
+/* ---- Phase 8: Multi-Processor Initialization (mp_init.c) ---- */
+
+/*@ requires \valid(state);
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_mp_init(struct fbvbs_hypervisor_state *state);
+
+uint32_t fbvbs_mp_cpu_count(void);
+uint32_t fbvbs_mp_online_count(void);
+uint32_t fbvbs_mp_numa_domain_count(void);
+int fbvbs_mp_get_cpu_info(
+    uint32_t cpu_index,
+    uint32_t *apic_id_out,
+    uint32_t *state_out,
+    uint32_t *numa_domain_out);
+int fbvbs_mp_tlb_shootdown(uint64_t partition_id,
+                            uint64_t address, uint64_t size);
+void fbvbs_mp_tlb_shootdown_handler(void);
 
 #endif

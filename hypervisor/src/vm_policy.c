@@ -29,15 +29,20 @@ static void fbvbs_vmx_external_interrupt_exit(
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
-/*@ requires \valid(vcpu);
+/*@ requires \valid(state);
+    requires \valid(vcpu);
     requires \valid(response);
     requires \valid_read(leaf_exit);
     requires \separated(vcpu, response, leaf_exit);
-    assigns *vcpu, *response;
+    assigns *vcpu, *response, state->mirror_log, state->log_lock,
+            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_window_sequence;
     ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
     ensures response->exit_reason == FBVBS_VM_EXIT_REASON_CR_ACCESS;
 */
 static void fbvbs_vmx_cr_access_exit(
+    struct fbvbs_hypervisor_state *state,
     struct fbvbs_vcpu *vcpu,
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
@@ -46,11 +51,46 @@ static void fbvbs_vmx_cr_access_exit(
         struct fbvbs_vm_exit_cr_access s;
         uint8_t bytes[sizeof(struct fbvbs_vm_exit_cr_access)];
     } payload;
+    uint64_t requested = leaf_exit->detail.cr_access.value;
+    uint32_t cr_num = leaf_exit->detail.cr_access.cr_number;
+
+    /* Enforce CR pinning: if the guest tried to clear a pinned bit
+     * or set a pinned-clear bit, force the correct value and log. */
+    if (cr_num == 0U && state->pinned_cr0_mask != 0U) {
+        uint64_t enforced = (requested & ~state->pinned_cr0_mask) |
+                            state->pinned_cr0_value;
+        if (enforced != requested) {
+            /* Security violation: guest tried to modify pinned CR0 bits.
+             * Use rate-limited logging to prevent malicious guest from
+             * flooding the audit log via rapid CR0 write loops. */
+            fbvbs_log_append_rate_limited(state, 0U,
+                             FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                             FBVBS_SEVERITY_WARNING,
+                             FBVBS_EVENT_CR_PIN_VIOLATION,
+                             (const uint8_t *)0, 0U);
+            vcpu->cr0 = enforced;
+        } else {
+            vcpu->cr0 = requested;
+        }
+    } else if (cr_num == 4U && state->pinned_cr4_mask != 0U) {
+        uint64_t enforced = (requested & ~state->pinned_cr4_mask) |
+                            state->pinned_cr4_value;
+        if (enforced != requested) {
+            fbvbs_log_append_rate_limited(state, 0U,
+                             FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                             FBVBS_SEVERITY_WARNING,
+                             FBVBS_EVENT_CR_PIN_VIOLATION,
+                             (const uint8_t *)0, 0U);
+            vcpu->cr4 = enforced;
+        } else {
+            vcpu->cr4 = requested;
+        }
+    }
 
     payload.s = (struct fbvbs_vm_exit_cr_access){0};
-    payload.s.cr_number = leaf_exit->detail.cr_access.cr_number;
+    payload.s.cr_number = cr_num;
     payload.s.access_type = leaf_exit->detail.cr_access.access_type;
-    payload.s.value = leaf_exit->detail.cr_access.value;
+    payload.s.value = requested;
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -214,6 +254,147 @@ static void fbvbs_vmx_ept_violation_exit(
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
+/* ================================================================
+ * Debug register access handler (REQ-0342)
+ *
+ * When MOV_DR_EXITING is set in primary proc controls, any guest
+ * MOV to/from DR0-DR7 causes a VM exit. We maintain per-vCPU
+ * shadow copies of DR0-DR3, DR6, DR7 and never expose the host's
+ * debug registers to the guest.
+ *
+ * DR4/DR5 alias DR6/DR7 when CR4.DE=0. With CR4.DE=1 (our pinned
+ * configuration), MOV DR4/DR5 cause #UD instead.
+ *
+ * Guest DR7 is managed via VMCS field (VMCS_GUEST_DR7). With
+ * MOV_DR_EXITING active, the guest never reads hardware DRs —
+ * all MOV DRx cause VM exit, and the handler returns shadow
+ * values from vcpu->drN. fbvbs_debug_save_guest resets DR7 to
+ * 0x400 (breakpoints disabled) after each VM exit.
+ * ================================================================ */
+
+/*@ requires \valid(state);
+    requires \valid(vcpu);
+    requires \valid(response);
+    requires \valid_read(leaf_exit);
+    requires \separated(vcpu, response, leaf_exit);
+
+    behavior invalid_access:
+      assumes leaf_exit->detail.dr_access.access_type > 1U;
+      assigns vcpu->state;
+      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
+
+    behavior write_dr:
+      assumes leaf_exit->detail.dr_access.access_type == 0U;
+      assigns vcpu->state, vcpu->dr0, vcpu->dr1, vcpu->dr2, vcpu->dr3,
+              vcpu->dr6, vcpu->dr7,
+              response->exit_reason, response->exit_length,
+              response->exit_payload[0 .. 15],
+              state->mirror_log, state->log_lock,
+              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_window_sequence;
+      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
+
+    behavior read_dr:
+      assumes leaf_exit->detail.dr_access.access_type == 1U;
+      assigns vcpu->state,
+              response->exit_reason, response->exit_length,
+              response->exit_payload[0 .. 15],
+              state->mirror_log, state->log_lock,
+              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_window_sequence;
+      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
+
+    complete behaviors;
+    disjoint behaviors;
+*/
+static void fbvbs_vmx_dr_access_exit(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_vcpu *vcpu,
+    struct fbvbs_vm_run_response *response,
+    const struct fbvbs_vmx_leaf_exit *leaf_exit
+) {
+    union {
+        struct fbvbs_vm_exit_dr_access s;
+        uint8_t bytes[sizeof(struct fbvbs_vm_exit_dr_access)];
+    } payload;
+    uint32_t dr_num = leaf_exit->detail.dr_access.dr_number;
+    uint32_t is_read = leaf_exit->detail.dr_access.access_type; /* 0=write, 1=read */
+    uint64_t value = leaf_exit->detail.dr_access.value;
+
+    /* Validate access_type is 0 (write) or 1 (read) */
+    if (is_read > 1U) {
+        /* Invalid access type from leaf — treat as no-op, log and return */
+        vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+        return;
+    }
+
+    /* Handle MOV to DR (guest write) — update shadow state */
+    if (is_read == 0U) {
+        switch (dr_num) {
+            case 0U: vcpu->dr0 = value; break;
+            case 1U: vcpu->dr1 = value; break;
+            case 2U: vcpu->dr2 = value; break;
+            case 3U: vcpu->dr3 = value; break;
+            case 4U: /* Fall through — DR4 aliases DR6 when CR4.DE=0 */
+            case 6U:
+                /* DR6: enforce reserved bits per Intel SDM Vol. 3, 17.2.3.
+                 * Bits [63:32] = 0. Bit 15 = 1 (no RTM). Bits [11:4] = 1.
+                 * Bits [31:16] = 1 (reserved). Guest-writable: bits [14:12]
+                 * (BD, BS, BT) and bits [3:0] (B0-B3). */
+                vcpu->dr6 = (value & 0x000000000000700FULL) | 0x00000000FFFF8FF0ULL;
+                break;
+            case 5U: /* Fall through — DR5 aliases DR7 when CR4.DE=0 */
+            case 7U:
+                /* DR7: enforce reserved bits per Intel SDM Vol. 3, 17.2.4.
+                 * Bits [63:32] = 0 (reserved). Bit 13 (GD) = 0 to prevent
+                 * recursive #DB. Bit 11 = 0 (reserved). Bit 10 = 1
+                 * (reserved, must be 1). Bits 9:8 = 0 (reserved).
+                 * Bits [31:16] = condition fields (R/W, LEN) — guest controlled.
+                 * Bits [7:0] = L0-L3,G0-G3 enables — guest controlled. */
+                vcpu->dr7 = (value & 0x00000000FFFF00FFULL) | 0x0000000000000400ULL;
+                break;
+            default:
+                /* DR4/DR5 with CR4.DE=1 cause #UD, should not reach VMX.
+                 * If somehow reached, ignore silently. */
+                break;
+        }
+    } else {
+        /* MOV from DR (guest read): return shadow values, NOT the leaf
+         * value, to prevent host debug register information leaks. */
+        switch (dr_num) {
+            case 0U: value = vcpu->dr0; break;
+            case 1U: value = vcpu->dr1; break;
+            case 2U: value = vcpu->dr2; break;
+            case 3U: value = vcpu->dr3; break;
+            case 4U: /* Fall through — DR4 aliases DR6 */
+            case 6U: value = vcpu->dr6; break;
+            case 5U: /* Fall through — DR5 aliases DR7 */
+            case 7U: value = vcpu->dr7; break;
+            default: value = 0U; break;
+        }
+    }
+
+    /* Log the DR access for audit trail. Rate-limited because a guest
+     * loop on MOV DR could generate millions of exits per second. */
+    fbvbs_log_append_rate_limited(state, 0U,
+                     FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                     FBVBS_SEVERITY_INFO,
+                     FBVBS_EVENT_DR_ACCESS_INTERCEPT,
+                     (const uint8_t *)0, 0U);
+
+    payload.s = (struct fbvbs_vm_exit_dr_access){0};
+    payload.s.dr_number = dr_num;
+    payload.s.access_type = (is_read != 0U) ? FBVBS_VM_CR_ACCESS_READ
+                                             : FBVBS_VM_CR_ACCESS_WRITE;
+    payload.s.value = value;
+    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
+    response->exit_length = (uint32_t)sizeof(payload.s);
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+}
+
 /*@ requires \valid(state) || state == \null;
     requires \valid(partition) || partition == \null;
     requires \valid(response) || response == \null;
@@ -301,7 +482,7 @@ int fbvbs_vmx_run_vcpu(
             fbvbs_vmx_external_interrupt_exit(vcpu, response, &leaf_exit);
             return OK;
         case FBVBS_VM_EXIT_REASON_CR_ACCESS:
-            fbvbs_vmx_cr_access_exit(vcpu, response, &leaf_exit);
+            fbvbs_vmx_cr_access_exit(state, vcpu, response, &leaf_exit);
             return OK;
         case FBVBS_VM_EXIT_REASON_PIO:
             fbvbs_vmx_pio_exit(vcpu, response, &leaf_exit);
@@ -311,6 +492,9 @@ int fbvbs_vmx_run_vcpu(
             return OK;
         case FBVBS_VM_EXIT_REASON_MSR_ACCESS:
             fbvbs_vmx_msr_access_exit(vcpu, response, &leaf_exit);
+            return OK;
+        case FBVBS_VM_EXIT_REASON_DR_ACCESS:
+            fbvbs_vmx_dr_access_exit(state, vcpu, response, &leaf_exit);
             return OK;
         case FBVBS_VM_EXIT_REASON_EPT_VIOLATION:
             fbvbs_vmx_ept_violation_exit(vcpu, response, &leaf_exit);

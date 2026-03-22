@@ -1,4 +1,5 @@
 #include "fbvbs_hypervisor.h"
+#include "fbvbs_asm.h"
 
 /* ================================================================
  * VMCS (Virtual Machine Control Structure) Setup for FreeBSD Host
@@ -201,6 +202,10 @@ struct fbvbs_vmcs_config {
     uint32_t entry_controls;
     uint32_t exception_bitmap;
 
+    /* VPID — unique per vCPU (REQ-0341), 0 is reserved */
+    uint16_t vpid;
+    uint16_t reserved_vpid;
+
     /* CR mask/shadow (for CR0/CR4 interception) */
     uint64_t cr0_guest_host_mask;
     uint64_t cr4_guest_host_mask;
@@ -266,6 +271,10 @@ struct fbvbs_vmcs_config {
 /*@ requires \valid(config);
     assigns *config;
 */
+/* Next VPID to allocate. VPID 0 is reserved (no VPID), start at 1.
+ * Each vCPU gets a unique VPID for TLB isolation (REQ-0341). */
+static uint16_t g_next_vpid = 1U;
+
 static void fbvbs_vmcs_build_host_config(
     struct fbvbs_vmcs_config *config,
     uint64_t pinned_cr0_mask,
@@ -275,6 +284,17 @@ static void fbvbs_vmcs_build_host_config(
     uint64_t ept_pml4_phys)
 {
     *config = (struct fbvbs_vmcs_config){0};
+
+    /* Allocate unique VPID (REQ-0341).
+     * VPID 0 is reserved (disables VPID tagging).
+     * Saturate at 0xFFFF — 65534 vCPUs is far beyond spec limit. */
+    if (g_next_vpid == 0U) {
+        g_next_vpid = 1U;  /* Recover from hypothetical wraparound */
+    }
+    config->vpid = g_next_vpid;
+    if (g_next_vpid < 0xFFFFU) {
+        g_next_vpid = (uint16_t)(g_next_vpid + 1U);
+    }
 
     /* ---- Pin-based VM execution controls ---- */
     config->pin_based_controls =
@@ -368,52 +388,133 @@ static void fbvbs_vmcs_build_host_config(
  *   - Return 0 on success, -1 on VMWRITE failure
  * ================================================================ */
 
+/* IA32_VMX_BASIC MSR — bits [30:0] contain the VMCS revision ID */
+#define MSR_IA32_VMX_BASIC 0x480U
+
+/* Track the allocated VMCS page physical address for cleanup */
+static uint64_t g_vmcs_page_phys;
+
 /*@ requires \valid_read(config);
-    assigns \nothing;
+    assigns g_vmcs_page_phys;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config)
 {
+    uint64_t vmcs_phys;
+    uint32_t vmcs_revision;
+#ifndef __FRAMAC__
+    volatile uint32_t *vmcs_virt;
+#endif
+
     if (config == NULL) {
         return -1;
     }
 
-    /* PRODUCTION NOTE: The actual implementation must:
-     *
-     * 1. Allocate a 4KB-aligned VMCS page, write revision ID
-     * 2. VMCLEAR the page
-     * 3. VMPTRLD the page
-     * 4. VMWRITE all fields from config:
-     *
-     *    VMWRITE(VMCS_PIN_BASED_CONTROLS, config->pin_based_controls);
-     *    VMWRITE(VMCS_PRIMARY_PROC_CONTROLS, config->primary_proc_controls);
-     *    VMWRITE(VMCS_SECONDARY_PROC_CONTROLS, config->secondary_proc_controls);
-     *    VMWRITE(VMCS_EXIT_CONTROLS, config->exit_controls);
-     *    VMWRITE(VMCS_ENTRY_CONTROLS, config->entry_controls);
-     *    VMWRITE(VMCS_EXCEPTION_BITMAP, config->exception_bitmap);
-     *    VMWRITE(VMCS_CR0_GUEST_HOST_MASK, config->cr0_guest_host_mask);
-     *    VMWRITE(VMCS_CR4_GUEST_HOST_MASK, config->cr4_guest_host_mask);
-     *    VMWRITE(VMCS_CR0_READ_SHADOW, config->cr0_read_shadow);
-     *    VMWRITE(VMCS_CR4_READ_SHADOW, config->cr4_read_shadow);
-     *    VMWRITE(VMCS_EPT_POINTER, config->ept_pointer);
-     *    VMWRITE(VMCS_HOST_CR0, config->host_cr0);
-     *    VMWRITE(VMCS_HOST_CR3, config->host_cr3);
-     *    VMWRITE(VMCS_HOST_CR4, config->host_cr4);
-     *    VMWRITE(VMCS_HOST_RSP, config->host_rsp);
-     *    VMWRITE(VMCS_HOST_RIP, config->host_rip);
-     *    ... (all host/guest segment selectors, bases, limits)
-     *    ... (guest CR0/CR3/CR4, RIP, RSP, RFLAGS, EFER)
-     *
-     * 5. Check each VMWRITE return (CF=1 → invalid VMCS field,
-     *    ZF=1 → invalid VMCS pointer)
-     *
-     * 6. Return 0 on success
-     *
-     * Requires assembly wrapper for VMWRITE instruction.
-     */
+    /* 1. Allocate a 4KB-aligned VMCS page (already zeroed by allocator) */
+    vmcs_phys = fbvbs_page_alloc();
+    if (vmcs_phys == 0U) {
+        return -1;  /* No physical memory available */
+    }
 
-    (void)config;
-    return -1;  /* Fail-closed until assembly support available */
+    /* 2. Write VMCS revision ID to first 31 bits of the page.
+     *    The revision ID is in IA32_VMX_BASIC[30:0]. */
+    vmcs_revision = (uint32_t)(fbvbs_asm_rdmsr(MSR_IA32_VMX_BASIC) & 0x7FFFFFFFU);
+
+#ifndef __FRAMAC__
+    /* Identity-mapped: physical address == virtual address */
+    vmcs_virt = (volatile uint32_t *)(uintptr_t)vmcs_phys;
+    *vmcs_virt = vmcs_revision;
+#endif
+
+    /* 3. VMCLEAR the page */
+    if (fbvbs_asm_vmclear(vmcs_phys) != 0) {
+        (void)fbvbs_page_free(vmcs_phys);
+        return -1;
+    }
+
+    /* 4. VMPTRLD to make it the active VMCS */
+    if (fbvbs_asm_vmptrld(vmcs_phys) != 0) {
+        (void)fbvbs_page_free(vmcs_phys);
+        return -1;
+    }
+
+    g_vmcs_page_phys = vmcs_phys;
+
+    /* 5. VMWRITE all control fields.
+     *    Any VMWRITE failure → abort (fail-closed). */
+
+    /* Control fields */
+    if (fbvbs_asm_vmwrite(VMCS_VPID, config->vpid) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_PIN_BASED_CONTROLS, config->pin_based_controls) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_PRIMARY_PROC_CONTROLS, config->primary_proc_controls) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_SECONDARY_PROC_CONTROLS, config->secondary_proc_controls) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_EXIT_CONTROLS, config->exit_controls) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_ENTRY_CONTROLS, config->entry_controls) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_EXCEPTION_BITMAP, config->exception_bitmap) != 0) { return -1; }
+
+    /* CR mask/shadow */
+    if (fbvbs_asm_vmwrite(VMCS_CR0_GUEST_HOST_MASK, config->cr0_guest_host_mask) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_CR4_GUEST_HOST_MASK, config->cr4_guest_host_mask) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_CR0_READ_SHADOW, config->cr0_read_shadow) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_CR4_READ_SHADOW, config->cr4_read_shadow) != 0) { return -1; }
+
+    /* EPT pointer */
+    if (fbvbs_asm_vmwrite(VMCS_EPT_POINTER, config->ept_pointer) != 0) { return -1; }
+
+    /* Host state */
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR0, config->host_cr0) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR3, config->host_cr3) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR4, config->host_cr4) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_RSP, config->host_rsp) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_RIP, config->host_rip) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_IA32_EFER, config->host_efer) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_GDTR_BASE, config->host_gdtr_base) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_IDTR_BASE, config->host_idtr_base) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_BASE, config->host_tr_base) != 0) { return -1; }
+
+    /* Host segment selectors */
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CS_SELECTOR, config->host_cs) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_SS_SELECTOR, config->host_ss) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_DS_SELECTOR, config->host_ds) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_ES_SELECTOR, config->host_es) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_FS_SELECTOR, config->host_fs) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_GS_SELECTOR, config->host_gs) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_SELECTOR, config->host_tr) != 0) { return -1; }
+
+    /* Guest state */
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR0, config->guest_cr0) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR3, config->guest_cr3) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR4, config->guest_cr4) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RSP, config->guest_rsp) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RIP, config->guest_rip) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RFLAGS, config->guest_rflags) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IA32_EFER, config->guest_efer) != 0) { return -1; }
+
+    /* Guest segment selectors */
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CS_SELECTOR, config->guest_cs) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_SS_SELECTOR, config->guest_ss) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_DS_SELECTOR, config->guest_ds) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_ES_SELECTOR, config->guest_es) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_TR_SELECTOR, config->guest_tr) != 0) { return -1; }
+
+    /* Guest descriptor table bases/limits */
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_BASE, config->guest_gdtr_base) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_LIMIT, config->guest_gdtr_limit) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_BASE, config->guest_idtr_base) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_LIMIT, config->guest_idtr_limit) != 0) { return -1; }
+
+    /* Guest activity and interruptibility (normal execution, no blocking) */
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0U) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_INTERRUPTIBILITY, 0U) != 0) { return -1; }
+
+    /* Guest DR7 (debug registers — default value) */
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_DR7, 0x400ULL) != 0) { return -1; }
+
+    /* VMCS link pointer — required to be FFFFFFFF_FFFFFFFF when
+     * VMCS shadowing is not used */
+    if (fbvbs_asm_vmwrite(0x2800U, UINT64_MAX) != 0) { return -1; }
+
+    return 0;
 }
 
 /* ================================================================

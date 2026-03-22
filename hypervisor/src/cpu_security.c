@@ -498,9 +498,11 @@ int fbvbs_cpu_compute_cr_pins(struct fbvbs_cpu_security_profile *profile)
     p->cr0_pin_mask  = CR0_WP;
     p->cr0_pin_value = CR0_WP;
 
-    /* CR4: SMEP, SMAP must stay set; PCE must stay clear */
-    p->cr4_pin_mask  = CR4_SMEP | CR4_SMAP | CR4_PCE;
-    p->cr4_pin_value = CR4_SMEP | CR4_SMAP; /* PCE bit = 0 */
+    /* CR4: SMEP, SMAP, DE must stay set; PCE must stay clear.
+     * CR4.DE=1 forces MOV DR4/DR5 to #UD, preventing DR6/DR7
+     * aliasing that would bypass debug register shadow state. */
+    p->cr4_pin_mask  = CR4_SMEP | CR4_SMAP | CR4_PCE | CR4_DE;
+    p->cr4_pin_value = CR4_SMEP | CR4_SMAP | CR4_DE; /* PCE bit = 0 */
 
     /* Add UMIP if available */
     if (profile->features.has_umip != 0U) {
@@ -795,14 +797,23 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
 {
     state->boot = (struct fbvbs_boot_integrity){0};
 
+    /* Phase 1-4: DRTM detection */
     if (state->vendor == CPU_VENDOR_INTEL) {
-        /* Check for TXT via GETSEC leaf availability */
+        /* Check for TXT via GETSEC leaf availability (SMX bit) */
         uint32_t eax, ebx, ecx, edx;
         cpuid_query(1, 0, &eax, &ebx, &ecx, &edx);
         if ((ecx >> 6) & 1U) { /* SMX bit */
             state->boot.drtm_available = 1;
             state->boot.drtm_type = 1; /* TXT */
         }
+
+        /* Phase 1-5: Boot Guard detection via MSR 0x13A (BOOT_GUARD_STATUS).
+         * PRODUCTION NOTE: Read IA32_BOOT_GUARD_STATUS MSR (ring-0 only).
+         * Bits [4:0]: Boot Guard ACM status
+         * Bit [0]=1: Verified Boot enabled
+         * Bit [1]=1: Measured Boot enabled
+         * Model: Boot Guard detection deferred to platform bring-up.
+         * MSR 0x13A is ring-0 only and cannot be read in host tests. */
     } else if (state->vendor == CPU_VENDOR_AMD) {
         /* Check for SKINIT via CPUID 0x80000001 ECX[12] */
         uint32_t eax, ebx, ecx, edx;
@@ -811,7 +822,59 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
             state->boot.drtm_available = 1;
             state->boot.drtm_type = 2; /* SKINIT */
         }
+
+        /* Phase 1-5: AMD Platform Secure Boot (PSB) detection.
+         * PRODUCTION NOTE: PSB status is in the PSP (Platform Security
+         * Processor) mailbox or FUSE_STATUS registers.
+         * Model: detect via CPUID vendor topology. */
     }
+
+    /* Phase 1-5: TPM 2.0 detection.
+     * PRODUCTION NOTE: TPM is accessed via:
+     *   - MMIO at 0xFED40000 (TPM TIS interface)
+     *   - Or via CRB (Command Response Buffer) interface
+     * Steps:
+     *   1. Read TPM_ACCESS_0 register (0xFED40000)
+     *   2. Check tpmRegValidSts bit
+     *   3. Read TPM_INTF_CAPABILITY for supported interface
+     *   4. Read TPM2_PT_FAMILY_INDICATOR for version
+     * Model: check platform configuration. */
+#ifndef __FRAMAC__
+    /* Model detection: if DRTM is available, assume TPM is present
+     * (DRTM requires TPM for PCR measurements). Production must
+     * actually probe the TPM interface. */
+    if (state->boot.drtm_available != 0U) {
+        state->boot.tpm_present = 1;
+        state->boot.tpm_version = 20U; /* TPM 2.0 */
+    }
+#endif
+
+    /* Phase 1-5: UEFI Secure Boot status.
+     * PRODUCTION NOTE: Read EFI variable:
+     *   - SecureBoot (8BE4DF61-93CA-11D2-AA0D-00E098032B8C)
+     *   - SetupMode (same GUID)
+     *   - PK, KEK, db, dbx (verification chain)
+     * This must be captured before ExitBootServices.
+     * Model: Secure Boot status passed from UEFI entry via state. */
+
+    /* Phase 1-4: DRTM launch sequence.
+     * PRODUCTION NOTE for Intel TXT:
+     *   1. Load SINIT ACM (Authenticated Code Module) into memory
+     *   2. Set up MLE (Measured Launch Environment) page tables
+     *   3. Configure TXT heap (BIOS data, OS-to-SINIT, OS-to-MLE)
+     *   4. Issue GETSEC[SENTER] — CPU enters measured launch
+     *   5. SINIT ACM validates and measures MLE
+     *   6. On success, extends PCR[17] with MLE hash
+     *   7. MLE gains control in protected mode with measured state
+     *
+     * PRODUCTION NOTE for AMD SKINIT:
+     *   1. Prepare SLB (Secure Loader Block, max 64KB)
+     *   2. SLB contains measurement + hypervisor entry
+     *   3. Issue SKINIT instruction with SLB physical address
+     *   4. CPU resets to real mode, disables DMA, loads SLB
+     *   5. TPM automatically extends PCR[17] with SLB hash
+     *   6. SLB entry gains control with DMA disabled
+     *   7. SLB configures IOMMU before enabling DMA */
 
 #ifdef __FRAMAC__
     /* Model only: accept detected DRTM as evidence of measured boot
@@ -830,6 +893,20 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
         return 0;
     }
 #endif
+
+    /* Verify complete boot chain before accepting.
+     * All three must be established for measured boot:
+     *   1. DRTM (TXT or SKINIT) — hardware root of trust
+     *   2. TPM — measurement storage and attestation
+     *   3. Secure Boot — firmware signature chain */
+    if (state->boot.drtm_available != 0U &&
+        state->boot.tpm_present != 0U &&
+        (state->boot.secure_boot_active != 0U ||
+         state->boot.boot_guard_active != 0U)) {
+        state->boot.measured_boot_active = 1;
+        return 0;
+    }
+
     /* Fail-closed: DRTM/TPM/Secure Boot/measured boot must be established
      * by the real platform bring-up path before this hypervisor can claim
      * a trustworthy boot chain. */
@@ -1203,3 +1280,141 @@ void fbvbs_debug_restore_guest(const struct fbvbs_debug_state *guest_dbg)
     (void)guest_dbg;
 #endif
 }
+
+/* ================================================================
+ * Phase 1-8: RDRAND/RDSEED Entropy
+ *
+ * Provides hardware RNG access for:
+ *   - Boot ID generation (kernel.c seed_boot_ids replacement)
+ *   - IKS/SKS key derivation (Phase 5)
+ *   - Nonce generation for cryptographic protocols
+ *
+ * CPUID detection:
+ *   - RDRAND: CPUID.01H:ECX[30]
+ *   - RDSEED: CPUID.07H.0:EBX[18]
+ *
+ * PRODUCTION NOTE: The __asm__ volatile("rdrand/rdseed") instructions
+ * require bare-metal execution.  Model code returns deterministic values
+ * for Frama-C WP verification.
+ * ================================================================ */
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+int fbvbs_cpu_has_rdrand(void) {
+#ifdef __FRAMAC__
+    return 1;  /* Model: assume RDRAND available */
+#else
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1U), "c"(0U));
+    return (ecx >> 30U) & 1U;
+#endif
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+int fbvbs_cpu_has_rdseed(void) {
+#ifdef __FRAMAC__
+    return 1;  /* Model: assume RDSEED available */
+#else
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(7U), "c"(0U));
+    return (int)((ebx >> 18U) & 1U);
+#endif
+}
+
+/* Get 64 bits of entropy from RDRAND with retry.
+ * Returns 0 on success, -1 on failure (entropy depleted after retries).
+ * Retry count: 10 (Intel SDM recommendation). */
+/*@ requires \valid(out);
+    assigns *out;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_rdrand64(uint64_t *out) {
+    uint32_t retry;
+
+    if (!out) {
+        return -1;
+    }
+
+    *out = 0;
+
+#ifdef __FRAMAC__
+    /* Model: return deterministic value for verification */
+    *out = 0xDEADBEEFCAFEBABEULL;
+    return 0;
+#else
+    if (!fbvbs_cpu_has_rdrand()) {
+        return -1;
+    }
+
+    /*@ loop invariant 0 <= retry <= 10;
+        loop assigns retry, *out;
+        loop variant 10 - retry;
+    */
+    for (retry = 0; retry < 10U; ++retry) {
+        unsigned char ok;
+        uint64_t val;
+        __asm__ volatile("rdrand %0; setc %1"
+                         : "=r"(val), "=qm"(ok)
+                         :
+                         : "cc");
+        if (ok) {
+            *out = val;
+            return 0;
+        }
+    }
+    return -1;  /* Entropy depleted */
+#endif
+}
+
+/* Get 64 bits of seed-quality entropy from RDSEED.
+ * Falls back to RDRAND if RDSEED unavailable.
+ * Returns 0 on success, -1 on failure. */
+/*@ requires \valid(out);
+    assigns *out;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_rdseed64(uint64_t *out) {
+    uint32_t retry;
+
+    if (!out) {
+        return -1;
+    }
+
+    *out = 0;
+
+#ifdef __FRAMAC__
+    *out = 0xFEEDFACE12345678ULL;
+    return 0;
+#else
+    if (!fbvbs_cpu_has_rdseed()) {
+        return fbvbs_rdrand64(out);  /* Fallback */
+    }
+
+    /*@ loop invariant 0 <= retry <= 10;
+        loop assigns retry, *out;
+        loop variant 10 - retry;
+    */
+    for (retry = 0; retry < 10U; ++retry) {
+        unsigned char ok;
+        uint64_t val;
+        __asm__ volatile("rdseed %0; setc %1"
+                         : "=r"(val), "=qm"(ok)
+                         :
+                         : "cc");
+        if (ok) {
+            *out = val;
+            return 0;
+        }
+    }
+    return -1;
+#endif
+}
+
+/* fbvbs_entropy_seed_boot_ids is in kernel.c (uses fbvbs_hypervisor_state). */

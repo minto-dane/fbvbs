@@ -192,12 +192,13 @@ static void parse_device_scopes(
 
         unit->scopes[unit->scope_count].type = scope->type;
         unit->scopes[unit->scope_count].bus = scope->start_bus;
-        /* First PCI path entry is at offset 6 within the scope */
+        /* First PCI path entry at offset 6: byte[0]=device, byte[1]=function
+         * per ACPI spec (not packed dev[7:3]/func[2:0] in one byte) */
         if (scope_length >= 8U) {
             unit->scopes[unit->scope_count].dev =
-                (uint8_t)((scope_data[offset + 6U] >> 3) & 0x1FU);
+                (uint8_t)(scope_data[offset + 6U] & 0x1FU);
             unit->scopes[unit->scope_count].func =
-                (uint8_t)(scope_data[offset + 6U + 1U] & 0x07U);
+                (uint8_t)(scope_data[offset + 7U] & 0x07U);
         } else {
             unit->scopes[unit->scope_count].dev = 0U;
             unit->scopes[unit->scope_count].func = 0U;
@@ -770,7 +771,15 @@ static int vtd_enable_interrupt_remapping(uint64_t reg_base,
         vtd_mmio_write32(reg_base, VTD_REG_GCMD, gsts | VTD_GCMD_SIRTP);
     }
 
-    /* PRODUCTION NOTE: Poll GSTS.IRTPS until set. */
+    /* Wait for IRTPS before enabling IRE (VT-d spec requirement) */
+#if !defined(__FRAMAC__)
+    {
+        uint32_t gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+        if (!(gsts & VTD_GSTS_IRTPS)) {
+            return -1;  /* Fail-closed: IRTA pointer not accepted */
+        }
+    }
+#endif
 
     /* Enable interrupt remapping */
     {
@@ -778,7 +787,7 @@ static int vtd_enable_interrupt_remapping(uint64_t reg_base,
         vtd_mmio_write32(reg_base, VTD_REG_GCMD, gsts | VTD_GCMD_IRE);
     }
 
-    /* PRODUCTION NOTE: Poll GSTS.IRES until set. */
+    /* Wait for IRES */
 #if !defined(__FRAMAC__)
     {
         uint32_t gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
@@ -899,39 +908,84 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
         return -1;
     }
 
-    /* Initialize each DRHD unit */
+    /* Initialize each DRHD unit.
+     * Track allocated pages so they can be freed on failure. */
     {
         uint32_t i;
+        uint64_t allocated_root_pages[FBVBS_MAX_DRHD_UNITS];
+        uint64_t allocated_irta_pages[FBVBS_MAX_DRHD_UNITS];
+        uint32_t alloc_count = 0U;
+
+        for (i = 0U; i < FBVBS_MAX_DRHD_UNITS; ++i) {
+            allocated_root_pages[i] = 0ULL;
+            allocated_irta_pages[i] = 0ULL;
+        }
+
         for (i = 0U; i < info.drhd_count; ++i) {
             uint64_t reg_base = info.drhd_units[i].register_base_address;
+            uint64_t root_table_phys;
+            int failed = 0;
 
-            /* PRODUCTION NOTE: root_table_phys must come from
-             * a physical page allocator (4KB-aligned, zeroed).
-             * Fail-closed until allocator is available. */
-            uint64_t root_table_phys = 0ULL;
+            /* Allocate root table page (4KB, zeroed by allocator) */
+            root_table_phys = fbvbs_page_alloc();
+            if (root_table_phys == 0ULL) {
+                failed = 1;
+            }
 
-            if (vtd_set_root_table(reg_base, root_table_phys) != 0) {
-                return -1;
+            if (failed == 0) {
+                allocated_root_pages[alloc_count] = root_table_phys;
+
+                if (vtd_set_root_table(reg_base, root_table_phys) != 0) {
+                    failed = 1;
+                }
             }
-            if (vtd_invalidate_context_global(reg_base) != 0) {
-                return -1;
+            if (failed == 0 && vtd_invalidate_context_global(reg_base) != 0) {
+                failed = 1;
             }
-            if (vtd_enable_translation(reg_base) != 0) {
-                return -1;
+            if (failed == 0 && vtd_enable_translation(reg_base) != 0) {
+                failed = 1;
             }
 
             /* Enable interrupt remapping if supported */
-            if (state->iommu.interrupt_remapping != 0U) {
-                uint64_t irta_phys = 0ULL;  /* Needs allocator */
-                if (vtd_enable_interrupt_remapping(reg_base, irta_phys) != 0) {
-                    return -1;
+            if (failed == 0 && state->iommu.interrupt_remapping != 0U) {
+                uint64_t irta_phys = fbvbs_page_alloc();
+                if (irta_phys == 0ULL) {
+                    failed = 1;
+                } else {
+                    allocated_irta_pages[alloc_count] = irta_phys;
+                    if (vtd_enable_interrupt_remapping(reg_base, irta_phys) != 0) {
+                        failed = 1;
+                    }
                 }
             }
 
             /* Verify no boot-time faults */
-            if (vtd_check_fault(reg_base) != 0) {
+            if (failed == 0 && vtd_check_fault(reg_base) != 0) {
+                failed = 1;
+            }
+
+            if (failed != 0) {
+                /* Free all pages allocated in this and prior iterations */
+                uint32_t j;
+                /* Free current iteration's pages */
+                if (root_table_phys != 0ULL) {
+                    (void)fbvbs_page_free(root_table_phys);
+                }
+                if (allocated_irta_pages[alloc_count] != 0ULL) {
+                    (void)fbvbs_page_free(allocated_irta_pages[alloc_count]);
+                }
+                /* Free prior iterations' pages */
+                for (j = 0U; j < alloc_count; ++j) {
+                    if (allocated_root_pages[j] != 0ULL) {
+                        (void)fbvbs_page_free(allocated_root_pages[j]);
+                    }
+                    if (allocated_irta_pages[j] != 0ULL) {
+                        (void)fbvbs_page_free(allocated_irta_pages[j]);
+                    }
+                }
                 return -1;
             }
+            alloc_count += 1U;
         }
     }
 

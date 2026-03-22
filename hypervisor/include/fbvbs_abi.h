@@ -179,6 +179,28 @@ struct fbvbs_log_record_v1 {
 #define FBVBS_EVENT_ROLLBACK_DETECT 0x82U
 #define FBVBS_EVENT_DMA_DENY 0x83U
 #define FBVBS_EVENT_VM_EXIT_FAIL_CLOSED 0x84U
+#define FBVBS_EVENT_CR_PIN_VIOLATION 0x85U
+#define FBVBS_EVENT_RATE_LIMIT_SUMMARY 0x86U
+#define FBVBS_EVENT_WATCHDOG_EXPIRY 0x87U
+#define FBVBS_EVENT_ENTROPY_FAILURE 0x88U
+#define FBVBS_EVENT_MEMORY_CORRUPTION 0x89U
+#define FBVBS_EVENT_KEY_ZEROIZE 0x8AU
+#define FBVBS_EVENT_EXCEPTION_FAULT 0x8BU
+#define FBVBS_EVENT_DR_ACCESS_INTERCEPT 0x8CU
+#define FBVBS_EVENT_BOOT_INTEGRITY 0x8DU    /* Boot chain integrity evidence */
+#define FBVBS_EVENT_ENTROPY_QUALITY 0x8EU    /* RDRAND/RDSEED health at boot */
+#define FBVBS_EVENT_MP_TOPOLOGY 0x8FU       /* Multi-processor topology summary */
+#define FBVBS_EVENT_MP_CPU_INFO 0x90U       /* Per-CPU info (APIC ID, NUMA, state) */
+
+/* Rate limiter constants */
+#define FBVBS_RATE_LIMIT_CLASSES 16U
+#define FBVBS_RATE_LIMIT_THRESHOLD 100U
+
+/* Watchdog constants (Phase 1-9) */
+#define FBVBS_WATCHDOG_MAX_CONSECUTIVE 10U
+
+/* Page allocator constants (Phase 0C) */
+#define FBVBS_MAX_PHYS_PAGES (1U << 20U)  /* 4 GiB / 4 KiB = 1M pages */
 
 /* Severity levels — L.1.B */
 #define FBVBS_SEVERITY_DEBUG 0U
@@ -307,6 +329,7 @@ struct fbvbs_log_record_v1 {
 #define FBVBS_VM_EXIT_REASON_HALT 7U
 #define FBVBS_VM_EXIT_REASON_SHUTDOWN 8U
 #define FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT 9U
+#define FBVBS_VM_EXIT_REASON_DR_ACCESS 10U
 
 /* VM exit access types */
 #define FBVBS_VM_CR_ACCESS_READ 1U
@@ -320,6 +343,7 @@ struct fbvbs_log_record_v1 {
 #define FAULT_CODE_PARTITION_INTERNAL 1U
 #define FAULT_CODE_MEASUREMENT_FAILURE 2U
 #define FAULT_CODE_VM_EXIT_UNCLASSIFIED 3U
+#define FBVBS_FAULT_WATCHDOG_TIMEOUT 4U
 
 /* Artifact object kinds */
 #define FBVBS_ARTIFACT_OBJECT_IMAGE 1U
@@ -859,6 +883,12 @@ struct fbvbs_vm_exit_unclassified_fault {
     uint64_t detail1;
 };
 
+struct fbvbs_vm_exit_dr_access {
+    uint32_t dr_number;     /* DR0-DR7 */
+    uint32_t access_type;   /* read=1, write=2 */
+    uint64_t value;         /* value read/written */
+};
+
 /* Audit event structs */
 
 struct fbvbs_audit_partition_fault_event {
@@ -1008,6 +1038,8 @@ _Static_assert(sizeof(struct fbvbs_vm_exit_mmio) == 24, "exit mmio size");
 _Static_assert(sizeof(struct fbvbs_vm_exit_msr_access) == 16, "exit msr_access size");
 _Static_assert(sizeof(struct fbvbs_vm_exit_ept_violation) == 16, "exit ept_violation size");
 _Static_assert(sizeof(struct fbvbs_vm_exit_unclassified_fault) == 24, "exit unclassified_fault size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_dr_access) == 16, "exit dr_access size");
+_Static_assert(sizeof(struct fbvbs_vm_exit_dr_access) <= 4032, "payload exceeds exit_payload");
 _Static_assert(sizeof(struct fbvbs_vm_exit_external_interrupt) <= 4032, "payload exceeds exit_payload");
 _Static_assert(sizeof(struct fbvbs_vm_exit_cr_access) <= 4032, "payload exceeds exit_payload");
 _Static_assert(sizeof(struct fbvbs_vm_exit_mmio) <= 4032, "payload exceeds exit_payload");

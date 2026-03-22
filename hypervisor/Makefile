@@ -10,9 +10,14 @@ COMMON_WARNINGS := -Wall -Wextra -Werror -Wpedantic \
                    -Wshadow -Wundef -std=c11
 
 # Security hardening: prevent compiler from optimizing away safety checks
+# Phase 0A-4: government-grade compiler hardening
 HARDENING_FLAGS := -fno-strict-overflow \
                    -fno-delete-null-pointer-checks \
-                   -fno-strict-aliasing
+                   -fno-strict-aliasing \
+                   -fstack-protector-strong \
+                   -fno-common \
+                   -mno-red-zone \
+                   -fcf-protection=full
 
 # ---------- source sets ----------
 
@@ -35,7 +40,15 @@ ALL_SOURCES := $(CORE_SOURCES) \
     src/iommu_vtd.c \
     src/iommu_amdvi.c \
     src/early_init.c \
-    src/vmcs_setup.c
+    src/vmcs_setup.c \
+    src/hlat.c \
+    src/vmx_controls.c \
+    src/amd_npt.c \
+    src/page_alloc.c \
+    src/watchdog.c \
+    src/apic.c \
+    src/idt.c \
+    src/mp_init.c
 
 # UEFI sources (MS ABI, separate compilation flags)
 UEFI_SOURCES := src/uefi_entry.c

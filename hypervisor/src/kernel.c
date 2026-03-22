@@ -232,6 +232,36 @@ static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
     state->boot_id_lo = 0x0000000000000001ULL;
 }
 
+/* Phase 1-8: Production boot ID generation using hardware entropy.
+ * Replaces seed_boot_ids MODEL ONLY function above. */
+/*@ requires \valid(state);
+    assigns state->boot_id_hi, state->boot_id_lo;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_entropy_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
+    int rc;
+
+    if (state == NULL) {
+        return -1;
+    }
+
+    rc = fbvbs_rdseed64(&state->boot_id_hi);
+    if (rc != 0) {
+        state->boot_id_hi = 0;
+        state->boot_id_lo = 0;
+        return -1;
+    }
+
+    rc = fbvbs_rdseed64(&state->boot_id_lo);
+    if (rc != 0) {
+        state->boot_id_hi = 0;
+        state->boot_id_lo = 0;
+        return -1;
+    }
+
+    return 0;
+}
+
 /*@ requires \valid(hash + (0 .. 47));
     assigns hash[0 .. 47];
 */
@@ -1096,6 +1126,45 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
         boot_payload,
         (uint32_t)(sizeof(boot_payload) - 1U)
     );
+
+    /* Boot integrity evidence — log DRTM/TPM/SecureBoot/BootGuard status
+     * (REQ-0006, Phase 1-5 item 4) */
+    {
+        uint8_t integrity_payload[8];
+        integrity_payload[0] = (uint8_t)state->cpu_security.boot.drtm_available;
+        integrity_payload[1] = (uint8_t)state->cpu_security.boot.drtm_type;
+        integrity_payload[2] = (uint8_t)state->cpu_security.boot.boot_guard_active;
+        integrity_payload[3] = (uint8_t)state->cpu_security.boot.tpm_present;
+        integrity_payload[4] = (uint8_t)state->cpu_security.boot.secure_boot_active;
+        integrity_payload[5] = (uint8_t)state->cpu_security.boot.measured_boot_active;
+        integrity_payload[6] = 0U;
+        integrity_payload[7] = 0U;
+        fbvbs_log_append(
+            state, 0U,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            FBVBS_SEVERITY_INFO,
+            FBVBS_EVENT_BOOT_INTEGRITY,
+            integrity_payload, 8U
+        );
+    }
+
+    /* Entropy source quality — log RDRAND/RDSEED availability
+     * (Phase 1-8 item 6) */
+    {
+        uint8_t entropy_payload[4];
+        entropy_payload[0] = (fbvbs_cpu_has_rdrand() != 0) ? 1U : 0U;
+        entropy_payload[1] = (fbvbs_cpu_has_rdseed() != 0) ? 1U : 0U;
+        entropy_payload[2] = 0U;
+        entropy_payload[3] = 0U;
+        fbvbs_log_append(
+            state, 0U,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            FBVBS_SEVERITY_INFO,
+            FBVBS_EVENT_ENTROPY_QUALITY,
+            entropy_payload, 4U
+        );
+    }
+
     return OK;
 }
 

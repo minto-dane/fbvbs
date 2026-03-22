@@ -183,7 +183,21 @@ static int fbvbs_ivrs_parse(
         return -1;
     }
 
+    /* Verify ACPI checksum */
     raw = (const uint8_t *)table;
+#if !defined(__FRAMAC__)
+    {
+        uint32_t ck_i;
+        uint8_t ck_sum = 0U;
+        for (ck_i = 0U; ck_i < table_length; ++ck_i) {
+            ck_sum = (uint8_t)(ck_sum + raw[ck_i]);
+        }
+        if (ck_sum != 0U) {
+            return -1;
+        }
+    }
+#endif
+
     info->iv_info = table->iv_info;
 
     /* Parse IVHD/IVMD blocks */
@@ -541,25 +555,74 @@ int fbvbs_amdvi_init(struct fbvbs_global_security_state *state)
         return -1;
     }
 
-    /* Initialize each IOMMU unit */
+    /* Initialize each IOMMU unit.
+     * Track allocated pages for cleanup on failure. */
     {
         uint32_t i;
+        uint64_t alloc_cmd[FBVBS_MAX_AMDVI_UNITS];
+        uint64_t alloc_evt[FBVBS_MAX_AMDVI_UNITS];
+        uint32_t alloc_count = 0U;
+
+        for (i = 0U; i < FBVBS_MAX_AMDVI_UNITS; ++i) {
+            alloc_cmd[i] = 0ULL;
+            alloc_evt[i] = 0ULL;
+        }
+
         for (i = 0U; i < info.ivhd_count; ++i) {
             uint64_t mmio_base = info.ivhd_units[i].mmio_base;
+            uint64_t cmd_buf_phys;
+            uint64_t evt_log_phys;
 
-            /* PRODUCTION NOTE: Before enabling, must:
-             * 1. Allocate and initialize Device Table (512KB for full 64K entries)
-             * 2. Set DEV_TAB_BASE register
-             * 3. Allocate Command Buffer (4KB minimum, 4KB-aligned)
-             * 4. Set CMD_BUF_BASE register
-             * 5. Allocate Event Log (4KB minimum, 4KB-aligned)
-             * 6. Set EVT_LOG_BASE register
-             * All require physical page allocator. */
+            /* Allocate Command Buffer and Event Log pages.
+             * PRODUCTION NOTE: Device Table needs 512KB for full 64K
+             * entries (allocated separately per-device domain).
+             * Here we allocate the minimum buffers for IOMMU operation. */
+            cmd_buf_phys = fbvbs_page_alloc();
+            if (cmd_buf_phys == 0ULL) {
+                goto amdvi_init_fail;
+            }
+            alloc_cmd[alloc_count] = cmd_buf_phys;
+
+            evt_log_phys = fbvbs_page_alloc();
+            if (evt_log_phys == 0ULL) {
+                goto amdvi_init_fail;
+            }
+            alloc_evt[alloc_count] = evt_log_phys;
+
+            /* Set Command Buffer Base: phys addr + size encoding
+             * (bits [59:12] = base, bits [3:0] = size = 0 for 4KB) */
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_BASE,
+                               cmd_buf_phys & 0x000FFFFFFFFFF000ULL);
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_HEAD, 0ULL);
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_TAIL, 0ULL);
+
+            /* Set Event Log Base: same encoding */
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_BASE,
+                               evt_log_phys & 0x000FFFFFFFFFF000ULL);
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_HEAD, 0ULL);
+            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_TAIL, 0ULL);
 
             if (amdvi_enable(mmio_base) != 0) {
-                return -1;
+                goto amdvi_init_fail;
             }
+            alloc_count += 1U;
         }
+        goto amdvi_init_ok;
+
+amdvi_init_fail:
+        {
+            uint32_t j;
+            for (j = 0U; j <= alloc_count && j < FBVBS_MAX_AMDVI_UNITS; ++j) {
+                if (alloc_cmd[j] != 0ULL) {
+                    (void)fbvbs_page_free(alloc_cmd[j]);
+                }
+                if (alloc_evt[j] != 0ULL) {
+                    (void)fbvbs_page_free(alloc_evt[j]);
+                }
+            }
+            return -1;
+        }
+amdvi_init_ok: ;
     }
 
     /* Validate DTE and IRTE construction (struct layout verification) */

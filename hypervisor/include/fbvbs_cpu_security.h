@@ -103,6 +103,7 @@
 #define CR4_UMIP                        (1UL << 11)
 #define CR4_CET                         (1UL << 23)
 #define CR4_PCE                         (1UL << 8)
+#define CR4_DE                          (1UL << 3)   /* Debugging Extensions */
 #define CR4_PKE                         (1UL << 22)
 
 /* CR0 security-relevant bits */
@@ -500,5 +501,11 @@ void fbvbs_debug_save_guest(struct fbvbs_debug_state *guest_dbg);
     assigns \nothing;
 */
 void fbvbs_debug_restore_guest(const struct fbvbs_debug_state *guest_dbg);
+
+/* Phase 1-8: RDRAND/RDSEED entropy */
+int fbvbs_cpu_has_rdrand(void);
+int fbvbs_cpu_has_rdseed(void);
+int fbvbs_rdrand64(uint64_t *out);
+int fbvbs_rdseed64(uint64_t *out);
 
 #endif /* FBVBS_CPU_SECURITY_H */

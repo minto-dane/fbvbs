@@ -249,6 +249,116 @@ int fbvbs_log_append(
     );
 }
 
+/* Phase 0A-5: Log rate limiting.
+ *
+ * Events are classified into 16 classes by event_code >> 4.
+ * Each class has a counter that resets every FBVBS_LOG_SLOT_COUNT appends
+ * (one window = one full ring buffer rotation).
+ *
+ * When a class exceeds FBVBS_RATE_LIMIT_THRESHOLD in one window, subsequent
+ * events of that class are silently dropped and a RATE_LIMIT_SUMMARY event
+ * is emitted when the window rotates.
+ *
+ * Exempt from rate limiting:
+ *   - SEVERITY_CRITICAL and SEVERITY_ALERT (corruption, key zeroize, etc.)
+ *   - RATE_LIMIT_SUMMARY events themselves (prevents recursion)
+ */
+
+/*@ requires \valid(state) || state == \null;
+    requires payload_length != 0 && payload != \null ==>
+             \valid_read(payload + (0 .. payload_length - 1));
+    requires payload_length != 0 && payload != \null && state != \null ==>
+             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
+    assigns state->mirror_log, state->log_lock,
+            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_window_sequence;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
+                      \result == RESOURCE_EXHAUSTED;
+*/
+int fbvbs_log_append_rate_limited(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t cpu_id,
+    uint32_t source_component,
+    uint16_t severity,
+    uint16_t event_code,
+    const uint8_t *payload,
+    uint32_t payload_length
+) {
+    uint32_t event_class;
+    uint64_t current_seq;
+    int result;
+
+    if (state == NULL) {
+        return INVALID_PARAMETER;
+    }
+
+    /* Check if window has rotated — reset all counters */
+    current_seq = state->mirror_log.header.max_readable_sequence;
+    if (current_seq >= state->log_rate_window_sequence + FBVBS_LOG_SLOT_COUNT) {
+        uint32_t ci;
+        /* Emit summary for any classes that had drops in the previous window */
+        /*@ loop invariant 0 <= ci <= FBVBS_RATE_LIMIT_CLASSES;
+            loop assigns ci, state->mirror_log, state->log_lock,
+                    state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+                    state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1];
+            loop variant FBVBS_RATE_LIMIT_CLASSES - ci;
+        */
+        for (ci = 0; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
+            if (state->log_rate_dropped[ci] > 0U) {
+                uint8_t summary[8];
+                /* Pack: [0..3] = class index, [4..7] = drop count */
+                summary[0] = (uint8_t)(ci & 0xFFU);
+                summary[1] = (uint8_t)((ci >> 8U) & 0xFFU);
+                summary[2] = 0U;
+                summary[3] = 0U;
+                summary[4] = (uint8_t)(state->log_rate_dropped[ci] & 0xFFU);
+                summary[5] = (uint8_t)((state->log_rate_dropped[ci] >> 8U) & 0xFFU);
+                summary[6] = (uint8_t)((state->log_rate_dropped[ci] >> 16U) & 0xFFU);
+                summary[7] = (uint8_t)((state->log_rate_dropped[ci] >> 24U) & 0xFFU);
+                (void)fbvbs_log_append(
+                    state, cpu_id,
+                    FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                    (uint16_t)FBVBS_SEVERITY_WARNING,
+                    (uint16_t)FBVBS_EVENT_RATE_LIMIT_SUMMARY,
+                    summary, 8U
+                );
+            }
+            state->log_rate_counts[ci] = 0U;
+            state->log_rate_dropped[ci] = 0U;
+        }
+        state->log_rate_window_sequence = current_seq;
+    }
+
+    /* Exempt: CRITICAL/ALERT severity, and RATE_LIMIT_SUMMARY itself */
+    if (severity >= FBVBS_SEVERITY_CRITICAL ||
+        event_code == FBVBS_EVENT_RATE_LIMIT_SUMMARY) {
+        return fbvbs_log_append(state, cpu_id, source_component,
+                                severity, event_code, payload, payload_length);
+    }
+
+    /* Rate limit check */
+    event_class = ((uint32_t)event_code >> 4U) & (FBVBS_RATE_LIMIT_CLASSES - 1U);
+    /*@ assert event_class < FBVBS_RATE_LIMIT_CLASSES; */
+
+    if (state->log_rate_counts[event_class] >= FBVBS_RATE_LIMIT_THRESHOLD) {
+        /* Drop this event, increment dropped counter with saturation */
+        if (state->log_rate_dropped[event_class] < UINT32_MAX) {
+            state->log_rate_dropped[event_class] += 1U;
+        }
+        return OK;  /* Silently dropped — not an error for caller */
+    }
+
+    result = fbvbs_log_append(state, cpu_id, source_component,
+                              severity, event_code, payload, payload_length);
+    if (result == OK) {
+        if (state->log_rate_counts[event_class] < UINT32_MAX) {
+            state->log_rate_counts[event_class] += 1U;
+        }
+    }
+    return result;
+}
+
 /*@ requires \valid(state) || state == \null;
     requires \valid(response) || response == \null;
     assigns *response;

@@ -24,6 +24,13 @@ struct fbvbs_vcpu {
     uint64_t cr4;
     uint32_t pending_interrupt_delivery;
     uint32_t reserved0;
+    /* Per-vCPU debug register state (REQ-0342: guest/host DR isolation) */
+    uint64_t dr0;
+    uint64_t dr1;
+    uint64_t dr2;
+    uint64_t dr3;
+    uint64_t dr6;   /* DR6: debug status (read-only to guest except via MOV) */
+    uint64_t dr7;   /* DR7: debug control — VMCS manages guest DR7 */
 };
 
 struct fbvbs_vmx_capabilities {
@@ -33,6 +40,8 @@ struct fbvbs_vmx_capabilities {
     uint32_t mbec_available;
     uint32_t cet_available;
     uint32_t aesni_available;
+    uint32_t posted_int_available;
+    uint32_t apic_virt_available;
 };
 
 struct fbvbs_vmx_leaf_external_interrupt {
@@ -76,6 +85,12 @@ struct fbvbs_vmx_leaf_ept_violation {
     uint32_t reserved0;
 };
 
+struct fbvbs_vmx_leaf_dr_access {
+    uint32_t dr_number;     /* DR0-DR7 */
+    uint32_t access_type;   /* 0=MOV to DR, 1=MOV from DR */
+    uint64_t value;         /* value being written (for MOV to DR) */
+};
+
 union fbvbs_vmx_leaf_exit_detail {
     struct fbvbs_vmx_leaf_external_interrupt external_interrupt;
     struct fbvbs_vmx_leaf_cr_access cr_access;
@@ -83,6 +98,7 @@ union fbvbs_vmx_leaf_exit_detail {
     struct fbvbs_vmx_leaf_pio pio;
     struct fbvbs_vmx_leaf_mmio mmio;
     struct fbvbs_vmx_leaf_ept_violation ept_violation;
+    struct fbvbs_vmx_leaf_dr_access dr_access;
 };
 
 struct fbvbs_vmx_leaf_exit {
@@ -91,10 +107,11 @@ struct fbvbs_vmx_leaf_exit {
     union fbvbs_vmx_leaf_exit_detail detail;
 };
 
-_Static_assert(sizeof(struct fbvbs_vcpu) == 64U, "fbvbs_vcpu ABI drift");
+_Static_assert(sizeof(struct fbvbs_vcpu) == 112U, "fbvbs_vcpu ABI drift");
 _Static_assert(offsetof(struct fbvbs_vcpu, rip) == 8U, "fbvbs_vcpu.rip offset drift");
 _Static_assert(offsetof(struct fbvbs_vcpu, cr4) == 48U, "fbvbs_vcpu.cr4 offset drift");
-_Static_assert(sizeof(struct fbvbs_vmx_capabilities) == 24U, "fbvbs_vmx_capabilities ABI drift");
+_Static_assert(offsetof(struct fbvbs_vcpu, dr0) == 64U, "fbvbs_vcpu.dr0 offset drift");
+_Static_assert(sizeof(struct fbvbs_vmx_capabilities) == 32U, "fbvbs_vmx_capabilities ABI drift");
 _Static_assert(sizeof(struct fbvbs_vmx_leaf_exit) == 32U, "fbvbs_vmx_leaf_exit ABI drift");
 _Static_assert(sizeof(union fbvbs_vmx_leaf_exit_detail) == 24U, "fbvbs_vmx_leaf_exit_detail ABI drift");
 _Static_assert(offsetof(struct fbvbs_vmx_leaf_exit, detail) == 8U, "fbvbs_vmx_leaf_exit.detail offset drift");

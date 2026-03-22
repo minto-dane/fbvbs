@@ -43,7 +43,9 @@ static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con_out;
 static void efi_print(const CHAR16 *msg)
 {
     if (g_con_out != NULL && g_con_out->output_string != NULL) {
-        g_con_out->output_string(g_con_out, (CHAR16 *)msg);
+        /* Cast required: UEFI EFI_TEXT_STRING takes non-const CHAR16*.
+         * The protocol does not modify the string. */
+        g_con_out->output_string(g_con_out, (CHAR16 *)(uintptr_t)msg);
     }
 }
 
@@ -92,6 +94,11 @@ static uint64_t find_acpi_rsdp(EFI_SYSTEM_TABLE *system_table)
 
     if (system_table == NULL ||
         system_table->configuration_table == NULL) {
+        return 0;
+    }
+
+    /* Bound iteration to prevent OOB read from malicious firmware */
+    if (system_table->number_of_table_entries > 1024U) {
         return 0;
     }
 
@@ -240,6 +247,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         return status;
     }
 
+    /* SECURITY NOTE: memory_map_addr points to a stack-local buffer.
+     * This is safe only because fbvbs_efi_to_hypervisor runs on the
+     * same stack frame (efi_main does not return after ExitBootServices).
+     * Production with ABI trampoline must allocate this buffer via
+     * EFI AllocatePages to survive stack switches. */
     boot_info.memory_map_addr = (uint64_t)(uintptr_t)mmap_buffer;
     boot_info.memory_map_size = mmap_size;
     boot_info.descriptor_size = desc_size;
