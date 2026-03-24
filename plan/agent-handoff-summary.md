@@ -1,7 +1,7 @@
 # FBVBS エージェント引き継ぎサマリー
 
 **日付:** 2026-03-23
-**目的:** FBVBS を全く知らないエージェントセッション向けの完全なプロジェクトコンテキスト。
+**目的:** FBVBS を全く知らないエージェントセッション向けの完全なプロジェクトコンテキスト。現時点の bare-metal/QEMU 状態と release blocker も含む。
 
 ---
 
@@ -11,9 +11,10 @@ FBVBS (Formally-verified Bare-metal Virtual Boot Security) は x86-64 向けの*
 
 **主要特性:**
 - C11 + ACSL (ANSI/ISO C Specification Language) アノテーション付き
-- Frama-C WP プラグインで形式検証済み: 99.32% 目標証明 (8330/8387)
+- Frama-C WP は継続運用中。履歴上の高い証明率はあるが、release 判定では現行ワークツリー上での再現と proof gap 確認が必要
 - Intel VT-x + EPT + HLAT / AMD-V + NPT 両プラットフォーム対応
 - IOMMU (VT-d / AMD-Vi) 必須 (DMA 分離)
+- Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke 経路あり。現在は TCG smoke とローカル KVM smoke の両方で retained-C init まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed
 - ソース 24 ファイル、ヘッダ 6 ファイル、約 25K SLOC
 
 **アーキテクチャ:**
@@ -135,6 +136,7 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 - cppcheck: 24 ソース、エラー 0
 - ファズハーネス: 5/5 ビルド成功
 - トレーサビリティ: 115/115 要件がソースにタグ付き
+- `make -C hypervisor frama-c-wp`: 実行可能だが proof gap を残す。特に `command.c` typed-cast 境界、RTE guards、public API contract が継続課題
 
 ---
 
@@ -142,17 +144,17 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 
 | フェーズ | 概要 | 状態 | 備考 |
 |---------|------|------|------|
-| 0A-0C | マイクロハイパーバイザーコア + IOMMU + ページアロケータ | 完了 | |
-| 1 | UEFI ブート, VMCS, IDT, APIC, ウォッチドッグ | 完了 | |
-| 2 | HLAT, CR ピン留め, CET, MSR ビットマップ, プリエンプションタイマー | 完了 | |
-| 3 | AMD NPT, PTE トラップ, TLB 同期, SEV-SNP | 完了 | |
+| 0A-0C | マイクロハイパーバイザーコア + IOMMU + ページアロケータ | ほぼ実装済み | fail-closed/PRODUCTION NOTE と proof gap が残る |
+| 1 | UEFI ブート, VMCS, IDT, APIC, ウォッチドッグ | ほぼ実装済み | bare-metal bring-up の authoritative 実装は未完 |
+| 2 | HLAT, CR ピン留め, CET, MSR ビットマップ, プリエンプションタイマー | ほぼ実装済み | VM exit 緩和列の実動作化が残る |
+| 3 | AMD NPT, PTE トラップ, TLB 同期, SEV-SNP | ほぼ実装済み | 実機検証と一部 production path が残る |
 | 4-5 | Ada/SPARK 信頼サービス + 暗号 | **ブロック** | GNAT ツールチェーン未導入 |
 | 6 | Rust no_std FreeBSD フロントエンド | **ブロック** | Rust ツールチェーン未導入 |
 | 7 | bhyve/vmm 統合 | **ブロック** | Phase 6 依存 |
 | 8 | マルチソケット (MADT/SRAT/AP/IPI/TLB/NUMA) | 完了 | |
-| 9 | 品質保証・リリース準備 | 完了 | 全サブフェーズ完了 |
+| 9 | 品質保証・リリース準備 | 進行中 | release-hypervisor と QEMU smoke は通るが、proof gap と release blocker の是正が継続中 |
 
-**ブロック中のフェーズは外部ツールチェーン/アーキテクチャ決定が必要。** C マイクロハイパーバイザー (Phase 0-3, 8, 9) は機能完了。
+**ブロック中のフェーズは外部ツールチェーン/アーキテクチャ決定が必要。** retained C マイクロハイパーバイザー基盤はかなり進んでいるが、production release 完了とはみなさないこと。
 
 ---
 
@@ -160,12 +162,12 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 
 ### 5.1 Frama-C WP 検証
 
-9 ファイルが形式検証済み (99.32% 目標証明、57 タイムアウト):
+履歴上は 9 ファイルで高い WP 証明率に到達しているが、現行 release 判定では再現実行と proof gap 確認を必須とする:
 - cpu_security.c, vmx.c, memory.c, log.c, vm_policy.c, kernel.c, command.c, security.c, partition.c
 - `-wp-model Typed+Cast` 使用 (クロスタイプキャスト対応)
 - `memory_utils.c` と `boot_multiboot.c` は除外 (void* が Typed モデルと非互換)
 - 13 プラットフォーム/ハードウェアファイルは除外 (MMIO, MSR, VMCS, CPUID)
-- タイムアウトは WP の構造的制限であり、未検証セキュリティロジックではない
+- 現在の主な proof gap は `command.c` typed-cast 境界、Missing RTE guards、一部 timeout
 - `#ifdef __FRAMAC__` モデルコードが asm スピンロックと GPA 解決を置換
 
 ### 5.2 セキュリティアーキテクチャ

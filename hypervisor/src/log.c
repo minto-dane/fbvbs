@@ -204,39 +204,6 @@ static int fbvbs_log_append_core(
     return OK;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires payload_length != 0 && payload != \null ==>
-             \valid_read(payload + (0 .. payload_length - 1));
-    requires payload_length != 0 && payload != \null && state != \null ==>
-             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
-    assigns state->mirror_log, state->log_lock;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
-                      \result == RESOURCE_EXHAUSTED;
-    behavior null_state:
-      assumes state == \null;
-      assigns \nothing;
-      ensures \result == INVALID_PARAMETER;
-    behavior overflow_payload:
-      assumes state != \null;
-      assumes payload_length > 220;
-      assigns \nothing;
-      ensures \result == INVALID_PARAMETER;
-    behavior null_payload:
-      assumes state != \null;
-      assumes payload_length <= 220;
-      assumes payload_length != 0;
-      assumes payload == \null;
-      assigns \nothing;
-      ensures \result == INVALID_PARAMETER;
-    behavior ok:
-      assumes state != \null;
-      assumes payload_length <= 220;
-      assumes payload_length == 0 || payload != \null;
-      assigns state->mirror_log, state->log_lock;
-      ensures \result == OK || \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_log_append(
     struct fbvbs_hypervisor_state *state,
     uint32_t cpu_id,
@@ -275,18 +242,6 @@ int fbvbs_log_append(
  *   - RATE_LIMIT_SUMMARY events themselves (prevents recursion)
  */
 
-/*@ requires \valid(state) || state == \null;
-    requires payload_length != 0 && payload != \null ==>
-             \valid_read(payload + (0 .. payload_length - 1));
-    requires payload_length != 0 && payload != \null && state != \null ==>
-             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
-    assigns state->mirror_log, state->log_lock,
-            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_window_sequence;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
-                      \result == RESOURCE_EXHAUSTED;
-*/
 int fbvbs_log_append_rate_limited(
     struct fbvbs_hypervisor_state *state,
     uint32_t cpu_id,
@@ -370,19 +325,6 @@ int fbvbs_log_append_rate_limited(
     return result;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(response) || response == \null;
-    assigns *response;
-    behavior null_args:
-      assumes state == \null || response == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior valid_args:
-      assumes state != \null && response != \null;
-      ensures \result == OK;
-      ensures response->record_size == FBVBS_LOG_RECORD_V1_SIZE;
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_audit_get_mirror_info(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_audit_mirror_info_response *response

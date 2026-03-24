@@ -1,14 +1,14 @@
 # FBVBS v7 包括的実装ロードマップ
 
-**日付:** 2026-03-23 (Phase 9 品質保証キャンペーン完了 + 第6回セキュリティ監査全修正)
+**日付:** 2026-03-23 (retained C hardening 継続中)
 **基準文書:** plan/fbvbs-design.md (FBVBS v7 仕様書)
-**現状:** Phase 0-3 + Phase 8 + Phase 9 カテゴリA+E完了 + 第6回セキュリティ監査全修正 — マイクロハイパーバイザー C11 + ACSL retained C 実装 (24ソース)、WP検証 8330/8387 (99.32%)、ファジングハーネス5本 (command page/manifest/multiboot2/iommu/log decoder) + セキュリティ監査済、故障注入テスト17本、gcov分岐カバレッジ、cppcheck 0 errors、トレーサビリティ 110/110 全要件タグ、決定性ビルド + SBOM、CI/CD パイプライン (6ゲート)、CC Security Target アウトライン、AMD NPT 認証テスト設計、インシデント対応手順、MISRA C 逸脱ログ、隠れチャネル分析、fd 継承残留リスク文書
+**現状:** retained C マイクロハイパーバイザー基盤は広く実装済みだが、production release 完了ではない。Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke は追加済みで、現在は TCG smoke とローカル KVM smoke の両方が retained-C init まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed する。`KCI_SET_WX` は retained-C 内蔵 SHA-384 と approved per-page digest table により runtime binding するようになったが、`PARTITION_LOAD_IMAGE` の authoritative loader/materializer、authoritative な IOMMU/boot integrity bring-up、safe passthrough teardown、`command.c` typed-cast 境界の proof hardening、Phase 4-7 の信頼サービス/フロントエンド実装が残っている。過去の WP 件数は履歴値として保持するが、常に再現済みの release 証拠を意味しない。
 
 ---
 
 ## 現状サマリ
 
-### 実装済み（Phase 0 完了部分）
+### 実装済み（retained C 基盤）
 
 | コンポーネント | ファイル | 行数(概算) | WP検証 | 状態 |
 |--------------|---------|-----------|--------|------|
@@ -28,7 +28,7 @@
 | UEFI エントリ | uefi_entry.c | ~260 | WP対象外 | UEFI アプリケーション (Phase 1-1) |
 | 早期初期化 | early_init.c | ~230 | WP対象外 | Post-ExitBootServices 初期化 (Phase 1-1) |
 | EFI 型定義 | fbvbs_efi.h | ~280 | N/A | UEFI 型・構造体定義 |
-| VMCS セットアップ | vmcs_setup.c | ~500 | WP対象外 | VMCS フィールド定義 + deprivilege + ページアロケータ接続 (Phase 1-3, 0C-3) |
+| VMCS セットアップ | vmcs_setup.c | ~500 | WP対象外 | VMCS フィールド定義 + deprivilege 準備 + ページアロケータ接続。end-to-end VMLAUNCH は未完 |
 | Intel HLAT | hlat.c | ~1040 | WP対象外 | HLAT テーブル管理 + per-partition 状態 + KLD 接続 + クリーンアップ (Phase 2-1, 0C-3) |
 | AMD NPT | amd_npt.c | ~1240 | WP対象外 | NPT write-protect + per-partition 状態 + ページアロケータ + KLD 接続 (Phase 3, 0C-3) |
 | VMX 制御拡張 | vmx_controls.c | ~350 | WP対象外 | CET-SS + MSR bitmap + preemption timer + ページアロケータ (Phase 2-3/4/5, 0C-3) |
@@ -42,7 +42,7 @@
 | リンカスクリプト | fbvbs.ld | ~170 | N/A | ガードページ + IST スタック + W^X + ASSERT 検証 (Phase 1-11) |
 | ファジングハーネス | fuzz/*.c | ~550 | N/A | command page + manifest + multiboot2 + iommu (Phase 9-1) |
 
-**WP検証合計:** 8,330 proved goals / 8,387 total (99.32%), 57 timeouts, 0 smoke failures
+**WP検証合計:** 履歴上は 8,330 / 8,387 (57 TO) だが、現行の release 判定ではファイル単位の再現結果と proof gap の有無を別途確認すること。
 
 ### 未実装・ブロッカー
 
@@ -50,16 +50,20 @@
 2. ~~**IDT + 例外ハンドラ**~~ — ✅ Phase 1-1 IDT 実装済み (idt.c)
 3. ~~**並行性設計**~~ — ✅ Phase 1-6 完了。BHL + per-CPU 戦略文書化 (fbvbs_concurrency.h) (2026-03-21)
 4. **IOMMU 実機有効化** — DMAR/IVRS パース済み、ページアロケータ接続済み、MMIO 実アクセスは PRODUCTION NOTE
-5. **ブートパス** — boot.S/UEFI→ハイパーバイザー起動コード、DRTM/Secure Boot 検出強化済み
-6. ~~**アセンブリバックエンド**~~ — ✅ Phase 1-12 完了。fbvbs_asm.h 集約 (2026-03-21)
-7. ~~**HLAT/翻訳整合性**~~ — ✅ Intel HLAT + AMD NPT + MBEC/GMET、per-partition 状態管理 + KLD 接続 (2026-03-22)
-8. ~~**xAPIC/x2APIC 仮想化**~~ — ✅ Phase 1-7 実装済み (apic.c) (2026-03-21)
-9. **信頼サービスパーティション** — KCI/KSI/IKS/SKS/UVS 全て stub（Ada/SPARK 必要、Phase 4）
-10. **暗号ライブラリ** — SHA-256/384, Ed25519, AES 実装なし（Ada/SPARK 必要、Phase 5）
-11. **FreeBSD フロントエンド** — fbvbs.ko 未実装（Rust no_std 必要、Phase 6）
-12. **bhyve/vmm 統合** — vmm.ko 互換層未実装（Phase 7）
-13. ~~**マルチソケット**~~ — ✅ Phase 8 完了。MADT/SRAT/AP/IPI/TLB shootdown/NUMA (mp_init.c) (2026-03-22)
-14. **Phase 9 残作業** — ~~ファジング~~ ✅ 4ハーネス、~~MC/DC~~ ✅ gcov、~~MISRA C~~ ✅ cppcheck + 逸脱ログ、~~再現可能ビルド~~ ✅ deterministic + SBOM、~~隠れチャネル~~ ✅ CCA分析、~~性能バジェット~~ ✅ 設計分析、~~サービス障害~~ ✅ 影響分析、~~REQトレーサビリティ~~ ✅ 全110要件。残: CI/CD パイプライン (9-8)、AMD翻訳実証 (9-2)、監査認証準備 (9-4)
+5. **ブートパス** — Multiboot2 bare-metal/QEMU smoke は追加済み、UEFI handoff はなお skeleton が残る
+6. **command page proof hardening** — raw typed-cast 境界の縮小、RTE guard 追加、header contract 完備
+7. ~~**KCI byte binding**~~ — ✅ full-module SHA-384 verification + approved per-page digest table (2026-03-24)
+8. **Executable image materializer** — `PARTITION_LOAD_IMAGE` が `Loaded` を主張できるだけの authoritative ELF/image loader
+9. **VM exit 緩和列の実装完了** — RSB fill / PBRSB / BHB clear の実動作化
+9. ~~**アセンブリバックエンド**~~ — ✅ Phase 1-12 完了。fbvbs_asm.h 集約 (2026-03-21)
+10. ~~**HLAT/翻訳整合性**~~ — ✅ Intel HLAT + AMD NPT + MBEC/GMET、per-partition 状態管理 + KLD 接続 (2026-03-22)
+11. ~~**xAPIC/x2APIC 仮想化**~~ — ✅ Phase 1-7 実装済み (apic.c) (2026-03-21)
+12. **信頼サービスパーティション** — KCI/KSI/IKS/SKS/UVS 全て stub（Ada/SPARK 必要、Phase 4）
+13. **暗号ライブラリ** — retained C には KCI 用の限定 SHA-384 測定経路のみ存在し、一般用途の SHA-256/384, Ed25519, AES ライブラリは未実装（Ada/SPARK 必要、Phase 5）
+14. **FreeBSD フロントエンド** — fbvbs.ko 未実装（Rust no_std 必要、Phase 6）
+15. **bhyve/vmm 統合** — vmm.ko 互換層未実装（Phase 7）
+16. ~~**マルチソケット**~~ — ✅ Phase 8 完了。MADT/SRAT/AP/IPI/TLB shootdown/NUMA (mp_init.c) (2026-03-22)
+17. **Phase 9 残作業** — ファジングハーネス 5 本と基本ゲートはあるが、継続 fuzzing・seed corpus・SBOM/provenance artifact・監査認証準備は未完。残: CI/CD パイプライン (9-8)、AMD翻訳実証 (9-2)、監査認証準備 (9-4)、supply-chain artifact の閉鎖
 
 ---
 
@@ -112,18 +116,15 @@
 4. command.c: 6 TO変化なし（dispatch_hypercall GPA assigns、構造限界、許容）
 5. **ヘッダ契約追加**: fbvbs_find_manifest_profile_for_object, fbvbs_vmx_run_vcpu, fbvbs_log_append, fbvbs_primary_host_callsite に ACSL 契約追加 → partition.c 5件解消
 
-#### 0A-2. KCI_SET_WX page binding 完成 ✅
+#### 0A-2. KCI_SET_WX measurement binding ✅ (2026-03-24)
 
 **対象要件:** REQ-0400–0402
 
 **完了:**
-1. ✅ `struct fbvbs_kci_page_binding` 設計・実装（FBVBS_MAX_KCI_PAGE_BINDINGS=64）
-2. ✅ `fbvbs_kci_verify_page_hash()` — execute 権限付与前の hash 検証（モデル実装、PRODUCTION NOTE付き、Phase 5 暗号統合で本番化）
-3. ✅ `fbvbs_kci_record_binding()` — 検証成功時の GPA→artifact binding 記録
-4. ✅ `fbvbs_kci_invalidate_bindings_for_gpa()` — memory_unmap/set_permission 時の binding 無効化
-5. ✅ kci_set_wx に hash 検証 + binding 記録統合、MEASUREMENT_FAILED/RESOURCE_EXHAUSTED 返却値追加
-6. ✅ 本番ビルドは fail-closed（hash 検証未実装時は execute 拒否）
-7. ACSL 契約は新規関数に記述済み、WP 検証は Phase 0A-1 完了状態に含む
+1. ✅ `KCI_VERIFY_MODULE` が host partition 上の module mapping 全体を raw SHA-384 測定し、artifact catalog の `payload_hash` と一致したときだけ承認
+2. ✅ successful verify 時に approved per-page SHA-384 digest table を internal state に materialize
+3. ✅ `KCI_SET_WX` が `guest_physical_address == verified_module_base + file_offset` を強制し、対象全 page の digest を approved table と再照合
+4. ✅ write 付与と unmap で approved module state と page bindings を失効
 
 #### 0A-3. Device qualification 基盤 ✅
 
@@ -318,7 +319,7 @@
 7. ✅ W^X ページテーブル — boot.S `setup_page_tables_wx` (identity mapped, NX, guard page)
 8. ✅ GDT (64-bit flat model) — boot.S `gdt64`
 
-#### 1-3. FreeBSD deprivilege ✅（VMCS構成ロジック実装済み）
+#### 1-3. FreeBSD deprivilege ⬜（VMCS構成ロジックは実装済み、end-to-end VMLAUNCH handoff は未完）
 
 **新規ファイル:** `hypervisor/src/vmcs_setup.c`
 
@@ -335,7 +336,7 @@
    - Exception bitmap: #DB, #BP, #UD, #MC
    - CR0/CR4 guest-host mask = pinned security bits
 5. ✅ `fbvbs_vmcs_apply()` — VMWRITE シーケンス文書化（要アセンブリ）
-6. ✅ `fbvbs_deprivilege_host()` — CPU 状態キャプチャ→VMCS構築→VMLAUNCH シーケンス文書化
+6. ⬜ `fbvbs_deprivilege_host()` — CPU 状態キャプチャ→VMCS構築はあるが、現行コードは `VMLAUNCH not implemented` で fail-closed
 7. EPT/NPT ページテーブル構築 — Phase 2 で HLAT 統合と併せて実装
 8. VM exit ハンドラチェーン — PRODUCTION NOTE（アセンブリ vmexit_handler 必要）
 9. ✅ 一次監査ログ初期化（UART 経路） — early_init.c `serial_print`

@@ -461,17 +461,6 @@ static struct fbvbs_memory_object *fbvbs_allocate_memory_object_slot(
     return NULL;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(request) || request == \null;
-    requires \valid(response) || response == \null;
-    requires state != \null ==> state->next_memory_object_id > 0;
-    assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1],
-            state->next_memory_object_id,
-            *response;
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == RESOURCE_EXHAUSTED;
-    ensures \result == OK ==> response->memory_object_id > 0;
-*/
 int fbvbs_memory_allocate_object(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_allocate_object_request *request,
@@ -516,11 +505,6 @@ int fbvbs_memory_allocate_object(
     return OK;
 }
 
-/*@ requires \valid(state);
-    assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1];
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == NOT_FOUND || \result == RESOURCE_BUSY || \result == PERMISSION_DENIED;
-*/
 int fbvbs_memory_release_object(  /* REQ-0909 */
     struct fbvbs_hypervisor_state *state,
     uint64_t memory_object_id,

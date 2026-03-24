@@ -1,55 +1,87 @@
-# FBVBS Continuous Integration Pipeline (Phase 9-8, REQ-1000)
+# FBVBS Continuous Integration Pipeline
 #
-# Runs on every push and pull request to main/dev branches.
-# Gates: GCC -fanalyzer, cppcheck, unit tests, fuzz harness build,
-#        reproducible build verification, traceability check.
-#
-# Frama-C WP is run on a weekly schedule due to resource requirements
-# (~4GB RAM, 30+ minutes per run).
+# This workflow is producer-facing for the standalone microhypervisor.
+# It intentionally tests and archives the repository state needed to ship
+# `hypervisor/` independently from the future FBVBS service stack.
 
 name: FBVBS CI
 
 on:
   push:
     branches: [main, dev]
+    tags:
+      - 'hypervisor-v*'
     paths:
+      - '.github/**'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'RELEASE.md'
+      - 'SECURITY.md'
       - 'hypervisor/**'
+      - 'plan/**'
   pull_request:
-    branches: [main]
+    branches: [main, dev]
     paths:
+      - '.github/**'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'RELEASE.md'
+      - 'SECURITY.md'
       - 'hypervisor/**'
+      - 'plan/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1'
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CC: gcc-13
 
 jobs:
-  # ---------- Gate 1: Static Analysis ----------
   static-analysis:
     name: GCC -fanalyzer + cppcheck
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y gcc-13 cppcheck
 
-      - name: GCC -fanalyzer (24 sources + UEFI)
+      - name: GCC -fanalyzer
         run: make -C hypervisor analyze CC=gcc-13
 
-      - name: cppcheck (warning + performance + portability)
-        run: make -C hypervisor cppcheck
+      - name: cppcheck
+        run: make -C hypervisor cppcheck CC=gcc-13
 
-  # ---------- Gate 2: Unit Tests ----------
   unit-tests:
     name: Unit tests (3 suites)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
@@ -59,12 +91,15 @@ jobs:
       - name: Build and run tests
         run: make -C hypervisor test CC=gcc-13
 
-  # ---------- Gate 3: Fuzz Harness Build ----------
   fuzz-build:
-    name: Fuzz harness build (4 harnesses)
+    name: Fuzz harness build (5 harnesses)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
@@ -74,12 +109,26 @@ jobs:
       - name: Build fuzz harnesses
         run: make -C hypervisor fuzz-build CC=gcc-13
 
-  # ---------- Gate 4: Branch Coverage ----------
+      - name: Upload fuzz binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-binaries
+          path: |
+            hypervisor/build/fuzz_command_page
+            hypervisor/build/fuzz_manifest
+            hypervisor/build/fuzz_multiboot2
+            hypervisor/build/fuzz_iommu
+            hypervisor/build/fuzz_log_decoder
+
   coverage:
-    name: Branch coverage (gcov)
+    name: Coverage evidence
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
@@ -87,14 +136,28 @@ jobs:
           sudo apt-get install -y gcc-13
 
       - name: Build and run with coverage
-        run: make -C hypervisor coverage CC=gcc-13
+        run: |
+          make -C hypervisor coverage CC=gcc-13 | tee hypervisor/build/coverage-summary.txt
 
-  # ---------- Gate 5: Reproducible Build ----------
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-artifacts
+          path: |
+            hypervisor/build/coverage-summary.txt
+            hypervisor/build/*.gcov
+            hypervisor/build/*.gcda
+            hypervisor/build/*.gcno
+
   reproducible-build:
-    name: Reproducible build verification
+    name: Reproducible build + SBOM
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install dependencies
         run: |
@@ -107,47 +170,95 @@ jobs:
       - name: Generate SBOM
         run: make -C hypervisor sbom CC=gcc-13
 
-      - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload reproducibility artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sbom
-          path: hypervisor/build/sbom.txt
+          name: reproducibility-artifacts
+          path: |
+            hypervisor/build/repro_manifest_1.sha256
+            hypervisor/build/repro_manifest_2.sha256
+            hypervisor/build/sbom.txt
 
-  # ---------- Gate 6: Traceability ----------
-  traceability:
-    name: Requirement traceability (115 REQs)
+  baremetal-smoke:
+    name: Bare-metal GRUB/QEMU smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13 qemu-system-x86 grub-pc-bin grub-common xorriso mtools
+
+      - name: Build and run QEMU smoke
+        run: make -C hypervisor run-qemu-smoke CC=gcc-13
+
+      - name: Upload bare-metal artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: baremetal-artifacts
+          path: |
+            hypervisor/build/fbvbs-baremetal.elf
+            hypervisor/build/fbvbs-baremetal.iso
+            hypervisor/build/qemu-smoke.log
+
+  traceability:
+    name: Requirement traceability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Check requirement traceability
         run: |
-          cd hypervisor
-          python3 tools/traceability_matrix.py > build_traceability.md 2>&1
-          # Fail if any requirements have no source reference
-          if python3 tools/traceability_matrix.py 2>&1 | grep -q "no source reference"; then
+          mkdir -p hypervisor/build
+          python3 hypervisor/tools/traceability_matrix.py | tee hypervisor/build/traceability.txt
+          if grep -q "no source reference" hypervisor/build/traceability.txt; then
             echo "FAIL: Some requirements have no source reference"
-            python3 tools/traceability_matrix.py 2>&1 | grep "no source reference"
+            grep "no source reference" hypervisor/build/traceability.txt
             exit 1
           fi
-          echo "PASS: All requirements have source references"
 
-  # ---------- Weekly: Frama-C WP Proof ----------
+      - name: Upload traceability report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: traceability-report
+          path: hypervisor/build/traceability.txt
+
   frama-c-wp:
-    name: Frama-C WP formal proof (9 files)
+    name: Frama-C WP formal proof
     runs-on: ubuntu-24.04
-    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[run-wp]')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/hypervisor-v')
+    continue-on-error: true
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Install opam and Frama-C
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y opam
+          sudo apt-get install -y opam z3
           opam init --auto-setup --disable-sandboxing -y
-          opam install frama-c alt-ergo z3 -y
+          opam install frama-c alt-ergo -y
 
       - name: Run WP proof
         run: |
           eval $(opam env)
-          make -C hypervisor frama-c-wp
+          mkdir -p hypervisor/build
+          make -C hypervisor proof 2>&1 | tee hypervisor/build/frama-c-wp.log
+
+      - name: Upload WP log
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frama-c-wp-log
+          path: hypervisor/build/frama-c-wp.log

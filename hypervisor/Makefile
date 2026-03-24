@@ -1,8 +1,11 @@
 CC ?= gcc
 LD ?= ld
+AS ?= as
+QEMU ?= qemu-system-x86_64
 
 BUILD_DIR := build
 INCLUDES := -Iinclude
+DEPFLAGS := -MMD -MP
 
 COMMON_WARNINGS := -Wall -Wextra -Werror -Wpedantic \
                    -Wconversion -Wsign-conversion \
@@ -35,6 +38,7 @@ ALL_SOURCES := $(CORE_SOURCES) \
     src/partition.c \
     src/security.c \
     src/kernel.c \
+    src/acpi.c \
     src/vm_policy.c \
     src/boot_multiboot.c \
     src/iommu_vtd.c \
@@ -65,12 +69,18 @@ FRAMA_C_WP_SOURCES := \
     src/kernel.c \
     src/command.c \
     src/security.c \
-    src/partition.c
+    src/partition.c \
+    src/page_alloc.c
 
 # ---------- compiler flags ----------
 
 HOST_CFLAGS := $(COMMON_WARNINGS) $(HARDENING_FLAGS) -O2 $(INCLUDES)
 ANALYZER_CFLAGS := $(HOST_CFLAGS) -fanalyzer
+BAREMETAL_CFLAGS := $(COMMON_WARNINGS) $(HARDENING_FLAGS) -O2 $(INCLUDES) \
+                    -ffreestanding -fno-pie -fno-pic -m64 -mgeneral-regs-only \
+                    -DFBVBS_BAREMETAL_BUILD
+BAREMETAL_LDFLAGS := -nostdlib -static -no-pie \
+                     -Wl,-T,fbvbs.ld -Wl,--build-id=none
 
 # UEFI uses MS ABI and CHAR16 literals; relax -Wpedantic
 UEFI_CFLAGS := -Wall -Wextra -Werror -Wconversion -Wsign-conversion \
@@ -82,6 +92,13 @@ UEFI_ANALYZER_CFLAGS := $(UEFI_CFLAGS) -fanalyzer
 ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(ALL_SOURCES))
 UEFI_ANALYZER_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/analyze_%.o,$(UEFI_SOURCES))
 HOST_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/host_%.o,$(ALL_SOURCES))
+BAREMETAL_SOURCES := $(ALL_SOURCES) src/freestanding_runtime.c
+BAREMETAL_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/baremetal_%.o,$(BAREMETAL_SOURCES))
+BAREMETAL_ASM_OBJECTS := $(BUILD_DIR)/baremetal_boot.o
+DEPFILES := $(ANALYZER_OBJECTS:.o=.d) \
+	$(UEFI_ANALYZER_OBJECTS:.o=.d) \
+	$(HOST_OBJECTS:.o=.d) \
+	$(BAREMETAL_OBJECTS:.o=.d)
 
 TEST_BINS := \
 	$(BUILD_DIR)/fbvbs_leaf_boundary_tests \
@@ -104,7 +121,7 @@ FRAMAC_WP_FLAGS := \
 
 # ---------- targets ----------
 
-.PHONY: all clean analyze test proof frama-c-wp fuzz-build coverage cppcheck traceability ci
+.PHONY: all clean analyze test proof frama-c-wp fuzz-build coverage coverage-clean cppcheck traceability ci baremetal-elf baremetal-iso run-qemu-smoke run-qemu-kvm-smoke release-hypervisor
 
 all: analyze
 
@@ -132,16 +149,22 @@ $(BUILD_DIR):
 
 # UEFI sources need relaxed flags (MS ABI, CHAR16)
 $(BUILD_DIR)/analyze_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
-	$(CC) $(UEFI_ANALYZER_CFLAGS) -c $< -o $@
+	$(CC) $(UEFI_ANALYZER_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/host_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
-	$(CC) $(UEFI_CFLAGS) -c $< -o $@
+	$(CC) $(UEFI_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/analyze_%.o: src/%.c | $(BUILD_DIR)
-	$(CC) $(ANALYZER_CFLAGS) -c $< -o $@
+	$(CC) $(ANALYZER_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/host_%.o: src/%.c | $(BUILD_DIR)
-	$(CC) $(HOST_CFLAGS) -c $< -o $@
+	$(CC) $(HOST_CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/baremetal_%.o: src/%.c | $(BUILD_DIR)
+	$(CC) $(BAREMETAL_CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/baremetal_boot.o: src/boot.S | $(BUILD_DIR)
+	$(AS) --64 $< -o $@
 
 $(BUILD_DIR)/fbvbs_leaf_boundary_tests: $(BUILD_DIR)/host_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
@@ -151,6 +174,67 @@ $(BUILD_DIR)/fbvbs_policy_security_tests: $(HOST_OBJECTS) tests/test_policy_secu
 
 $(BUILD_DIR)/fbvbs_fault_injection_tests: $(HOST_OBJECTS) tests/test_fault_injection.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+-include $(DEPFILES)
+
+$(BUILD_DIR)/fbvbs-baremetal.elf: $(BAREMETAL_ASM_OBJECTS) $(BAREMETAL_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(BAREMETAL_LDFLAGS) $^ -o $@
+
+baremetal-elf: $(BUILD_DIR)/fbvbs-baremetal.elf
+
+$(BUILD_DIR)/fbvbs-baremetal.iso: $(BUILD_DIR)/fbvbs-baremetal.elf grub/grub.cfg | $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/iso
+	mkdir -p $(BUILD_DIR)/iso/boot/grub
+	cp $(BUILD_DIR)/fbvbs-baremetal.elf $(BUILD_DIR)/iso/boot/fbvbs-baremetal.elf
+	cp grub/grub.cfg $(BUILD_DIR)/iso/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BUILD_DIR)/iso >/dev/null
+
+baremetal-iso: $(BUILD_DIR)/fbvbs-baremetal.iso
+
+run-qemu-smoke: $(BUILD_DIR)/fbvbs-baremetal.iso
+	rm -f $(BUILD_DIR)/qemu-smoke.log
+	timeout 20s $(QEMU) \
+		-machine q35,accel=tcg \
+		-m 256 \
+		-no-reboot -no-shutdown \
+		-display none -monitor none \
+		-serial stdio \
+			-cpu qemu64,+vmx,+nx,+rdrand,+rdseed \
+		-device intel-iommu,intremap=on,device-iotlb=on,caching-mode=on \
+		-cdrom $(BUILD_DIR)/fbvbs-baremetal.iso \
+		-boot d \
+		> $(BUILD_DIR)/qemu-smoke.log 2>&1; \
+	status=$$?; \
+	cat $(BUILD_DIR)/qemu-smoke.log; \
+	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
+		exit $$status; \
+	fi; \
+		grep -q "FBVBS: boot64 reached" $(BUILD_DIR)/qemu-smoke.log; \
+			grep -Eq "FBVBS: hypervisor init complete|FBVBS: VMX unavailable|FBVBS: IOMMU detection failed|FBVBS: IOMMU initialization failed|FBVBS: boot integrity requirements not met" $(BUILD_DIR)/qemu-smoke.log
+
+run-qemu-kvm-smoke: $(BUILD_DIR)/fbvbs-baremetal.iso
+	rm -f $(BUILD_DIR)/qemu-kvm-smoke.log
+	timeout 20s sudo -n $(QEMU) \
+		-machine q35,accel=kvm,kernel-irqchip=split \
+		-m 256 \
+		-no-reboot -no-shutdown \
+		-display none -monitor none \
+		-serial stdio \
+		-cpu host \
+		-device intel-iommu,intremap=on,device-iotlb=on,caching-mode=on \
+		-cdrom $(BUILD_DIR)/fbvbs-baremetal.iso \
+		-boot d \
+		> $(BUILD_DIR)/qemu-kvm-smoke.log 2>&1; \
+	status=$$?; \
+	cat $(BUILD_DIR)/qemu-kvm-smoke.log; \
+	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
+		exit $$status; \
+	fi; \
+		grep -q "FBVBS: boot64 reached" $(BUILD_DIR)/qemu-kvm-smoke.log; \
+			grep -Eq "FBVBS: hypervisor init complete|FBVBS: VMX unavailable|FBVBS: IOMMU detection failed|FBVBS: IOMMU initialization failed|FBVBS: boot integrity requirements not met" $(BUILD_DIR)/qemu-kvm-smoke.log
+
+release-hypervisor: analyze test cppcheck fuzz-build coverage traceability reproducible sbom baremetal-iso run-qemu-smoke
+	@echo "Standalone microhypervisor repository gates passed; formal proof and release blockers are tracked separately."
 
 # ---------- traceability (Phase 9-1, REQ-1000) ----------
 traceability:
@@ -188,7 +272,10 @@ $(BUILD_DIR)/cov_policy_security_tests: $(COV_OBJECTS) tests/test_policy_securit
 $(BUILD_DIR)/cov_fault_injection_tests: $(COV_OBJECTS) tests/test_fault_injection.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-coverage: $(BUILD_DIR)/cov_policy_security_tests $(BUILD_DIR)/cov_fault_injection_tests
+coverage-clean:
+	rm -f $(BUILD_DIR)/cov_* $(BUILD_DIR)/*.gcda $(BUILD_DIR)/*.gcno $(BUILD_DIR)/*.gcov
+
+coverage: coverage-clean $(BUILD_DIR)/cov_policy_security_tests $(BUILD_DIR)/cov_fault_injection_tests
 	$(BUILD_DIR)/cov_policy_security_tests
 	$(BUILD_DIR)/cov_fault_injection_tests
 	@echo "--- Branch coverage summary (security-critical files) ---"
@@ -234,7 +321,7 @@ reproducible: $(REPRO_OBJECTS)
 
 sbom: $(REPRO_OBJECTS)
 	@echo "# FBVBS SBOM (Software Bill of Materials)" > $(BUILD_DIR)/sbom.txt
-	@echo "# Generated: $$(date -Iseconds)" >> $(BUILD_DIR)/sbom.txt
+	@echo "# Generated: $$(if [ -n "$$SOURCE_DATE_EPOCH" ]; then date -u -d "@$$SOURCE_DATE_EPOCH" -Iseconds; else git log -1 --format=%cI 2>/dev/null || date -u -Iseconds; fi)" >> $(BUILD_DIR)/sbom.txt
 	@echo "" >> $(BUILD_DIR)/sbom.txt
 	@echo "## Build Environment" >> $(BUILD_DIR)/sbom.txt
 	@echo "Compiler: $$($(CC) --version | head -1)" >> $(BUILD_DIR)/sbom.txt
@@ -269,7 +356,7 @@ $(BUILD_DIR)/fuzz_manifest: $(HOST_OBJECTS) fuzz/fuzz_manifest.c | $(BUILD_DIR)
 $(BUILD_DIR)/fuzz_multiboot2: fuzz/fuzz_multiboot2.c src/boot_multiboot.c src/log.c src/memory_utils.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fuzz_iommu: fuzz/fuzz_iommu.c src/iommu_vtd.c src/iommu_amdvi.c src/page_alloc.c src/memory_utils.c | $(BUILD_DIR)
+$(BUILD_DIR)/fuzz_iommu: fuzz/fuzz_iommu.c src/iommu_vtd.c src/iommu_amdvi.c src/acpi.c src/page_alloc.c src/memory_utils.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
 $(BUILD_DIR)/fuzz_log_decoder: fuzz/fuzz_log_decoder.c src/log.c src/memory_utils.c | $(BUILD_DIR)
@@ -277,5 +364,5 @@ $(BUILD_DIR)/fuzz_log_decoder: fuzz/fuzz_log_decoder.c src/log.c src/memory_util
 
 # ---------- CI gate (Phase 9-8, REQ-1000) ----------
 # Runs all verification gates in sequence. Equivalent to the GitHub Actions pipeline.
-ci: analyze test cppcheck fuzz-build coverage traceability reproducible
+ci: analyze test cppcheck fuzz-build coverage traceability reproducible sbom
 	@echo "CI: All gates passed."

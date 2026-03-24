@@ -1,104 +1,130 @@
-# FBVBS WP Verification Boundary Document (REQ-0201, REQ-1000, REQ-1100)
+# FBVBS WP Verification Boundary
 
-**Date:** 2026-03-22
-**Tool:** Frama-C 32.0 (Germanium), WP plugin, Typed+Cast model
-**Provers:** Alt-Ergo 2.4.3, Z3 4.8.12
+**Date:** 2026-03-23
+**Tooling intent:** Frama-C 32.x WP, `Typed+Cast` model
+**Purpose:** define the current proof target set for the standalone microhypervisor, and explain why files are in or out of scope
 
-## Summary
+## Current interpretation
 
-| Category | Files | Lines | Proved Goals | Timeouts | Rate |
-|----------|-------|-------|-------------|----------|------|
-| WP-verified | 9 | 10,460 | 8,330 | 57 | 99.32% |
-| WP-excluded (void* casts) | 2 | 264 | N/A | N/A | N/A |
-| WP-excluded (platform/HW) | 13 | 10,058 | N/A | N/A | N/A |
-| **Total** | **24** | **20,782** | **8,330** | **57** | — |
+The WP boundary is not “all ACSL-annotated files”.
 
-## WP-Verified Files (9 files, 10,460 lines)
+The correct current interpretation is:
 
-These files have full ACSL contracts on all functions. The WP plugin proves
-absence of: buffer overflows, integer overflows, null dereferences, invalid
-memory access, and contract violations. Timeout goals are documented below.
+- **in scope**
+  - retained-C core files whose logic is primarily arithmetic, state-machine, or bounded-data manipulation
+- **out of scope**
+  - files dominated by raw binary parsing, firmware memory walks, MMIO/MSR/VMCS interactions, or proof-hostile cast/union patterns that are not yet isolated behind smaller proof-friendly helper functions
 
-| File | Lines | Proved/Total | TO | Rate | Notes |
-|------|-------|-------------|-----|------|-------|
-| cpu_security.c | 1,428 | 652/652 | 0 | 100% | 81-feature detection + vuln profiling |
-| command.c | 2,133 | 1,636/1,642 | 6 | 99.63% | 58 hypercall handlers + dispatch |
-| security.c | 2,734 | 1,641/1,656 | 15 | 99.09% | manifest/hash/KCI trust boundary |
-| partition.c | 2,939 | 1,611/1,633 | 22 | 98.65% | lifecycle + IOMMU domain management |
-| vm_policy.c | 546 | 1,322/1,324 | 2 | 99.85% | CR/DR/capability enforcement |
-| kernel.c | 1,339 | 835/836 | 1 | 99.88% | hypervisor_init + model code |
-| vmx.c | 259 | 329/330 | 1 | 99.70% | VMX probe/setup/run |
-| log.c | 389 | 217/218 | 1 | 99.54% | audit log ringbuffer + CRC32C |
-| memory.c | 548 | 107/117 | 10 | 91.45% | EPT map/unmap + rollback |
+Release decisions must use current reproducible proof runs, not stale aggregate percentages.
 
-### Timeout Root Causes
+## Current WP target set
 
-| TO Count | Root Cause | Mitigation |
-|----------|-----------|------------|
-| 22 | partition.c: release_shared_registrations 2D assigns, callee-requires | Bounded by _Static_assert + runtime checks |
-| 15 | security.c: GPA manifest chain (uintptr_t cast → ACSL assigns) | #ifdef __FRAMAC__ model eliminates at runtime |
-| 6 | command.c: dispatch_hypercall GPA-derived pointer assigns | Same GPA model approach |
-| 10 | memory.c: EPT map/unmap loop termination + create_root requires | Bounded loops + _Static_assert guards |
-| 2 | vm_policy.c: run_vcpu/unclassified_fault callee chain | Verified by GCC -fanalyzer + smoke tests |
-| 1 | kernel.c: model code function | Model-only, not production |
-| 1 | vmx.c: synthetic EPT access bits | Single bit operation, trivially correct |
+The repository currently targets these source files for WP:
 
-**All 57 timeouts are structural limitations of the WP Typed+Cast model
-interacting with GPA-derived pointers or 2D assigns. None represent
-unverified security-critical logic.** The corresponding runtime paths are
-covered by GCC -fanalyzer, unit tests, and fuzz harnesses.
+- `src/cpu_security.c`
+- `src/vmx.c`
+- `src/memory.c`
+- `src/log.c`
+- `src/vm_policy.c`
+- `src/kernel.c`
+- `src/command.c`
+- `src/security.c`
+- `src/partition.c`
+- `src/page_alloc.c`
 
-## WP-Excluded: void* Cast Files (2 files, 264 lines)
+### Why these files are in scope
 
-These files use void* casts that are incompatible with the WP Typed+Cast model.
-They are verified by GCC -fanalyzer static analysis and fuzz testing.
+- `cpu_security.c`
+  - mostly bounded feature-detection and mitigation synthesis logic
+- `vmx.c`
+  - compact VMX leaf/control logic, despite remaining union-model warnings
+- `memory.c`
+  - EPT state transitions and rollback logic are security-critical and mostly proof-shaped
+- `log.c`
+  - audit-log state machine is compact and bounded
+- `vm_policy.c`
+  - exit-policy enforcement is central to hypervisor correctness
+- `kernel.c`
+  - integration logic is security-critical, even though it still depends on excluded helpers
+- `command.c`
+  - command boundary and capability enforcement are security-critical
+- `security.c`
+  - trust-boundary logic must remain in proof scope
+- `partition.c`
+  - lifecycle and shared-memory invariants are security-critical
+- `page_alloc.c`
+  - pure retained-C allocator logic is proof-compatible and removing it from scope only creates missing-spec noise for `kernel.c`
 
-| File | Lines | Reason | Verification |
-|------|-------|--------|-------------|
-| memory_utils.c | 103 | void* in fbvbs_zero_memory, fbvbs_copy_memory, constant_time_equals | GCC -fanalyzer + manual review |
-| boot_multiboot.c | 161 | void* casts for Multiboot2 binary structure parsing | GCC -fanalyzer + fuzz_multiboot2 harness |
+## Files intentionally out of scope today
 
-## WP-Excluded: Platform/Hardware Files (13 files, 10,058 lines)
+### Excluded because they are proof-hostile byte/cast utilities
 
-These files interact with hardware (MMIO, MSR, VMCS, CPUID) or contain
-platform-specific initialization code. They use `#ifdef __FRAMAC__` model
-paths where applicable, and are verified by GCC -fanalyzer.
+- `src/memory_utils.c`
+  - raw byte-copy/zero helpers and constant-time utility patterns
+- `src/boot_multiboot.c`
+  - raw Multiboot2 binary parsing over attacker-controlled byte buffers
+- `src/freestanding_runtime.c`
+  - bare-metal-only freestanding runtime glue and serial console primitives that are outside the hosted retained-C proof boundary
 
-| File | Lines | Category | Verification |
-|------|-------|----------|-------------|
-| iommu_vtd.c | 1,010 | DMAR parser + VT-d register control | GCC -fanalyzer + fuzz_iommu harness |
-| iommu_amdvi.c | 645 | IVRS parser + AMD-Vi register control | GCC -fanalyzer + fuzz_iommu harness |
-| amd_npt.c | 1,244 | NPT write-protect + fault handler | GCC -fanalyzer + ACSL on validate functions |
-| hlat.c | 1,110 | HLAT table management + VMCS integration | GCC -fanalyzer + ACSL on boundary checks |
-| mp_init.c | 1,297 | MADT/SRAT parser + AP init + TLB shootdown | GCC -fanalyzer + ACSL loop invariants |
-| vmcs_setup.c | 587 | VMCS field encoding + deprivilege | GCC -fanalyzer |
-| vmx_controls.c | 424 | CET-SS + MSR bitmap + preemption timer | GCC -fanalyzer |
-| page_alloc.c | 403 | Bitmap PFN allocator + zero guarantee | GCC -fanalyzer |
-| uefi_entry.c | 317 | UEFI application entry + EFI services | GCC -fanalyzer (UEFI-specific flags) |
-| early_init.c | 273 | Post-ExitBootServices initialization | GCC -fanalyzer |
-| idt.c | 368 | IDT entry construction + IST stacks | GCC -fanalyzer |
-| watchdog.c | 115 | VMX preemption timer watchdog | GCC -fanalyzer |
-| apic.c | 410 | xAPIC/x2APIC virtualization | GCC -fanalyzer |
+These are still analyzer-tested and fuzz-tested, but they are not yet a good fit for the current WP model boundary.
 
-### WP-Compatible Subsets in Excluded Files
+### Excluded because they are platform or hardware dominated
 
-Several excluded files contain pure verification functions with ACSL contracts
-that could be individually verified. These are candidates for incremental WP
-expansion:
+- `src/acpi.c`
+- `src/iommu_vtd.c`
+- `src/iommu_amdvi.c`
+- `src/early_init.c`
+- `src/uefi_entry.c`
+- `src/vmcs_setup.c`
+- `src/vmx_controls.c`
+- `src/hlat.c`
+- `src/amd_npt.c`
+- `src/watchdog.c`
+- `src/apic.c`
+- `src/idt.c`
+- `src/mp_init.c`
 
-- **amd_npt.c**: `fbvbs_npt_validate_pte_write()` — pure comparison logic
-- **hlat.c**: `fbvbs_hlat_add_region()` PML4 index validation — pure arithmetic
-- **mp_init.c**: `madt_parse_entries()`, `srat_parse_entries()` — bounded parsers with full ACSL loop invariants
-- **page_alloc.c**: `fbvbs_page_alloc()`, `fbvbs_page_free()` — bitmap operations
+Reasons include:
 
-## Verification Stack Summary
+- MMIO/MSR/VMCS operations
+- firmware-owned memory scanning
+- AP bring-up and interrupt state
+- larger proof-hostile unions and architecture-specific encodings
+- model-only or partial implementations where fail-closed behavior matters more than raw proof coverage count
 
-| Layer | Coverage | Tool |
-|-------|---------|------|
-| Formal proof (ACSL + WP) | 9 files, 99.32% proved | Frama-C 32.0 WP |
-| Static analysis | 24 files, 0 warnings | GCC 13 -fanalyzer |
-| Compiler hardening | 24 files | -fstack-protector-strong, -fcf-protection=full, -fno-strict-overflow |
-| Fuzz testing | 4 harnesses (command page, manifest, multiboot2, IOMMU) | AFL++ / libFuzzer compatible |
-| Unit tests | 2 test suites (leaf boundary, policy security) | Custom C test framework |
-| Compile-time guards | 21+ _Static_assert checks | Struct size, buffer size, ABI drift |
-| TOCTOU hardening | 3 cached fields in dispatch | cached_call_id, cached_input_length, cached_flags |
+## Current proof state
+
+`make -C hypervisor proof` now launches Frama-C WP successfully in this environment, but it does **not** close cleanly yet.
+
+The current known gaps include:
+
+- missing-spec warnings for some excluded helper interfaces
+- missing/default assigns warnings
+- `Typed+Cast` and union-model warnings in `vmx.c`, `vm_policy.c`, `log.c`, `partition.c`, and `kernel.c`
+- proof timeouts during larger aggregate runs
+
+So the current repository state is:
+
+- **WP boundary defined and meaningful**
+- **proof execution available**
+- **proof completion still incomplete**
+
+## Next expansion candidates
+
+These are the most credible next candidates for incremental proof expansion after refactoring:
+
+- proof-friendly helper subsets from `amd_npt.c`
+- proof-friendly helper subsets from `hlat.c`
+- bounded ACPI/MP parser helpers isolated out of `acpi.c` / `mp_init.c`
+- further shrinking of typed-cast boundaries in `command.c`
+
+## Non-goals for the current boundary
+
+The current WP boundary does **not** try to prove:
+
+- authoritative hardware bring-up
+- firmware trust
+- complete VM-entry/VM-exit assembly behavior
+- producer claims about certification or production readiness
+
+Those require either stronger hardware evidence, smaller proof-friendly helper boundaries, or both.

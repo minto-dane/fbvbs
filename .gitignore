@@ -1,14 +1,24 @@
 # Build artifacts
 hypervisor/build/
+hypervisor/build_traceability.md
 *.o
 *.d
 *.elf
 *.bin
 *.map
 *.lst
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.coverage
+coverage/
 
-# npm
-package-lock.json
+# Local machine / agent settings
+.claude/settings.local.json
+.envrc
+.venv/
 
 # Frama-C
 .frama-c/
@@ -22,6 +32,7 @@ package-lock.json
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # OS files
 .DS_Store

@@ -903,7 +903,7 @@ static void fbvbs_log_iommu_domain_event(
             state->mirror_log, state->log_lock;
     ensures \result == OK || \result == RESOURCE_EXHAUSTED;
 */
-static int fbvbs_iommu_domain_create(
+static int __attribute__((unused)) fbvbs_iommu_domain_create(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition)
 {
@@ -1041,6 +1041,16 @@ static void fbvbs_partition_release_mappings(
         if (!mapping->active) {
             continue;
         }
+        fbvbs_kci_invalidate_bindings_for_gpa(
+            state,
+            mapping->guest_physical_address,
+            mapping->size
+        );
+        fbvbs_kci_invalidate_approved_module_for_gpa(
+            state,
+            mapping->guest_physical_address,
+            mapping->size
+        );
         if (partition->mapped_bytes >= mapping->size) {
             partition->mapped_bytes -= mapping->size;
         } else {
@@ -1089,6 +1099,16 @@ static void fbvbs_partition_release_object_mappings(
         if (!mapping->active || mapping->memory_object_id != memory_object_id) {
             continue;
         }
+        fbvbs_kci_invalidate_bindings_for_gpa(
+            state,
+            mapping->guest_physical_address,
+            mapping->size
+        );
+        fbvbs_kci_invalidate_approved_module_for_gpa(
+            state,
+            mapping->guest_physical_address,
+            mapping->size
+        );
         if (partition->mapped_bytes >= mapping->size) {
             partition->mapped_bytes -= mapping->size;
         } else {
@@ -1545,17 +1565,13 @@ int fbvbs_partition_measure(
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE ||
-            \result == MEASUREMENT_FAILED;
+            \result == MEASUREMENT_FAILED || \result == NOT_SUPPORTED_ON_PLATFORM;
 */
 int fbvbs_partition_load_image(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_load_image_request *request
 ) {
     struct fbvbs_partition *partition;
-    const struct fbvbs_manifest_profile *profile = NULL;
-    const struct fbvbs_manifest_profile *guest_profile = NULL;
-    uint64_t resolved_entry_ip;
-    uint64_t resolved_initial_sp;
 
     if (state == NULL || request == NULL) {
         return INVALID_PARAMETER;
@@ -1571,46 +1587,11 @@ int fbvbs_partition_load_image(
     if (request->image_object_id != partition->image_object_id) {
         return MEASUREMENT_FAILED;
     }
-    resolved_entry_ip = request->entry_ip;
-    resolved_initial_sp = request->initial_sp;
-    if (partition->kind == PARTITION_KIND_TRUSTED_SERVICE) {
-        profile = fbvbs_find_trusted_service_profile_for_image(state, partition->image_object_id);
-        if (profile == NULL) {
-            return MEASUREMENT_FAILED;
-        }
-        if (resolved_entry_ip == 0U) {
-            resolved_entry_ip = profile->entry_ip;
-        }
-        if (resolved_initial_sp == 0U) {
-            resolved_initial_sp = profile->initial_sp;
-        }
-        if (resolved_entry_ip != profile->entry_ip ||
-            resolved_initial_sp != profile->initial_sp) {
-            return MEASUREMENT_FAILED;
-        }
-    } else if (partition->kind == PARTITION_KIND_GUEST_VM) {
-        guest_profile = fbvbs_find_guest_boot_profile_for_image(state, partition->image_object_id);
-        if (guest_profile == NULL) {
-            return MEASUREMENT_FAILED;
-        }
-        if (resolved_entry_ip == 0U) {
-            resolved_entry_ip = guest_profile->entry_ip;
-        }
-        if (resolved_entry_ip != guest_profile->entry_ip) {
-            return MEASUREMENT_FAILED;
-        }
-        if (resolved_initial_sp == 0U) {
-            return INVALID_PARAMETER;
-        }
-    } else if (resolved_entry_ip == 0U) {
-        return MEASUREMENT_FAILED;
-    }
 
-    partition->entry_ip = resolved_entry_ip;
-    partition->initial_sp = resolved_initial_sp;
-    fbvbs_partition_apply_image_registers(state, partition);
-    partition->state = FBVBS_PARTITION_STATE_LOADED;
-    return OK;
+    /* The retained-C build does not yet include the authoritative image
+     * materializer/loader.  Refuse to claim success until bytes are copied,
+     * measured, and initial CPU state is derived from those concrete bytes. */
+    return NOT_SUPPORTED_ON_PLATFORM;
 }
 
 /*@ requires \valid(state) || state == \null;
@@ -2324,6 +2305,8 @@ int fbvbs_memory_unmap(
     /* Invalidate any KCI page bindings covering the unmapped range */
     fbvbs_kci_invalidate_bindings_for_gpa(
         state, mapping->guest_physical_address, mapping->size);
+    fbvbs_kci_invalidate_approved_module_for_gpa(
+        state, mapping->guest_physical_address, mapping->size);
 
     partition->mapped_bytes -= mapping->size;
     object->map_count -= 1U;
@@ -2408,6 +2391,8 @@ int fbvbs_memory_set_permission(
        (defense-in-depth: writable pages invalidate prior hash verification) */
     if ((request->permissions & FBVBS_MEMORY_PERMISSION_WRITE) != 0U) {
         fbvbs_kci_invalidate_bindings_for_gpa(
+            state, request->guest_physical_address, request->size);
+        fbvbs_kci_invalidate_approved_module_for_gpa(
             state, request->guest_physical_address, request->size);
     }
     mapping->permissions = (uint16_t)request->permissions;
@@ -2771,7 +2756,7 @@ int fbvbs_vm_assign_device(
     if (!fbvbs_device_exists(state, request->device_id)) {
         return NOT_FOUND;
     }
-    if (state->vmx_caps.iommu_available == 0U) {
+    if (fbvbs_iommu_runtime_ready(&state->cpu_security) == 0) {
         fbvbs_log_platform_gate_failure(
             state,
             request->vm_partition_id,
@@ -2781,100 +2766,17 @@ int fbvbs_vm_assign_device(
         return NOT_SUPPORTED_ON_PLATFORM;
     }
 
-    /* Device qualification check (REQ-0352, REQ-0904):
-     * Reject devices that lack required isolation capabilities.
-     * A device must:
-     *   1. Pass the qualification matrix (qualified == 1)
-     *   2. Have FLR support (for clean reset on reassign/revoke)
-     *   3. Have ACS support (to prevent peer-to-peer DMA bypass)
-     * Without these guarantees, device passthrough is unsafe. */
-    {
-        uint32_t d_idx;
-        const struct fbvbs_device_catalog_entry *dev = NULL;
-
-        /*@ loop invariant 0 <= d_idx <= state->device_catalog.count;
-            loop assigns d_idx, dev;
-            loop variant state->device_catalog.count - d_idx;
-        */
-        for (d_idx = 0U; d_idx < state->device_catalog.count; ++d_idx) {
-            if (state->device_catalog.entries[d_idx].device_id == request->device_id) {
-                dev = &state->device_catalog.entries[d_idx];
-                break;
-            }
-        }
-        if (dev == NULL) {
-            return NOT_FOUND;
-        }
-        if (!dev->qualified) {
-            return NOT_SUPPORTED_ON_PLATFORM;
-        }
-        if (!dev->has_flr) {
-            return NOT_SUPPORTED_ON_PLATFORM;
-        }
-        if (!dev->has_acs) {
-            return NOT_SUPPORTED_ON_PLATFORM;
-        }
-    }
-
-    /* Ensure partition has an IOMMU domain */
-    if (partition->iommu_domain_id == 0U) {
-        int domain_result = fbvbs_iommu_domain_create(state, partition);
-        if (domain_result != OK) {
-            return domain_result;
-        }
-    }
-
-    /* Record device assignment */
-    {
-        uint32_t slot;
-        int found_slot = 0;
-
-        /*@ loop invariant 0 <= slot <= FBVBS_MAX_ASSIGNED_DEVICES;
-            loop assigns slot, found_slot, partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1];
-            loop variant FBVBS_MAX_ASSIGNED_DEVICES - slot;
-        */
-        for (slot = 0U; slot < FBVBS_MAX_ASSIGNED_DEVICES; ++slot) {
-            if (partition->assigned_devices[slot] == 0U) {
-                partition->assigned_devices[slot] = request->device_id;
-                found_slot = 1;
-                break;
-            }
-        }
-        if (!found_slot) {
-            return RESOURCE_EXHAUSTED;
-        }
-    }
-
-    partition->assigned_device_count += 1U;
-
-    /* Update IOMMU domain device count */
-    {
-        struct fbvbs_iommu_domain *domain =
-            fbvbs_find_iommu_domain(state, partition->iommu_domain_id);
-        if (domain != NULL) {
-            if (domain->attached_device_count < UINT16_MAX) {
-                domain->attached_device_count = (uint16_t)(domain->attached_device_count + 1U);
-            }
-            fbvbs_log_iommu_domain_event(
-                state,
-                FBVBS_EVENT_VM_DEVICE_ASSIGN,
-                partition->partition_id,
-                domain->domain_id,
-                (uint32_t)domain->attached_device_count
-            );
-        }
-    }
-
-    /* PRODUCTION NOTE: At this point, production code must:
-     * 1. Set up DMA page table entries for the device's IOMMU domain
-     * 2. Program the context table (VT-d) or device table (AMD-Vi)
-     *    to point the device's requester ID to this domain
-     * 3. Set up interrupt remapping table entries for the device
-     * 4. Issue IOTLB/context cache invalidation
-     * Until MMIO and page allocator are available, the model only
-     * records the assignment in the partition and domain structures. */
-
-    return OK;
+    /* The retained-C microhypervisor still lacks authoritative DMA page-table
+     * programming, interrupt-remap installation, and safe reset/teardown.
+     * Device passthrough therefore remains disabled even when the platform
+     * advertises IOMMU capability. */
+    fbvbs_log_platform_gate_failure(
+        state,
+        request->vm_partition_id,
+        request->device_id,
+        FBVBS_PLATFORM_CAP_IOMMU
+    );
+    return NOT_SUPPORTED_ON_PLATFORM;
 }
 
 /*@ requires \valid(state) || state == \null;
@@ -2909,51 +2811,8 @@ int fbvbs_vm_release_device(
         return INVALID_STATE;
     }
 
-    /* Find and remove the device from the assigned list */
-    {
-        uint32_t slot;
-        int found = 0;
-
-        /*@ loop invariant 0 <= slot <= FBVBS_MAX_ASSIGNED_DEVICES;
-            loop assigns slot, found, partition->assigned_devices[0 .. FBVBS_MAX_ASSIGNED_DEVICES - 1];
-            loop variant FBVBS_MAX_ASSIGNED_DEVICES - slot;
-        */
-        for (slot = 0U; slot < FBVBS_MAX_ASSIGNED_DEVICES; ++slot) {
-            if (partition->assigned_devices[slot] == request->device_id) {
-                partition->assigned_devices[slot] = 0U;
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            return NOT_FOUND;
-        }
-    }
-
-    partition->assigned_device_count -= 1U;
-
-    /* Update IOMMU domain device count */
-    if (partition->iommu_domain_id != 0U) {
-        struct fbvbs_iommu_domain *domain =
-            fbvbs_find_iommu_domain(state, partition->iommu_domain_id);
-        if (domain != NULL && domain->attached_device_count > 0U) {
-            domain->attached_device_count = (uint16_t)(domain->attached_device_count - 1U);
-            fbvbs_log_iommu_domain_event(
-                state,
-                FBVBS_EVENT_IOMMU_DOMAIN_RELEASE,
-                partition->partition_id,
-                domain->domain_id,
-                (uint32_t)domain->attached_device_count
-            );
-        }
-    }
-
-    /* PRODUCTION NOTE: At this point, production code must:
-     * 1. Execute FLR (Function Level Reset) on the device
-     * 2. Clear the context table (VT-d) / device table (AMD-Vi) entry
-     * 3. Remove interrupt remapping table entries
-     * 4. Issue IOTLB/context cache invalidation
-     * 5. Remove DMA page table entries for this device */
-
-    return OK;
+    /* Safe device teardown is not available in the retained-C build, so
+     * release must fail closed instead of pretending to reset a device. */
+    (void)partition;
+    return NOT_SUPPORTED_ON_PLATFORM;
 }

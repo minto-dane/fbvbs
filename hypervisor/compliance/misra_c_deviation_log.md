@@ -54,7 +54,8 @@ hardware register access.
 1. All asm is encapsulated in `fbvbs_asm.h` inline functions (11 categories)
    or in file-local static functions.
 2. Frama-C `#ifdef __FRAMAC__` model paths provide pure C equivalents for
-   formal verification (WP proves 8330/8387 goals against model paths).
+   formal verification; current proof status is tracked separately in
+   `wp_verification_boundary.md` and is not asserted by this deviation log.
 3. GCC -fanalyzer validates the asm-containing compilation units.
 4. Asm constraints are reviewed: output (=), input, clobber lists are
    explicit. Read-modify-write uses +m constraint (spinlock fix 2026-03-20).
@@ -191,7 +192,7 @@ shadowing is a compile error.
 | Warnings | GCC -Wall -Wextra -Werror -Wpedantic | 0 warnings (24 sources) |
 | Static analysis (GCC) | GCC -fanalyzer | 0 findings (24 sources) |
 | Static analysis (cppcheck) | cppcheck warning+perf+port | 0 findings (25 sources) |
-| Formal verification | Frama-C WP Typed+Cast | 8330/8387 (99.32%) |
+| Formal verification | Frama-C WP Typed+Cast | Available and reproducible, but current runs still report proof gaps/timeouts |
 | Shadow detection | -Wshadow -Werror | Enforced |
 | Implicit conversion | -Wconversion -Wsign-conversion -Werror | Enforced |
 | Strict prototypes | -Wstrict-prototypes -Wmissing-prototypes | Enforced |
@@ -203,5 +204,5 @@ shadowing is a compile error.
 
 Deviations DEV-001 through DEV-006 are approved as project-wide deviations
 for the FBVBS hypervisor. They are inherent to bare-metal x86-64 hypervisor
-development and are mitigated by the formal verification, static analysis,
-and testing infrastructure documented above.
+development and are mitigated by the static analysis, testing, and
+in-progress formal verification infrastructure documented above.

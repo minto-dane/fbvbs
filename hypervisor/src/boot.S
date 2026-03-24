@@ -9,12 +9,14 @@
  * - Stack guard page: unmapped 4 KiB page below the stack
  * - EFER.NXE enabled when CPU supports NX bit
  * - CR0.WP enabled so ring-0 respects R/W page table bits
- * - Page table overflow protection (max 2048 pages = 8 MiB)
+ * - Page table overflow protection (max 1048576 pages ~= 4 GiB)
  * - Multiboot2 info mapped at its actual physical address
  *
  * Page table layout (identity map, 4 KiB pages):
- *   PML4[0] → PDPT[0] → PD[0..3] → pt_pool[0..3]
- *   Each PT covers 2 MiB (512 × 4 KiB), total 8 MiB coverage
+ *   PML4[0] → PDPT[0..3] → pd_pool[0..3] → pt_pool[0..2047]
+ *   Each PT covers 2 MiB (512 × 4 KiB), total just under 4 GiB coverage.
+ *   The broader early mapping allows ACPI/XSDT/DMAR tables and other
+ *   firmware structures to be reached during early retained-C init.
  *
  * Section boundaries (_text_start, _text_end, etc.) are defined
  * by the linker script (fbvbs.ld).
@@ -68,6 +70,18 @@ multiboot_header:
     .long 8
     .long 0
 
+    /* Information request: ACPI RSDP (old) */
+    .word 1, 0
+    .long 12
+    .long 14
+    .long 0
+
+    /* Information request: ACPI RSDP (new) */
+    .word 1, 0
+    .long 12
+    .long 15
+    .long 0
+
     /* End tag */
     .word 0, 0
     .long 8
@@ -84,6 +98,24 @@ multiboot_header_end:
 _start:
     /* Disable interrupts immediately */
     cli
+    cld
+
+    /* Take ownership of segmentation state immediately instead of relying
+     * on bootloader-provided hidden descriptor caches. */
+    lgdt boot_gdt_pointer_32
+    /* Emit an explicit ptr16:32 far jump so the mode-transition encoding
+     * does not depend on GAS heuristics inside an ELF64 object. */
+    .byte 0xEA
+    .long .Lboot32_entry
+    .word 0x08
+
+.Lboot32_entry:
+    mov $0x10, %ax
+    mov %ax, %es
+    mov %ax, %ss
+    mov %ax, %ds
+    mov %ax, %fs
+    mov %ax, %gs
 
     /* Save Multiboot information pointer */
     mov %ebx, %edi
@@ -93,10 +125,18 @@ _start:
     mov $stack_top, %esp
     and $-16, %esp
 
+    /* Bring up COM1 early so QEMU/serial smoke tests can see where
+     * the boot path stalls even before the retained-C runtime is live. */
+    call serial_init_32
+    mov $boot_msg_32, %esi
+    call serial_print_32
+
     /* Verify long mode support */
     call check_long_mode
     test %eax, %eax
     jz .Lno_long_mode_error
+    mov $boot_msg_lm_ok, %esi
+    call serial_print_32
 
     /* Check NX bit support (CPUID.80000001H:EDX.NX, bit 20) */
     call check_nx_support
@@ -104,15 +144,21 @@ _start:
 
     /* Build W^X page tables using linker section symbols */
     call setup_page_tables_wx
+    mov $boot_msg_pt_ready, %esi
+    call serial_print_32
 
     /* Enable PAE (required for long mode) */
     mov %cr4, %eax
     or $0x20, %eax                  /* CR4.PAE */
     mov %eax, %cr4
+    mov $boot_msg_cr4_ready, %esi
+    call serial_print_32
 
     /* Load page table root */
     mov $pml4, %eax
     mov %eax, %cr3
+    mov $boot_msg_cr3_ready, %esi
+    call serial_print_32
 
     /* Enable long mode in EFER, plus NXE if supported */
     mov $0xC0000080, %ecx           /* IA32_EFER MSR */
@@ -123,17 +169,27 @@ _start:
     or $0x800, %eax                 /* EFER.NXE */
 .Lskip_nxe:
     wrmsr
+    mov $boot_msg_efer_ready, %esi
+    call serial_print_32
+
+    /* Load the long-mode GDT before enabling paging so that the only
+     * instruction after CR0.PG is the mandatory far jump into the
+     * 64-bit code segment. */
+    lgdt boot_gdt_pointer_32
+    mov $boot_msg_enter_64, %esi
+    call serial_print_32
 
     /* Enable paging with write-protect enforcement */
     mov %cr0, %eax
     or $0x80010001, %eax            /* CR0.PG | CR0.WP | CR0.PE */
     mov %eax, %cr0
-
-    /* Load 64-bit GDT and jump to long mode */
-    lgdt gdt64_pointer
-    ljmp $0x08, $start64
+    .byte 0xEA
+    .long start64
+    .word 0x18
 
 .Lno_long_mode_error:
+    mov $boot_msg_no_lm, %esi
+    call serial_print_32
     mov $error_no_long_mode, %esi
     call print_string_32
     jmp .Lhalt_forever
@@ -142,9 +198,10 @@ _start:
  * 64-bit Entry
  * ================================================================ */
 .code64
+.p2align 4
 start64:
     /* Set up 64-bit segment registers (flat model) */
-    xor %rax, %rax
+    mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %fs
@@ -157,6 +214,19 @@ start64:
 
     /* Clear base pointer for clean backtraces */
     xor %rbp, %rbp
+
+    /* Raw 64-bit serial marker before the retained-C runtime is touched.
+     * This lets QEMU/KVM smoke distinguish long-mode entry failures from
+     * later runtime-init stalls. */
+    lea boot_msg_64_entry(%rip), %rsi
+    call serial_print_64
+
+    /* Initialize bare-metal runtime services before the first C function:
+     *   - seed stack protector guard
+     *   - initialize COM1 boot console for QEMU/serial smoke tests */
+    call fbvbs_boot_runtime_init
+    lea boot_msg_64(%rip), %rdi
+    call fbvbs_boot_console_puts
 
     /* Zero-extend EDI→RDI (Multiboot info pointer) */
     mov %edi, %edi
@@ -177,6 +247,7 @@ start64:
  * Print string in 32-bit protected mode (error path only)
  * ESI = pointer to NUL-terminated ASCII string
  * ================================================================ */
+.code32
 print_string_32:
     push %ebx
     push %esi
@@ -196,9 +267,135 @@ print_string_32:
     ret
 
 /* ================================================================
+ * Early serial console in 32-bit mode
+ * ================================================================ */
+serial_init_32:
+    mov $0x3F9, %dx                 /* Interrupt Enable Register */
+    xor %al, %al
+    out %al, %dx
+    mov $0x3FB, %dx                 /* Line Control Register */
+    mov $0x80, %al                  /* DLAB */
+    out %al, %dx
+    mov $0x3F8, %dx                 /* Divisor low = 1 */
+    mov $0x01, %al
+    out %al, %dx
+    mov $0x3F9, %dx                 /* Divisor high = 0 */
+    xor %al, %al
+    out %al, %dx
+    mov $0x3FB, %dx                 /* 8N1 */
+    mov $0x03, %al
+    out %al, %dx
+    mov $0x3FA, %dx                 /* FIFO Control Register */
+    mov $0xC7, %al
+    out %al, %dx
+    mov $0x3FC, %dx                 /* Modem Control Register */
+    mov $0x0B, %al
+    out %al, %dx
+    ret
+
+serial_putchar_32:
+    push %ebx
+    push %ecx
+    push %edx
+    mov %al, %bl
+    mov $1000000, %ecx
+.Lserial_wait:
+    mov $0x3FD, %dx                 /* Line Status Register */
+    in %dx, %al
+    test $0x20, %al
+    jnz .Lserial_ready
+    dec %ecx
+    jnz .Lserial_wait
+    pop %edx
+    pop %ecx
+    pop %ebx
+    ret
+.Lserial_ready:
+    mov $0x3F8, %dx
+    mov %bl, %al
+    out %al, %dx
+    pop %edx
+    pop %ecx
+    pop %ebx
+    ret
+
+serial_print_32:
+    push %eax
+    push %esi
+.Lserial_print_loop:
+    lodsb
+    test %al, %al
+    jz .Lserial_print_done
+    cmp $'\n', %al
+    jne .Lserial_emit
+    push %eax
+    mov $'\r', %al
+    call serial_putchar_32
+    pop %eax
+.Lserial_emit:
+    call serial_putchar_32
+    jmp .Lserial_print_loop
+.Lserial_print_done:
+    pop %esi
+    pop %eax
+    ret
+
+/* ================================================================
+ * Early serial console in 64-bit mode
+ * ================================================================ */
+.code64
+serial_putchar_64:
+    push %rbx
+    push %rcx
+    push %rdx
+    mov %al, %bl
+    mov $1000000, %ecx
+.Lserial_wait_64:
+    mov $0x3FD, %dx                 /* Line Status Register */
+    in %dx, %al
+    test $0x20, %al
+    jnz .Lserial_ready_64
+    dec %ecx
+    jnz .Lserial_wait_64
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    ret
+.Lserial_ready_64:
+    mov $0x3F8, %dx
+    mov %bl, %al
+    out %al, %dx
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    ret
+
+serial_print_64:
+    push %rax
+    push %rsi
+.Lserial_print_loop_64:
+    lodsb
+    test %al, %al
+    jz .Lserial_print_done_64
+    cmp $'\n', %al
+    jne .Lserial_emit_64
+    push %rax
+    mov $'\r', %al
+    call serial_putchar_64
+    pop %rax
+.Lserial_emit_64:
+    call serial_putchar_64
+    jmp .Lserial_print_loop_64
+.Lserial_print_done_64:
+    pop %rsi
+    pop %rax
+    ret
+
+/* ================================================================
  * Check if CPU supports long mode
  * Returns: EAX = 1 if supported, 0 otherwise
  * ================================================================ */
+.code32
 check_long_mode:
     push %ebx
 
@@ -268,13 +465,18 @@ check_nx_support:
  *   _data_start   .. _bss_end     → RW+NX   (data + BSS)
  *   stack_bottom  .. stack_top    → RW+NX   (stack)
  *   stack_guard                   → unmapped (guard page)
- *   Multiboot info (2 pages)      → RW+NX   (at actual phys addr)
+ *
+ * Multiboot metadata is reached through the broad near-4 GiB identity map.
+ * We intentionally do not apply a second blanket remap for the Multiboot
+ * pointer range, because some bootloaders place the info structure adjacent
+ * to or inside the already-tightened image pages. Reapplying RW+NX there can
+ * silently strip execute permissions from .text.
  *
  * PTE format (64-bit):
  *   Low  dword: phys_addr[31:12] | flags[11:0]
  *   High dword: phys_addr[63:32] | NX (bit 31)
  *
- * Page table overflow protection: max 2048 pages (8 MiB)
+ * Page table overflow protection: max 1048576 pages (~4 GiB)
  * ================================================================ */
 setup_page_tables_wx:
     push %ebx
@@ -283,10 +485,11 @@ setup_page_tables_wx:
     push %ebp
 
     /* ---- Clear all page table memory ---- */
-    /* pml4 + pdpt + pd + pt_pool = 3×4096 + 4×4096 = 28672 bytes */
+    /* pml4 + pdpt + pd_pool + pt_pool =
+     * 1×4096 + 1×4096 + 4×4096 + 2048×4096 = 8,413,184 bytes */
     mov $pml4, %edi
     xor %eax, %eax
-    mov $7168, %ecx                 /* 28672 / 4 = 7168 dwords */
+    mov $2103296, %ecx              /* 8,413,184 / 4 = 2,103,296 dwords */
     rep stosl
 
     /* ---- Wire up the hierarchy ---- */
@@ -297,28 +500,39 @@ setup_page_tables_wx:
     mov %eax, (pml4)
     movl $0, (pml4 + 4)
 
-    /* PDPT[0] → PD  (Present + Write, NX=0) */
-    mov $pd, %eax
-    or $0x3, %eax
-    mov %eax, (pdpt)
-    movl $0, (pdpt + 4)
-
-    /* PD[0..3] → pt_pool[0..3]  (Present + Write, NX=0) */
-    mov $0, %ebp                    /* PD entry index */
+    /* PDPT[0..3] → pd_pool[0..3]  (Present + Write, NX=0) */
+    mov $0, %ebp                    /* PDPT entry index */
 .Lpd_setup:
     cmp $4, %ebp
     jge .Lpd_done
+    mov %ebp, %eax
+    shl $12, %eax                   /* PT offset = index × 4096 */
+    add $pd_pool, %eax              /* PD physical address */
+    or $0x3, %eax                   /* Present + Write */
+    mov %ebp, %esi
+    shl $3, %esi                    /* PDPT byte offset = index × 8 */
+    mov %eax, pdpt(%esi)            /* PDPT entry low dword */
+    movl $0, pdpt+4(%esi)           /* PDPT entry high dword (NX=0) */
+    inc %ebp
+    jmp .Lpd_setup
+.Lpd_done:
+
+    /* pd_pool[0..2047] → pt_pool[0..2047]  (Present + Write, NX=0) */
+    mov $0, %ebp                    /* PD entry index across all PD pages */
+.Lpt_setup:
+    cmp $2048, %ebp
+    jge .Lpt_done
     mov %ebp, %eax
     shl $12, %eax                   /* PT offset = index × 4096 */
     add $pt_pool, %eax              /* PT physical address */
     or $0x3, %eax                   /* Present + Write */
     mov %ebp, %esi
     shl $3, %esi                    /* PD byte offset = index × 8 */
-    mov %eax, pd(%esi)              /* PD entry low dword */
-    movl $0, pd+4(%esi)             /* PD entry high dword (NX=0) */
+    mov %eax, pd_pool(%esi)         /* PD entry low dword */
+    movl $0, pd_pool+4(%esi)        /* PD entry high dword (NX=0) */
     inc %ebp
-    jmp .Lpd_setup
-.Lpd_done:
+    jmp .Lpt_setup
+.Lpt_done:
 
     /* ---- Determine NX flag for high dword ---- */
     cmpl $0, (nx_supported)
@@ -328,6 +542,16 @@ setup_page_tables_wx:
 .Lnx_zero:
     movl $0, (nx_high_bits)
 .Lnx_resolved:
+
+    /* Provide a broad near-4 GiB RW+NX identity map first so retained-C code
+     * can reach firmware structures (ACPI/XSDT/DMAR/IVRS, EBDA scan,
+     * bootloader metadata, and high MMIO regions such as VT-d and xAPIC.
+     * Section-specific mappings below tighten the hypervisor image back to W^X. */
+    xor %eax, %eax
+    mov $0xFFFFF000, %ebx           /* Just under 4 GiB */
+    mov $0x3, %ecx                  /* Present + Write */
+    mov (nx_high_bits), %edx        /* NX */
+    call map_page_range
 
     /* ---- Map sections with correct permissions ---- */
 
@@ -370,18 +594,6 @@ setup_page_tables_wx:
     mov $stack_guard, %eax
     call unmap_page
 
-    /* Map Multiboot info at its real physical address (RW + NX, 4 pages) */
-    mov (saved_multiboot_ptr), %eax
-    and $0xFFFFF000, %eax           /* Page-align down */
-    test %eax, %eax
-    jz .Lskip_mboot_map
-    mov %eax, %ebx
-    add $0x4000, %ebx               /* 4 pages (16 KiB) for info struct */
-    mov $0x3, %ecx                  /* Present + Write */
-    mov (nx_high_bits), %edx        /* NX */
-    call map_page_range
-.Lskip_mboot_map:
-
     pop %ebp
     pop %edi
     pop %esi
@@ -400,7 +612,7 @@ setup_page_tables_wx:
  * Clobbers: EAX, ESI
  * Preserves: EBX, ECX, EDX, EDI, EBP
  *
- * Overflow protection: stops if page index >= 2048 (beyond pt_pool)
+ * Overflow protection: stops if page index >= 1048576 (beyond pt_pool)
  * ================================================================ */
 map_page_range:
 .Lmap_range_loop:
@@ -409,7 +621,7 @@ map_page_range:
     /* Compute flat PTE address: pt_pool + (phys >> 12) × 8 */
     mov %eax, %esi
     shr $12, %esi
-    cmp $2048, %esi                 /* 4 PTs × 512 entries */
+    cmp $1048576, %esi              /* 2048 PTs × 512 entries ~= 4 GiB */
     jae .Lmap_range_done
     shl $3, %esi
     add $pt_pool, %esi
@@ -435,7 +647,7 @@ map_page_range:
 unmap_page:
     mov %eax, %esi
     shr $12, %esi
-    cmp $2048, %esi
+    cmp $1048576, %esi
     jae .Lunmap_done
     shl $3, %esi
     add $pt_pool, %esi
@@ -451,17 +663,42 @@ unmap_page:
 
 error_no_long_mode:
     .asciz "ERROR: CPU does not support 64-bit long mode"
+boot_msg_32:
+    .asciz "FBVBS: boot32 reached\n"
+boot_msg_lm_ok:
+    .asciz "FBVBS: long mode supported\n"
+boot_msg_pt_ready:
+    .asciz "FBVBS: page tables ready\n"
+boot_msg_cr4_ready:
+    .asciz "FBVBS: CR4.PAE enabled\n"
+boot_msg_cr3_ready:
+    .asciz "FBVBS: CR3 loaded\n"
+boot_msg_efer_ready:
+    .asciz "FBVBS: EFER updated\n"
+boot_msg_enter_64:
+    .asciz "FBVBS: entering 64-bit mode\n"
+boot_msg_64_entry:
+    .asciz "FBVBS: boot64 entry raw\n"
+boot_msg_no_lm:
+    .asciz "FBVBS: long mode unavailable\n"
+boot_msg_64:
+    .asciz "FBVBS: boot64 reached\n"
 
 .align 8
-gdt64:
+boot_gdt:
     .quad 0x0000000000000000        /* Null descriptor */
-    .quad 0x00AF9A000000FFFF        /* 64-bit code: DPL=0, Execute/Read */
-    .quad 0x00AF92000000FFFF        /* 64-bit data: DPL=0, Read/Write */
-gdt64_end:
+    /* Pre-mark descriptors as accessed before paging tightens .rodata to R+NX.
+     * Real CPUs/KVM may set the accessed bit on control transfers or segment
+     * loads; leaving it clear would turn the long-mode handoff into a fault
+     * once the boot GDT becomes read-only. */
+    .quad 0x00CF9B000000FFFF        /* 32-bit flat boot code (accessed) */
+    .quad 0x00CF93000000FFFF        /* 32-bit/64-bit flat data (accessed) */
+    .quad 0x00AF9B000000FFFF        /* 64-bit flat code (accessed) */
+boot_gdt_end:
 
-gdt64_pointer:
-    .word gdt64_end - gdt64 - 1
-    .quad gdt64
+boot_gdt_pointer_32:
+    .word boot_gdt_end - boot_gdt - 1
+    .long boot_gdt
 
 /* ================================================================
  * BSS — page-aligned structures
@@ -477,16 +714,16 @@ nx_supported:
 nx_high_bits:
     .space 4
 
-/* Page tables: PML4, PDPT, PD, and 4 PT tables (8 MiB coverage) */
+/* Page tables: PML4, PDPT, 4 PD tables, and 2048 PT tables (~4 GiB coverage) */
 .align 4096
 pml4:
     .space 4096
 pdpt:
     .space 4096
-pd:
-    .space 4096
+pd_pool:
+    .space 16384
 pt_pool:
-    .space 16384                    /* 4 × 4096 = 4 PTs, 2048 pages */
+    .space 8388608                  /* 2048 × 4096 = 2048 PTs, 1,048,576 pages */
 
 /* Stack with guard page */
 .align 4096

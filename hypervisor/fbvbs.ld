@@ -175,8 +175,8 @@ SECTIONS
 }
 
 /* ---- Layout assertions ---- */
-ASSERT(_binary_end - _binary_start <= 8M,
-       "Hypervisor image exceeds 8 MiB identity-mapped region")
+ASSERT(_binary_end - _binary_start <= 16M,
+       "Hypervisor image exceeds 16 MiB early-identity-map budget")
 ASSERT(_text_start % 4096 == 0, ".text must be page-aligned")
 ASSERT(_rodata_start % 4096 == 0, ".rodata must be page-aligned")
 ASSERT(_data_start % 4096 == 0, ".data must be page-aligned")

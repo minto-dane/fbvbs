@@ -40,7 +40,7 @@ and IOMMU.
 | **Rationale** | The microhypervisor IS the TCB root. No entity can restart it. |
 
 **Design Mitigations:**
-- Formal verification (99.32% WP goals proved)
+- ACSL/WP verification work-in-progress on the retained C core (current status in `wp_verification_boundary.md`)
 - Watchdog (NMI-based) can detect microhypervisor hangs (PRODUCTION NOTE)
 - #DF (double fault) and #MC (machine check) use dedicated IST stacks
   to prevent stack corruption cascading into triple fault

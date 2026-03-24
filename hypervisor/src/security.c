@@ -1382,6 +1382,154 @@ static struct fbvbs_uvs_manifest_set *fbvbs_allocate_manifest_set(
     return NULL;
 }
 
+/*@ requires \valid(state);
+    assigns state->approved_module_object_id,
+            state->approved_module_manifest_object_id,
+            state->approved_module_base_gpa,
+            state->approved_module_size,
+            state->approved_module_page_count,
+            state->reserved_approved_module0,
+            state->approved_module_hash[0 .. 47],
+            state->approved_module_page_hashes[0 .. FBVBS_MAX_APPROVED_MODULE_PAGES - 1][0 .. 47];
+*/
+static void fbvbs_kci_clear_approved_module(struct fbvbs_hypervisor_state *state) {
+    if (state == NULL) {
+        return;
+    }
+
+    state->approved_module_object_id = 0U;
+    state->approved_module_manifest_object_id = 0U;
+    state->approved_module_base_gpa = 0U;
+    state->approved_module_size = 0U;
+    state->approved_module_page_count = 0U;
+    state->reserved_approved_module0 = 0U;
+    fbvbs_zero_memory(state->approved_module_hash, sizeof(state->approved_module_hash));
+    fbvbs_zero_memory(
+        state->approved_module_page_hashes,
+        sizeof(state->approved_module_page_hashes)
+    );
+}
+
+/*@ requires \valid(state);
+    assigns \result \from memory_object_id, state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1];
+    ensures \result == \null ||
+            (\exists integer i; 0 <= i < FBVBS_MAX_MEMORY_OBJECTS && \result == &state->memory_objects[i]);
+*/
+static struct fbvbs_memory_object *fbvbs_find_memory_object(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t memory_object_id
+) {
+    uint32_t index;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_OBJECTS;
+        loop assigns index;
+        loop variant FBVBS_MAX_MEMORY_OBJECTS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_MEMORY_OBJECTS; ++index) {
+        if (state->memory_objects[index].allocated &&
+            state->memory_objects[index].memory_object_id == memory_object_id) {
+            return &state->memory_objects[index];
+        }
+    }
+
+    return NULL;
+}
+
+/*@ requires \valid(state);
+    assigns \result \from state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    ensures \result == \null ||
+            (\exists integer i; 0 <= i < FBVBS_MAX_PARTITIONS && \result == &state->partitions[i]);
+*/
+static struct fbvbs_partition *fbvbs_find_host_partition(
+    struct fbvbs_hypervisor_state *state
+) {
+    uint32_t index;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_PARTITIONS;
+        loop assigns index;
+        loop variant FBVBS_MAX_PARTITIONS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_PARTITIONS; ++index) {
+        if (state->partitions[index].occupied &&
+            state->partitions[index].kind == PARTITION_KIND_FREEBSD_HOST) {
+            return &state->partitions[index];
+        }
+    }
+
+    return NULL;
+}
+
+/*@ requires \valid_read(partition);
+    assigns \result \from memory_object_id, expected_size,
+            partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1];
+    ensures \result == \null || \valid_read(\result);
+*/
+static const struct fbvbs_memory_mapping *fbvbs_find_unique_mapping_for_object(
+    const struct fbvbs_partition *partition,
+    uint64_t memory_object_id,
+    uint64_t expected_size
+) {
+    const struct fbvbs_memory_mapping *result = NULL;
+    uint32_t index;
+
+    if (partition == NULL || memory_object_id == 0U || expected_size == 0U) {
+        return NULL;
+    }
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_MAPPINGS;
+        loop assigns index, result;
+        loop variant FBVBS_MAX_MEMORY_MAPPINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_MEMORY_MAPPINGS; ++index) {
+        const struct fbvbs_memory_mapping *mapping = &partition->mappings[index];
+
+        if (!mapping->active ||
+            mapping->memory_object_id != memory_object_id ||
+            mapping->size != expected_size) {
+            continue;
+        }
+        if (result != NULL) {
+            return NULL;
+        }
+        result = mapping;
+    }
+
+    return result;
+}
+
+/*@ requires \valid(partition);
+    assigns \result \from memory_object_id, guest_physical_address, size,
+            partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1];
+    ensures \result == \null ||
+            (\exists integer i; 0 <= i < FBVBS_MAX_MEMORY_MAPPINGS &&
+             \result == &partition->mappings[i]);
+*/
+static struct fbvbs_memory_mapping *fbvbs_find_exact_mapping_for_object(
+    struct fbvbs_partition *partition,
+    uint64_t memory_object_id,
+    uint64_t guest_physical_address,
+    uint64_t size
+) {
+    uint32_t index;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_MAPPINGS;
+        loop assigns index;
+        loop variant FBVBS_MAX_MEMORY_MAPPINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_MEMORY_MAPPINGS; ++index) {
+        struct fbvbs_memory_mapping *mapping = &partition->mappings[index];
+
+        if (mapping->active &&
+            mapping->memory_object_id == memory_object_id &&
+            mapping->guest_physical_address == guest_physical_address &&
+            mapping->size == size) {
+            return mapping;
+        }
+    }
+
+    return NULL;
+}
+
 /*@ requires \valid(state) || state == \null;
     requires \valid_read(request) || request == \null;
     requires \valid(response) || response == \null;
@@ -1389,7 +1537,8 @@ static struct fbvbs_uvs_manifest_set *fbvbs_allocate_manifest_set(
     requires state == \null || state->revoked_object_count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns *state, *response;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == GENERATION_MISMATCH ||
-            \result == NOT_FOUND || \result == SIGNATURE_INVALID;
+            \result == NOT_FOUND || \result == SIGNATURE_INVALID || \result == INVALID_STATE ||
+            \result == REVOKED || \result == RESOURCE_EXHAUSTED;
     behavior invalid_args:
       assumes state == \null || request == \null || response == \null;
       ensures \result == INVALID_PARAMETER;
@@ -1401,10 +1550,18 @@ int fbvbs_kci_verify_module(
 ) {
     const struct fbvbs_uvs_manifest_set *manifest_set;
     const struct fbvbs_metadata_manifest *manifest;
+    const struct fbvbs_artifact_catalog_entry *module_entry;
+    struct fbvbs_partition *host;
+    struct fbvbs_memory_object *module_object;
+    const struct fbvbs_memory_mapping *module_mapping;
+    uint8_t measured_hash[48];
+    uint32_t page_index;
 
     if (state == NULL || request == NULL || response == NULL) {
         return INVALID_PARAMETER;
     }
+    response->verdict = 0U;
+    response->reserved0 = 0U;
     if (!fbvbs_manifest_pair_valid(
         state,
         request->module_object_id,
@@ -1433,26 +1590,88 @@ int fbvbs_kci_verify_module(
     if (!fbvbs_artifact_approval_exists(state, request->module_object_id, request->manifest_object_id)) {
         return SIGNATURE_INVALID;
     }
+    module_entry = fbvbs_find_artifact_entry(state, request->module_object_id);
+    if (module_entry == NULL ||
+        module_entry->object_kind != FBVBS_ARTIFACT_OBJECT_MODULE ||
+        !fbvbs_hash_prefix_nonzero(module_entry->payload_hash)) {
+        return INVALID_STATE;
+    }
+    host = fbvbs_find_host_partition(state);
+    if (host == NULL) {
+        return INVALID_STATE;
+    }
+    module_object = fbvbs_find_memory_object(state, request->module_object_id);
+    if (module_object == NULL) {
+        return NOT_FOUND;
+    }
+    if (module_object->owner_partition_id != host->partition_id ||
+        module_object->size == 0U ||
+        (module_object->size % FBVBS_PAGE_SIZE) != 0U) {
+        return INVALID_STATE;
+    }
+    if ((module_object->size / FBVBS_PAGE_SIZE) > FBVBS_MAX_APPROVED_MODULE_PAGES) {
+        return RESOURCE_EXHAUSTED;
+    }
+    module_mapping = fbvbs_find_unique_mapping_for_object(
+        host,
+        request->module_object_id,
+        module_object->size
+    );
+    if (module_mapping == NULL ||
+        !fbvbs_page_aligned_range(
+            module_mapping->guest_physical_address,
+            module_mapping->size
+        )) {
+        return INVALID_STATE;
+    }
+
+    fbvbs_sha384(
+        (const void *)(uintptr_t)module_mapping->guest_physical_address,
+        module_mapping->size,
+        measured_hash
+    );
+    if (!fbvbs_constant_time_equals(measured_hash, module_entry->payload_hash, 48U)) {
+        return SIGNATURE_INVALID;
+    }
+
+    fbvbs_kci_clear_approved_module(state);
+    state->approved_module_object_id = request->module_object_id;
+    state->approved_module_manifest_object_id = request->manifest_object_id;
+    state->approved_module_base_gpa = module_mapping->guest_physical_address;
+    state->approved_module_size = module_mapping->size;
+    state->approved_module_page_count =
+        (uint32_t)(module_mapping->size / FBVBS_PAGE_SIZE);
+    fbvbs_copy_memory(
+        state->approved_module_hash,
+        module_entry->payload_hash,
+        sizeof(state->approved_module_hash)
+    );
+    /*@ loop invariant 0 <= page_index <= state->approved_module_page_count;
+        loop assigns page_index, state->approved_module_page_hashes[0 .. FBVBS_MAX_APPROVED_MODULE_PAGES - 1][0 .. 47];
+        loop variant state->approved_module_page_count - page_index;
+    */
+    for (page_index = 0U; page_index < state->approved_module_page_count; ++page_index) {
+        fbvbs_sha384(
+            (const void *)(uintptr_t)(
+                module_mapping->guest_physical_address +
+                ((uint64_t)page_index * FBVBS_PAGE_SIZE)
+            ),
+            FBVBS_PAGE_SIZE,
+            state->approved_module_page_hashes[page_index]
+        );
+    }
 
     response->verdict = 1U;
-    response->reserved0 = 0U;
-    state->approved_module_object_id = request->module_object_id;
     return OK;
 }
 
 /* ================================================================
  * KCI page binding: hash-verified GPA-to-artifact association.
  *
- * Before granting execute permission on a code page, the hypervisor
- * must verify that the page content matches the measured artifact hash.
- * A binding records a successful verification so that execute permission
- * can be granted, and is invalidated when the underlying mapping changes.
- *
- * PRODUCTION NOTE: fbvbs_kci_verify_page_hash() uses a model implementation
- * that always returns 1 (match). Production deployment MUST replace this
- * with SHA-384 hash computation over the GPA range and constant-time
- * comparison against the artifact's payload_hash. The crypto primitive
- * is delivered in Phase 5 (暗号ライブラリ統合).
+ * KCI_VERIFY_MODULE measures the full approved module and materializes a
+ * page-aligned SHA-384 digest table. KCI_SET_WX then re-hashes each target
+ * page before execute is granted, and any unmap/write path invalidates both
+ * the binding and the approved-module state.
  * ================================================================ */
 
 /*@ requires \valid_read(expected_hash + (0 .. 47));
@@ -1464,22 +1683,14 @@ static int fbvbs_kci_verify_page_hash(
     uint64_t page_size,
     const uint8_t expected_hash[48]
 ) {
-    /* PRODUCTION NOTE: This model always returns 1 (hash matches).
-     * Production must compute SHA-384(bytes at page_gpa, page_size)
-     * and constant-time compare against expected_hash.
-     * Until the crypto primitive is available, execute permission
-     * is gated only by manifest approval and catalog presence. */
-    (void)page_gpa;
-    (void)page_size;
-    (void)expected_hash;
-#if defined(__FRAMAC__)
-    return 1;
-#else
-    /* Fail-closed: refuse to verify until crypto is available.
-     * This prevents execute permission on unverified pages.
-     * Remove this block when SHA-384 is implemented. */
-    return 0;
-#endif
+    uint8_t measured_hash[48];
+
+    if (page_gpa == 0U || page_size == 0U) {
+        return 0;
+    }
+
+    fbvbs_sha384((const void *)(uintptr_t)page_gpa, page_size, measured_hash);
+    return fbvbs_constant_time_equals(measured_hash, expected_hash, sizeof(measured_hash));
 }
 
 /*@ requires \valid(state);
@@ -1578,6 +1789,28 @@ void fbvbs_kci_invalidate_bindings_for_gpa(
     }
 }
 
+/*@ requires \valid(state);
+    assigns *state;
+*/
+void fbvbs_kci_invalidate_approved_module_for_gpa(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t guest_physical_address,
+    uint64_t size
+) {
+    if (state == NULL ||
+        state->approved_module_object_id == 0U ||
+        state->approved_module_size == 0U ||
+        guest_physical_address == 0U ||
+        size == 0U) {
+        return;
+    }
+
+    if (state->approved_module_base_gpa < guest_physical_address + size &&
+        guest_physical_address < state->approved_module_base_gpa + state->approved_module_size) {
+        fbvbs_kci_clear_approved_module(state);
+    }
+}
+
 /*@ requires \valid(state) || state == \null;
     requires \valid_read(request) || request == \null;
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
@@ -1593,10 +1826,13 @@ int fbvbs_kci_set_wx(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_set_wx_request *request
 ) {
-    uint32_t p_idx;
-    uint32_t m_idx;
     struct fbvbs_partition *host;
+    struct fbvbs_memory_mapping *target_mapping;
+    const struct fbvbs_memory_mapping *module_mapping;
     const struct fbvbs_artifact_catalog_entry *module_entry;
+    uint64_t manifest_oid;
+    uint64_t expected_gpa;
+    uint32_t page_index;
 
     if (state == NULL || request == NULL) {
         return INVALID_PARAMETER;
@@ -1612,7 +1848,9 @@ int fbvbs_kci_set_wx(
         return INVALID_PARAMETER;
     }
     if (state->approved_module_object_id == 0U ||
-        state->approved_module_object_id != request->module_object_id) {
+        state->approved_module_object_id != request->module_object_id ||
+        state->approved_module_size == 0U ||
+        state->approved_module_page_count == 0U) {
         return INVALID_STATE;
     }
     /* W^X enforcement: requested permissions must include execute and must NOT
@@ -1621,9 +1859,21 @@ int fbvbs_kci_set_wx(
         (request->permissions & FBVBS_MEMORY_PERMISSION_WRITE) != 0U) {
         return PERMISSION_DENIED;
     }
+    if (request->file_offset + request->size > state->approved_module_size) {
+        return INVALID_PARAMETER;
+    }
+    if ((request->file_offset / FBVBS_PAGE_SIZE) +
+            (request->size / FBVBS_PAGE_SIZE) > state->approved_module_page_count) {
+        return INVALID_PARAMETER;
+    }
+    if (state->approved_module_base_gpa > UINT64_MAX - request->file_offset) {
+        return INVALID_STATE;
+    }
+    expected_gpa = state->approved_module_base_gpa + request->file_offset;
+    if (request->guest_physical_address != expected_gpa) {
+        return INVALID_STATE;
+    }
 
-    /* Verify the module object exists in the artifact catalog with
-       a valid hash — this binds the code pages to a measured artifact. */
     module_entry = fbvbs_find_artifact_entry(state, request->module_object_id);
     if (module_entry == NULL ||
         module_entry->object_kind != FBVBS_ARTIFACT_OBJECT_MODULE) {
@@ -1633,96 +1883,75 @@ int fbvbs_kci_set_wx(
         return INVALID_STATE;
     }
 
-    /* Verify artifact approval still valid (not revoked, manifest set current) */
     if (module_entry->related_index >= state->artifact_catalog.count) {
         return INVALID_STATE;
     }
-    {
-        uint64_t manifest_oid = state->artifact_catalog.entries[module_entry->related_index].object_id;
-        if (!fbvbs_artifact_approval_exists(state, request->module_object_id, manifest_oid)) {
-            return INVALID_STATE;
-        }
+    manifest_oid = state->artifact_catalog.entries[module_entry->related_index].object_id;
+    if (manifest_oid != state->approved_module_manifest_object_id ||
+        !fbvbs_artifact_approval_exists(state, request->module_object_id, manifest_oid) ||
+        !fbvbs_constant_time_equals(
+            state->approved_module_hash,
+            module_entry->payload_hash,
+            sizeof(state->approved_module_hash)
+        )) {
+        return INVALID_STATE;
     }
 
-    /* Find the FreeBSD host partition — KCI calls originate from the host. */
-    host = NULL;
-    /*@ loop invariant 0 <= p_idx <= FBVBS_MAX_PARTITIONS;
-        loop assigns p_idx, host;
-        loop variant FBVBS_MAX_PARTITIONS - p_idx;
-    */
-    for (p_idx = 0U; p_idx < FBVBS_MAX_PARTITIONS; ++p_idx) {
-        if (state->partitions[p_idx].occupied &&
-            state->partitions[p_idx].kind == PARTITION_KIND_FREEBSD_HOST) {
-            host = &state->partitions[p_idx];
-            break;
-        }
-    }
+    host = fbvbs_find_host_partition(state);
     if (host == NULL) {
         return INVALID_STATE;
     }
 
-    /* Find a mapping in the host that covers the requested GPA range
-       and is backed by the approved module's memory object. The mapping
-       must exactly match the GPA+size (module pages are mapped page-aligned). */
-    /*@ loop invariant 0 <= m_idx <= FBVBS_MAX_MEMORY_MAPPINGS;
-        loop assigns m_idx;
-        loop variant FBVBS_MAX_MEMORY_MAPPINGS - m_idx;
-    */
-    for (m_idx = 0U; m_idx < FBVBS_MAX_MEMORY_MAPPINGS; ++m_idx) {
-        struct fbvbs_memory_mapping *mapping = &host->mappings[m_idx];
-
-        if (!mapping->active) {
-            continue;
-        }
-
-        /* The mapping must contain the requested range */
-        if (mapping->guest_physical_address > request->guest_physical_address) {
-            continue;
-        }
-        if (mapping->size < request->size) {
-            continue;
-        }
-        if (request->guest_physical_address - mapping->guest_physical_address >
-            mapping->size - request->size) {
-            continue;
-        }
-
-        /* Verify the backing object is the approved module. The module_object_id
-           from KCI_VERIFY_MODULE was stored in approved_module_object_id; we need
-           the memory object ID that backs this mapping to correspond to it.
-           In the FBVBS model, the module is loaded via a memory object whose ID
-           matches the artifact catalog object_id. */
-        if (mapping->memory_object_id != request->module_object_id) {
-            continue;
-        }
-
-        /* Byte-backed binding: verify page content matches the measured
-           artifact hash before granting execute. This closes the gap where
-           pages could be modified between measurement and permission grant. */
-        if (fbvbs_kci_verify_page_hash(
-                request->guest_physical_address,
-                request->size,
-                module_entry->payload_hash) == 0) {
-            return MEASUREMENT_FAILED;
-        }
-        if (fbvbs_kci_record_binding(
-                state,
-                request->module_object_id,
-                request->guest_physical_address,
-                request->size,
-                request->file_offset,
-                host->measurement_epoch) == 0) {
-            return RESOURCE_EXHAUSTED;
-        }
-
-        /* Apply permissions: grant execute, strip write. The W^X invariant
-           is enforced by the parameter checks above (write bit rejected). */
-        mapping->permissions = (uint16_t)request->permissions;
-        return OK;
+    module_mapping = fbvbs_find_unique_mapping_for_object(
+        host,
+        request->module_object_id,
+        state->approved_module_size
+    );
+    if (module_mapping == NULL ||
+        module_mapping->guest_physical_address != state->approved_module_base_gpa) {
+        return INVALID_STATE;
     }
 
-    /* No matching mapping found for this GPA range */
-    return NOT_FOUND;
+    target_mapping = fbvbs_find_exact_mapping_for_object(
+        host,
+        request->module_object_id,
+        request->guest_physical_address,
+        request->size
+    );
+    if (target_mapping == NULL) {
+        return NOT_FOUND;
+    }
+
+    /*@ loop invariant 0 <= page_index <= request->size / FBVBS_PAGE_SIZE;
+        loop assigns page_index;
+        loop variant (request->size / FBVBS_PAGE_SIZE) - page_index;
+    */
+    for (page_index = 0U; page_index < request->size / FBVBS_PAGE_SIZE; ++page_index) {
+        uint64_t page_gpa = request->guest_physical_address +
+            ((uint64_t)page_index * FBVBS_PAGE_SIZE);
+        uint32_t approved_page_index =
+            (uint32_t)(request->file_offset / FBVBS_PAGE_SIZE) + page_index;
+
+        if (fbvbs_kci_verify_page_hash(
+                page_gpa,
+                FBVBS_PAGE_SIZE,
+                state->approved_module_page_hashes[approved_page_index]) == 0) {
+            return MEASUREMENT_FAILED;
+        }
+    }
+
+    if (fbvbs_kci_record_binding(
+            state,
+            request->module_object_id,
+            request->guest_physical_address,
+            request->size,
+            request->file_offset,
+            host->measurement_epoch) == 0) {
+        return RESOURCE_EXHAUSTED;
+    }
+
+    target_mapping->permissions = (uint16_t)request->permissions;
+    return OK;
 }
 
 /*@ requires \valid(state) || state == \null;

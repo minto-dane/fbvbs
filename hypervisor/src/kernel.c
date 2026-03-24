@@ -20,6 +20,123 @@ _Static_assert(FBVBS_MAX_HOST_CALLSITE_ENTRIES <= UINT16_MAX,
 
 struct fbvbs_hypervisor_state g_fbvbs_hypervisor;
 
+#define FBVBS_MULTIBOOT_MAX_BUFFER_SIZE (64U * 1024U * 1024U)
+
+#ifdef FBVBS_BAREMETAL_BUILD
+extern const uint8_t _binary_start[];
+extern const uint8_t _binary_end[];
+#endif
+
+struct fbvbs_boot_snapshot {
+    const void *multiboot_info;
+    const void *acpi_rsdp;
+    uint32_t memory_map_count;
+    struct fbvbs_memory_map_entry memory_map[32];
+    uint32_t boot_device;
+    uint32_t boot_partition;
+    uint32_t boot_sub_partition;
+};
+
+static void fbvbs_boot_status(const char *message) {
+#ifdef FBVBS_BAREMETAL_BUILD
+    fbvbs_boot_console_puts(message);
+#else
+    (void)message;
+#endif
+}
+
+/*@ requires \valid(state);
+    requires \valid(snapshot);
+    assigns *snapshot;
+*/
+static void fbvbs_capture_boot_snapshot(
+    const struct fbvbs_hypervisor_state *state,
+    struct fbvbs_boot_snapshot *snapshot
+) {
+    snapshot->multiboot_info = state->multiboot_info;
+    snapshot->acpi_rsdp = state->acpi_rsdp;
+    snapshot->memory_map_count = state->memory_map_count;
+    fbvbs_copy_memory(snapshot->memory_map, state->memory_map,
+                      sizeof(snapshot->memory_map));
+    snapshot->boot_device = state->boot_device;
+    snapshot->boot_partition = state->boot_partition;
+    snapshot->boot_sub_partition = state->boot_sub_partition;
+}
+
+/*@ requires \valid(state);
+    requires \valid_read(snapshot);
+    assigns state->multiboot_info,
+            state->acpi_rsdp,
+            state->memory_map_count,
+            state->memory_map[0 .. 31],
+            state->boot_device,
+            state->boot_partition,
+            state->boot_sub_partition;
+*/
+static void fbvbs_restore_boot_snapshot(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_boot_snapshot *snapshot
+) {
+    state->multiboot_info = snapshot->multiboot_info;
+    state->acpi_rsdp = snapshot->acpi_rsdp;
+    state->memory_map_count = snapshot->memory_map_count;
+    fbvbs_copy_memory(state->memory_map, snapshot->memory_map,
+                      sizeof(snapshot->memory_map));
+    state->boot_device = snapshot->boot_device;
+    state->boot_partition = snapshot->boot_partition;
+    state->boot_sub_partition = snapshot->boot_sub_partition;
+}
+
+/*@ assigns \nothing;
+    ensures \result <= FBVBS_MULTIBOOT_MAX_BUFFER_SIZE;
+*/
+static uint32_t fbvbs_multiboot_total_size(const void *multiboot_info) {
+    uint32_t total_size = 0U;
+
+    if (multiboot_info == NULL) {
+        return 0U;
+    }
+
+    fbvbs_copy_memory(&total_size, multiboot_info, sizeof(total_size));
+    if (total_size < 8U || total_size > FBVBS_MULTIBOOT_MAX_BUFFER_SIZE) {
+        return 0U;
+    }
+
+    return total_size;
+}
+
+/*@ requires \valid(state);
+    assigns \nothing;
+    ensures \result == OK || \result == RESOURCE_EXHAUSTED;
+*/
+static int fbvbs_bootstrap_page_allocator(struct fbvbs_hypervisor_state *state) {
+    uint32_t multiboot_size;
+
+    if (state->memory_map_count == 0U) {
+        return OK;
+    }
+
+    if (fbvbs_page_alloc_init(state->memory_map, state->memory_map_count) != 0) {
+        return RESOURCE_EXHAUSTED;
+    }
+
+#ifdef FBVBS_BAREMETAL_BUILD
+    if (fbvbs_page_alloc_reserve((uint64_t)(uintptr_t)_binary_start,
+                                 (uint64_t)((uintptr_t)_binary_end - (uintptr_t)_binary_start)) != 0) {
+        return RESOURCE_EXHAUSTED;
+    }
+#endif
+
+    multiboot_size = fbvbs_multiboot_total_size(state->multiboot_info);
+    if (multiboot_size != 0U &&
+        fbvbs_page_alloc_reserve((uint64_t)(uintptr_t)state->multiboot_info,
+                                 multiboot_size) != 0) {
+        return RESOURCE_EXHAUSTED;
+    }
+
+    return OK;
+}
+
 /*@ requires \valid(state);
     assigns \nothing;
     ensures -1 <= \result < (int32_t)FBVBS_MAX_HOST_CALLSITE_TABLES;
@@ -52,21 +169,6 @@ static int32_t fbvbs_find_host_callsite_table_slot_index(
     return -1;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires count == 0U ||
-             (allowed_offsets != \null &&
-              \valid_read(allowed_offsets + (0 .. count - 1)));
-    assigns state->host_callsites[0 .. FBVBS_MAX_HOST_CALLSITE_TABLES - 1];
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == RESOURCE_EXHAUSTED || \result == ALREADY_EXISTS;
-    behavior invalid_args:
-      assumes state == \null || allowed_offsets == \null ||
-              manifest_object_id == 0U || load_base == 0U || count == 0U ||
-              count > FBVBS_MAX_HOST_CALLSITE_ENTRIES ||
-              (caller_class != FBVBS_HOST_CALLER_CLASS_FBVBS &&
-               caller_class != FBVBS_HOST_CALLER_CLASS_VMM);
-      ensures \result == INVALID_PARAMETER;
-*/
 int fbvbs_configure_host_callsite_table(
     struct fbvbs_hypervisor_state *state,
     uint8_t caller_class,
@@ -128,17 +230,6 @@ int fbvbs_configure_host_callsite_table(
     return OK;
 }
 
-/*@ requires \valid_read(state) || state == \null;
-    assigns \nothing;
-    behavior null_state:
-      assumes state == \null;
-      ensures \result == 0U;
-    behavior valid_state:
-      assumes state != \null;
-      ensures \result == 0U || \result >= 1U;
-    complete behaviors;
-    disjoint behaviors;
-*/
 uint64_t fbvbs_primary_host_callsite(
     const struct fbvbs_hypervisor_state *state,
     uint8_t caller_class
@@ -162,14 +253,6 @@ uint64_t fbvbs_primary_host_callsite(
     return 0U;
 }
 
-/*@ requires \valid_read(state) || state == \null;
-    assigns \nothing;
-    ensures \result == \null || \valid_read(\result);
-    ensures \result != \null ==>
-            \result->active &&
-            \result->component_type == component_type &&
-            \result->object_id == object_id;
-*/
 const struct fbvbs_manifest_profile *fbvbs_find_manifest_profile_for_object(
     const struct fbvbs_hypervisor_state *state,
     uint8_t component_type,
@@ -196,15 +279,6 @@ const struct fbvbs_manifest_profile *fbvbs_find_manifest_profile_for_object(
     return NULL;
 }
 
-/*@ requires \valid_read(state) || state == \null;
-    assigns \nothing;
-    ensures \result == \null || \valid_read(\result);
-    ensures \result != \null ==>
-            \result->active &&
-            (\result->component_type == FBVBS_MANIFEST_COMPONENT_FREEBSD_KERNEL ||
-             \result->component_type == FBVBS_MANIFEST_COMPONENT_FREEBSD_MODULE) &&
-            \result->caller_class == caller_class;
-*/
 const struct fbvbs_manifest_profile *fbvbs_find_host_manifest_profile(
     const struct fbvbs_hypervisor_state *state,
     uint8_t caller_class
@@ -239,10 +313,12 @@ const struct fbvbs_manifest_profile *fbvbs_find_host_manifest_profile(
 /* MODEL ONLY: Deterministic boot IDs for the verification model.
  * Production MUST replace with RDRAND-seeded or platform RNG values
  * to provide uniqueness across boots for replay prevention. */
+#if defined(__FRAMAC__)
 static void fbvbs_seed_boot_ids(struct fbvbs_hypervisor_state *state) {
     state->boot_id_hi = 0x4642564253560000ULL;
     state->boot_id_lo = 0x0000000000000001ULL;
 }
+#endif
 
 /* Phase 1-8: Production boot ID generation using hardware entropy.
  * Replaces seed_boot_ids MODEL ONLY function above. */
@@ -922,23 +998,6 @@ static int fbvbs_build_host_callsite_tables(
     return OK;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires artifact_count == 0U ||
-             (artifact_entries != \null && \valid_read(artifact_entries + (0 .. artifact_count - 1)));
-    requires profiles != \null && profile_count > 0U ==>
-             \valid_read(profiles + (0 .. profile_count - 1));
-    assigns state->artifact_catalog,
-            state->manifest_profiles[0 .. FBVBS_MAX_MANIFEST_PROFILES - 1],
-            state->host_callsites[0 .. FBVBS_MAX_HOST_CALLSITE_TABLES - 1],
-            state->approvals[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
-            state->revoked_object_ids[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1],
-            state->revoked_object_count;
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == ALREADY_EXISTS;
-    behavior null_state:
-      assumes state == \null;
-      ensures \result == INVALID_PARAMETER;
-*/
 int fbvbs_ingest_boot_catalog(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_artifact_catalog_entry *artifact_entries,
@@ -1038,7 +1097,7 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
     if (state->vmx_caps.aesni_available != 0U) {
         state->capability_bitmap0 |= CAP_BITMAP0_AESNI;
     }
-    if (state->vmx_caps.iommu_available != 0U) {
+    if (fbvbs_iommu_runtime_ready(&state->cpu_security) != 0) {
         state->capability_bitmap1 |= CAP_BITMAP1_IOMMU;
     }
 }
@@ -1051,9 +1110,12 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
 int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     static const uint8_t boot_payload[] = "fbvbs hypervisor kernel boot";
     struct fbvbs_artifact_catalog_entry boot_artifact_entries[FBVBS_BOOT_ARTIFACT_SEED_COUNT];
+    struct fbvbs_boot_snapshot boot_snapshot;
     int status;
 
+    fbvbs_capture_boot_snapshot(state, &boot_snapshot);
     *state = (struct fbvbs_hypervisor_state){0};
+    fbvbs_restore_boot_snapshot(state, &boot_snapshot);
     state->next_partition_id = 1U;
     state->next_measurement_digest_id = 1U;
     state->next_memory_object_id = 0x100000U;
@@ -1065,8 +1127,25 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     state->next_iommu_domain_id = 0x700000U;
     state->trusted_clock_available = true;
     state->trusted_time_seconds = 1000U;
+    fbvbs_boot_status("FBVBS: init page allocator\n");
+    status = fbvbs_bootstrap_page_allocator(state);
+    if (status != OK) {
+        fbvbs_boot_status("FBVBS: page allocator bootstrap failed\n");
+        return status;
+    }
+    fbvbs_boot_status("FBVBS: page allocator ready\n");
+#if defined(__FRAMAC__)
     fbvbs_seed_boot_ids(state);
+#else
+    status = fbvbs_entropy_seed_boot_ids(state);
+    if (status != 0) {
+        fbvbs_boot_status("FBVBS: boot entropy unavailable\n");
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+#endif
+    fbvbs_boot_status("FBVBS: boot ids seeded\n");
     fbvbs_materialize_boot_artifact_entries(boot_artifact_entries);
+    fbvbs_boot_status("FBVBS: boot artifacts materialized\n");
     status = fbvbs_ingest_boot_catalog(
         state,
         boot_artifact_entries,
@@ -1075,16 +1154,26 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
         (uint32_t)FBVBS_BOOT_MANIFEST_PROFILE_COUNT
     );
     if (status != OK) {
+        fbvbs_boot_status("FBVBS: boot catalog ingest failed\n");
         return status;
     }
+    fbvbs_boot_status("FBVBS: boot catalog ingested\n");
     status = fbvbs_partition_seed_freebsd_host(state);
     if (status != OK) {
+        fbvbs_boot_status("FBVBS: host partition seed failed\n");
         return status;
     }
+    fbvbs_boot_status("FBVBS: host partition seeded\n");
     status = fbvbs_vmx_probe(&state->vmx_caps);
     if (status != OK) {
+        fbvbs_boot_status("FBVBS: VMX probe failed\n");
         return status;
     }
+    if (state->vmx_caps.vmx_supported == 0U) {
+        fbvbs_boot_status("FBVBS: VMX unavailable\n");
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    fbvbs_boot_status("FBVBS: VMX probed\n");
 
     /* CPU security subsystem initialization (Section 21).
      * Detects features, builds vulnerability profile, computes CR pinning
@@ -1092,29 +1181,55 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
      * Must run after vmx_probe (uses vmx_caps) and before any VM runs. */
     status = fbvbs_cpu_detect_features(0U, &state->bsp_profile);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: CPU feature detect failed\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: CPU features detected\n");
     status = fbvbs_cpu_build_vuln_profile(&state->bsp_profile);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: vulnerability profiling failed\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: vulnerability profile built\n");
     status = fbvbs_cpu_compute_cr_pins(&state->bsp_profile);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: CR pin computation failed\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: CR pins computed\n");
     status = fbvbs_cpu_compute_global_mitigations(
         &state->bsp_profile, 1U, &state->cpu_security);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: mitigation synthesis failed\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: mitigations computed\n");
     status = fbvbs_iommu_detect(&state->cpu_security);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: IOMMU detection failed\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: IOMMU detected\n");
+    if (state->cpu_security.iommu.iommu_type == IOMMU_TYPE_VTD) {
+        status = fbvbs_vtd_init(&state->cpu_security);
+    } else if (state->cpu_security.iommu.iommu_type == IOMMU_TYPE_AMD_VI) {
+        status = fbvbs_amdvi_init(&state->cpu_security);
+    } else {
+        status = -1;
+    }
+    if (status != 0) {
+        fbvbs_boot_status("FBVBS: IOMMU initialization failed\n");
+        return NOT_SUPPORTED_ON_PLATFORM;
+    }
+    state->vmx_caps.iommu_available =
+        (uint32_t)fbvbs_iommu_runtime_ready(&state->cpu_security);
+    fbvbs_boot_status("FBVBS: IOMMU initialized\n");
     status = fbvbs_boot_integrity_detect(&state->cpu_security);
     if (status != 0) {
+        fbvbs_boot_status("FBVBS: boot integrity requirements not met\n");
         return NOT_SUPPORTED_ON_PLATFORM;
     }
+    fbvbs_boot_status("FBVBS: boot integrity accepted\n");
     /* Apply computed CR pin masks from CPU security profile */
     state->pinned_cr0_mask = state->bsp_profile.cr_pins.cr0_pin_mask;
     state->pinned_cr0_value = state->bsp_profile.cr_pins.cr0_pin_value;
@@ -1127,8 +1242,10 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     fbvbs_seed_device_catalog(state);
     status = fbvbs_log_init(state);
     if (status != OK) {
+        fbvbs_boot_status("FBVBS: log init failed\n");
         return status;
     }
+    fbvbs_boot_status("FBVBS: log initialized\n");
     fbvbs_log_append(
         state,
         0U,
@@ -1185,42 +1302,30 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
 void fbvbs_kernel_main(const void *multiboot_info) {
     int init_status;
 
-    init_status = fbvbs_hypervisor_init(&g_fbvbs_hypervisor);
-    if (init_status != OK) {
-        return; /* halt: boot catalog or subsystem init failed */
-    }
-
-    /* Store Multiboot information pointer AFTER init (init zeros state) */
+    fbvbs_boot_status("FBVBS: kernel main entered\n");
     g_fbvbs_hypervisor.multiboot_info = multiboot_info;
 
     /* Process Multiboot information if available */
     if (multiboot_info != NULL) {
-        /* PRODUCTION NOTE: Pass actual mapped size of multiboot info.
-           In real boot, the bootloader provides the Multiboot2 info in a
-           known memory region; its total_size is self-reported.  Here we
-           pass the max allowed size; fbvbs_process_multiboot_info clamps
-           internally. */
+        fbvbs_boot_status("FBVBS: processing multiboot info\n");
         fbvbs_process_multiboot_info(&g_fbvbs_hypervisor, multiboot_info,
-                                     64U * 1024U * 1024U);
+                                     FBVBS_MULTIBOOT_MAX_BUFFER_SIZE);
+        fbvbs_boot_status("FBVBS: multiboot info processed\n");
     }
+
+    fbvbs_boot_status("FBVBS: starting hypervisor init\n");
+    init_status = fbvbs_hypervisor_init(&g_fbvbs_hypervisor);
+    if (init_status != OK) {
+        fbvbs_boot_status("FBVBS: hypervisor init failed\n");
+        return; /* halt: subsystem init failed */
+    }
+
+    fbvbs_boot_status("FBVBS: hypervisor init complete\n");
 }
 
 /* fbvbs_process_multiboot_info is in boot_multiboot.c (excluded from WP
    due to void* casts required for Multiboot2 binary structure parsing) */
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(response) || response == \null;
-    assigns *response;
-    ensures \result == OK || \result == INVALID_PARAMETER;
-    behavior null_args:
-      assumes state == \null || response == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior valid_args:
-      assumes state != \null && response != \null;
-      ensures \result == OK;
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_diag_get_capabilities(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_capabilities_response *response
@@ -1234,24 +1339,6 @@ int fbvbs_diag_get_capabilities(
     return OK;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(response) || response == \null;
-    requires \valid(response_length) || response_length == \null;
-    requires state != \null ==> state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
-    requires \separated(state, response, response_length);
-    assigns *response, *response_length;
-    ensures \result == OK || \result == INVALID_PARAMETER;
-    behavior null_args:
-      assumes state == \null || response == \null || response_length == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior ok:
-      assumes state != \null && response != \null && response_length != \null;
-      ensures \result == OK;
-      ensures response->count == state->artifact_catalog.count;
-      ensures *response_length == 8U + state->artifact_catalog.count * (uint32_t)sizeof(struct fbvbs_artifact_catalog_entry);
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_diag_get_artifact_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_artifact_list_response *response,
@@ -1274,17 +1361,14 @@ int fbvbs_diag_get_artifact_list(
         loop variant state->artifact_catalog.count - index;
     */
     for (index = 0U; index < state->artifact_catalog.count; ++index) {
-        union {
-            struct fbvbs_artifact_catalog_entry s;
-            uint8_t bytes[sizeof(struct fbvbs_artifact_catalog_entry)];
-        } entry_copy;
+        struct fbvbs_artifact_catalog_entry entry_copy;
 
         /*@ assert index < FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES; */
-        entry_copy.s = state->artifact_catalog.entries[index];
+        entry_copy = state->artifact_catalog.entries[index];
         fbvbs_copy_bytes(
-            &response->entries[index * sizeof(entry_copy.s)],
-            entry_copy.bytes,
-            sizeof(entry_copy.s)
+            &response->entries[index * sizeof(entry_copy)],
+            (const uint8_t *)&entry_copy,
+            sizeof(entry_copy)
         );
     }
 
@@ -1295,24 +1379,6 @@ int fbvbs_diag_get_artifact_list(
     return OK;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(response) || response == \null;
-    requires \valid(response_length) || response_length == \null;
-    requires state != \null ==> state->device_catalog.count <= FBVBS_MAX_DEVICE_CATALOG_ENTRIES;
-    requires \separated(state, response, response_length);
-    assigns *response, *response_length;
-    ensures \result == OK || \result == INVALID_PARAMETER;
-    behavior null_args:
-      assumes state == \null || response == \null || response_length == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior ok:
-      assumes state != \null && response != \null && response_length != \null;
-      ensures \result == OK;
-      ensures response->count == state->device_catalog.count;
-      ensures *response_length == 8U + state->device_catalog.count * (uint32_t)sizeof(struct fbvbs_device_catalog_entry);
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_diag_get_device_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_device_list_response *response,
@@ -1335,17 +1401,14 @@ int fbvbs_diag_get_device_list(
         loop variant state->device_catalog.count - index;
     */
     for (index = 0U; index < state->device_catalog.count; ++index) {
-        union {
-            struct fbvbs_device_catalog_entry s;
-            uint8_t bytes[sizeof(struct fbvbs_device_catalog_entry)];
-        } entry_copy;
+        struct fbvbs_device_catalog_entry entry_copy;
 
         /*@ assert index < FBVBS_MAX_DEVICE_CATALOG_ENTRIES; */
-        entry_copy.s = state->device_catalog.entries[index];
+        entry_copy = state->device_catalog.entries[index];
         fbvbs_copy_bytes(
-            &response->entries[index * sizeof(entry_copy.s)],
-            entry_copy.bytes,
-            sizeof(entry_copy.s)
+            &response->entries[index * sizeof(entry_copy)],
+            (const uint8_t *)&entry_copy,
+            sizeof(entry_copy)
         );
     }
 

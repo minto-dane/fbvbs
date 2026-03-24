@@ -2,7 +2,7 @@
 
 **Document:** ST-001
 **Date:** 2026-03-23
-**Status:** OUTLINE -- requires evaluator engagement for formal ST completion
+**Status:** OUTLINE ONLY -- not an achieved certification claim; requires evaluator engagement and additional implementation evidence
 **Applicable Standards:** ISO/IEC 15408:2022 (Common Criteria), ISO/IEC 18045:2022 (CEM)
 **Scope:** Phase 9-4 (Common Criteria evaluation preparation)
 
@@ -34,7 +34,7 @@ host operating system and its guest virtual machines.
 | TOE Type | Separation kernel / microhypervisor |
 | Implementation Language | C11 with ACSL formal annotations |
 | Source Size | ~21K SLOC (24 source files, 4 header files) |
-| WP-Verified Core | ~10,500 SLOC (9 files, 99.32% goals proved) |
+| WP-Verification Scope | 9 files targeted; current proof status is tracked separately in `wp_verification_boundary.md` |
 | Target Architecture | x86-64 (Intel VT-x + EPT, AMD-V + NPT) |
 | Required Hardware | CPU with VMX/SVM, EPT/NPT, IOMMU (VT-d/AMD-Vi), optional TPM 2.0 |
 | Operating Mode | VMX root (ring 0) / SVM host mode |
@@ -43,7 +43,9 @@ host operating system and its guest virtual machines.
 ### 1.3 TOE Overview
 
 FBVBS operates as a firmware-loaded separation kernel between the
-hardware platform and all software partitions. It boots via UEFI,
+hardware platform and all software partitions. The repository currently
+contains both a Multiboot2 bare-metal path and an in-progress UEFI path,
+and the QEMU smoke path uses Multiboot2/GRUB. In the intended end state it boots via firmware,
 establishes VMX/SVM root mode, deprivileges the FreeBSD host into a
 guest partition, and manages additional guest VMs and trusted service
 partitions. All inter-partition communication is mediated through a
@@ -85,12 +87,21 @@ The TOE consists of the following subsystems:
 
 ---
 
+## Evidence Boundary Note
+
+This document is a target-state Security Target outline. It mixes current repository evidence with intended Common Criteria mappings, so it must be read together with:
+
+- `hypervisor/compliance/retained_c_leaf_boundary.md`
+- `hypervisor/compliance/wp_verification_boundary.md`
+
+Table cells below that mention completeness, coverage, or assurance packages describe target-state intent unless the cited repository evidence independently reproduces them in the current environment.
+
 ## 2. Conformance Claims
 
 ### 2.1 CC Conformance
 
-- **CC Part 2 conformant** -- all SFRs drawn from ISO/IEC 15408-2:2022
-- **CC Part 3 conformant** -- EAL5 augmented (see Section 2.3)
+- **CC Part 2 target mapping** -- all SFRs are drawn from ISO/IEC 15408-2:2022
+- **CC Part 3 target mapping** -- the outline is written against an eventual EAL5-augmented evaluation package, but that package is not currently claimed as achieved
 
 ### 2.2 Protection Profile Conformance
 
@@ -108,19 +119,14 @@ isolation) that supplement the SKPP.
 
 ### 2.3 EAL Conformance
 
-**EAL5 augmented with:**
+**Target package after evidence closure: EAL5 augmented with:**
 
 | Component | Augmentation | Rationale |
 |-----------|-------------|-----------|
 | AVA_VAN.5 | Advanced methodical vulnerability analysis | Covert channel analysis (CCA-001), speculative execution analysis |
 | ALC_FLR.3 | Systematic flaw remediation | Reproducible builds, SBOM, fuzz regression |
 
-**Justification for EAL5+:**
-The TOE's ~21K SLOC codebase with 99.32% formal proof coverage, full
-ACSL contracts on the security-critical core, and systematic covert
-channel analysis support EAL5+ claims. The semiformal functional
-specification (ACSL contracts) satisfies ADV_FSP.5. The modular
-architecture with well-defined subsystem boundaries satisfies ADV_TDS.4.
+**Current reality:** the repository does not yet support an achieved EAL5+ claim. Proof coverage, fuzz evidence, SBOM/provenance, hardware validation, and platform integration must be taken from the current reproducible artifacts, not from target-state package text in this outline.
 
 ### 2.4 Package Conformance
 
@@ -490,9 +496,9 @@ measurement)
   (cpu_security.c: `fbvbs_cpu_detect_security_features`,
   `fbvbs_cpu_verify_consistency`)
 - DRTM/Secure Boot detection (uefi_entry.c)
-- KCI page hash verification before execute permission grant
-  (security.c: `fbvbs_kci_verify_page_hash` -- model code, Phase 5
-  crypto integration required for production)
+- KCI full-module measurement plus per-page digest verification before
+  execute permission grant (security.c: `fbvbs_kci_verify_module`,
+  `fbvbs_kci_set_wx`, `fbvbs_sha384`)
 
 #### FPT_FLS.1 -- Failure with Preservation of Secure State
 
@@ -569,10 +575,11 @@ The TOE shall perform cryptographic operations (SHA-256/384 hash,
 Ed25519 signature verification, AES encryption/decryption) in
 accordance with specified algorithms and key sizes.
 
-**Status:** NOT YET IMPLEMENTED. Phase 5 (Ada/SPARK crypto library)
-required. Current model code uses stub implementations with PRODUCTION
-NOTE markers. The TOE is fail-closed: hash verification returns
-MEASUREMENT_FAILED when crypto is unavailable.
+**Status:** PARTIAL. The retained C build now includes a narrow runtime
+SHA-384 path used by `KCI_VERIFY_MODULE` / `KCI_SET_WX`, but the
+general-purpose cryptographic suite required by this SFR (signature
+verification, MAC, key derivation, encryption/decryption) remains a
+Phase 5 dependency.
 
 #### FMT_SMF.1 / FMT_SMR.1 -- Management Functions and Roles
 
@@ -653,8 +660,8 @@ write-protect bypass.
 
 | Requirement | Evidence | Status |
 |-------------|---------|--------|
-| Semiformal spec for all TSFIs | ACSL contracts on 9 WP-verified files | Complete: 8330/8387 goals proved |
-| Error handling specification | ACSL behavior annotations (error paths) | Complete: behavior-level assigns \nothing for error returns |
+| Semiformal spec for all TSFIs | ACSL contracts on the current WP boundary | Partial: contracts exist, but current proof runs still leave gaps and timeouts |
+| Error handling specification | ACSL behavior annotations (error paths) | Partial: many error paths are specified, but proof completion is not yet closed |
 | Formal notation | ACSL (ANSI/ISO C Specification Language) | Tool: Frama-C 32.0 WP plugin |
 
 The ACSL contracts constitute a semiformal functional specification.
@@ -678,7 +685,7 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Complete implementation | 24 C source files, ~21K SLOC | Complete |
 | Implementation standards | MISRA C:2023 (misra_c_deviation_log.md) | 6 documented deviations |
-| Correspondence to design | ACSL contracts verified against implementation | 99.32% proved |
+| Correspondence to design | ACSL contracts checked against implementation | Partial: reproducible WP runs exist, but the current tree still has proof gaps |
 
 ### 7.2 Guidance (AGD)
 
@@ -706,7 +713,7 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Configuration management | Git version control | Complete |
 | Build automation | Make-based build system | Complete |
-| Reproducible builds | Deterministic build + SBOM (Phase 9-3) | Complete |
+| Reproducible builds | Deterministic build + SBOM (Phase 9-3) | Partial: repository-local deterministic build evidence exists, but release provenance hardening remains in progress |
 
 #### ALC_TAT.2 -- Compliance with Implementation Standards
 
@@ -715,14 +722,14 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 | Implementation standard | MISRA C:2023 | 6 deviations documented |
 | Tool compliance | GCC 13 -Wall -Wextra -Werror -Wpedantic | 0 warnings |
 | Static analysis | GCC -fanalyzer + cppcheck | 0 findings |
-| Formal verification tool | Frama-C 32.0 (Germanium) | Qualified for WP analysis |
+| Formal verification tool | Frama-C 32.0 (Germanium) | Available for WP analysis; proof completion remains open |
 
 #### ALC_FLR.3 -- Systematic Flaw Remediation (Augmentation)
 
 | Requirement | Evidence | Status |
 |-------------|---------|--------|
 | Flaw remediation procedures | Git-based patch workflow | Complete |
-| Fuzz regression | 4 AFL++/libFuzzer harnesses | Complete |
+| Fuzz regression | 5 repository-local harnesses | Partial: buildable and reviewable, but continuous fuzzing infrastructure is not yet closed |
 | SBOM | Software bill of materials (Phase 9-3) | Complete |
 
 ### 7.4 Tests (ATE)
@@ -731,16 +738,16 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 
 | Requirement | Evidence | Status |
 |-------------|---------|--------|
-| Coverage analysis | gcov branch coverage (Phase 9-1) | Complete |
-| Fuzz harness coverage | fuzz_command_page, fuzz_manifest, fuzz_multiboot2, fuzz_iommu | Complete |
+| Coverage analysis | gcov branch coverage (Phase 9-1) | Partial: reproducible repository-local coverage exists, but MC/DC closure is not yet demonstrated |
+| Fuzz harness coverage | fuzz_command_page, fuzz_manifest, fuzz_multiboot2, fuzz_iommu, fuzz_log_decoder | Partial: harnesses exist, but sustained campaign evidence is still missing |
 | Fault injection | test_fault_injection.c (17 tests) | Complete |
-| Boundary tests | fbvbs_leaf_boundary_tests, fbvbs_policy_security_tests | Complete |
+| Boundary tests | fbvbs_leaf_boundary_tests, fbvbs_policy_security_tests, fbvbs_fault_injection_tests | Complete |
 
 #### ATE_DPT.3 -- Testing: Modular Design
 
 | Requirement | Evidence | Status |
 |-------------|---------|--------|
-| Subsystem-level testing | Per-file WP verification (9 files) | Complete |
+| Subsystem-level testing | Current WP target set + unit/fault tests | Partial: proof target is defined, but WP completion is not yet closed |
 | Integration testing | Fuzz harnesses exercise cross-module paths | Complete |
 | Platform integration testing | (Phase 4+ -- requires hardware) | Not yet implemented |
 
@@ -793,9 +800,9 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 
 ### 8.3 SFR-to-Implementation Completeness
 
-All SFRs except FCS_COP.1 are implemented and supported by formal
-verification evidence (ACSL + WP), static analysis (GCC -fanalyzer),
-or structured testing (fuzz harnesses, fault injection).
+Most SFR mappings have at least repository-local design, analysis, or
+test evidence, but they are not all fully closed by current formal proof
+or hardware validation.
 
 FCS_COP.1 depends on Phase 5 (Ada/SPARK cryptographic library). The
 TOE is fail-closed in the absence of crypto: hash verification returns
@@ -809,21 +816,23 @@ MEASUREMENT_FAILED, execute permission is denied.
 
 | Gap | Impact | Resolution Path |
 |-----|--------|----------------|
-| FCS_COP.1 not implemented | No runtime crypto (hash/sign/encrypt) | Phase 5: Ada/SPARK crypto library |
+| FCS_COP.1 not implemented | retained C has only a narrow SHA-384 measurement path for KCI; the general crypto suite (signature, MAC, key derivation, encryption) is still absent | Phase 5: Ada/SPARK crypto library |
 | Platform integration tests | No hardware-level test execution | Phase 4+: requires target platform |
 | IOMMU MMIO access | Parsed but not activated on real hardware | PRODUCTION NOTE markers in iommu_vtd.c, iommu_amdvi.c |
+| Host deprivilege handoff | `VMLAUNCH` path still fails closed | vmcs_setup.c implementation completion + hardware validation |
+| `KCI_SET_WX` byte binding | Implemented in retained C with full-module SHA-384 verification + approved per-page digest table; external crypto boundary and proof completion remain | Phase 5 crypto boundary tightening + WP completion |
 | LLC/L2 covert channels | High residual risk | Intel CAT / SMT-aware scheduling extensions |
 | Operational guidance | Outline only | Requires evaluator engagement for AGD completion |
-| CI/CD pipeline | Not yet integrated | Phase 9-8 |
+| CI/CD pipeline | Repository CI exists, but supply-chain and release provenance tightening remain | Phase 9 hardening continuation |
 
 ### 9.2 Evaluation Readiness
 
 | CC Class | Readiness | Notes |
 |----------|----------|-------|
-| ADV (Development) | HIGH | ACSL contracts constitute semiformal spec; 99.32% proved |
-| AGD (Guidance) | LOW | Operational/preparative guidance documents not yet written |
-| ALC (Life-cycle) | MEDIUM | Build automation + SBOM complete; CM procedures need formalization |
-| ATE (Tests) | MEDIUM | Fuzz/fault injection complete; platform integration tests pending |
+| ADV (Development) | MEDIUM | ACSL contracts exist and WP runs launch, but proof completion is still open |
+| AGD (Guidance) | MEDIUM | Repository-local guidance exists, but evaluator-grade procedures remain incomplete |
+| ALC (Life-cycle) | MEDIUM | Build automation, SBOM, and branch model exist; provenance and hardened release process are still maturing |
+| ATE (Tests) | MEDIUM | unit/fault/fuzz build and QEMU smoke exist; hardware integration tests are still pending |
 | AVA (Vulnerability) | HIGH | CCA-001 covert channel analysis + cpu_security.c vuln profiling |
 
 ### 9.3 Recommended Next Steps

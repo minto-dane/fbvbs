@@ -6,6 +6,8 @@
 **Scope:** `hypervisor/src/amd_npt.c` -- NPT write-protect, PTE fault handler, TLB synchronisation, SEV-SNP complement, GMET W^X
 **Applicable:** FBVBS Design Spec Section 21.3 (Translation Integrity), Appendix F.1 (AMD Certification Challenge), AMD APM Vol. 2 Chapter 15 (SVM)
 
+This document is a pre-production certification plan plus model-level design evidence. It is not a completed hardware certification report. Items described as complete below refer to repository-local design or model coverage unless explicitly backed by adversarial Zen hardware measurements.
+
 ---
 
 ## 1. Requirements

@@ -1,4 +1,5 @@
 #include "fbvbs_hypervisor.h"
+#include "fbvbs_asm.h"
 
 /* ================================================================
  * AMD-Vi (IOMMU) IVRS table parser and register control
@@ -328,6 +329,10 @@ fbvbs_ivrs_parse(
 
 /* ================================================================
  * IVRS table search via ACPI
+ *
+ * Uses the generic ACPI discovery helper. Bare-metal builds search a
+ * bootloader-provided RSDP first and fall back to legacy BIOS scanning.
+ * Hosted/test builds return NULL fail-closed.
  * ================================================================ */
 
 /*@ assigns \nothing;
@@ -335,14 +340,7 @@ fbvbs_ivrs_parse(
 */
 static const struct acpi_ivrs_table_header *fbvbs_acpi_find_ivrs(void)
 {
-#if defined(__FRAMAC__)
-    return (const struct acpi_ivrs_table_header *)0;
-#else
-    /* PRODUCTION NOTE: Implement ACPI table search.
-     * Same RSDP → XSDT traversal as DMAR, searching for "IVRS" signature.
-     * Until implemented, return NULL (fail-closed). */
-    return (const struct acpi_ivrs_table_header *)0;
-#endif
+    return (const struct acpi_ivrs_table_header *)fbvbs_acpi_find_table(ACPI_SIG_IVRS);
 }
 
 /* ================================================================
@@ -354,18 +352,36 @@ static const struct acpi_ivrs_table_header *fbvbs_acpi_find_ivrs(void)
 */
 static uint64_t amdvi_mmio_read64(uint64_t base, uint32_t offset)
 {
+#if defined(__FRAMAC__)
     (void)base;
     (void)offset;
     return 0ULL;
+#elif defined(FBVBS_BAREMETAL_BUILD)
+    volatile const uint64_t *reg =
+        (volatile const uint64_t *)(uintptr_t)(base + (uint64_t)offset);
+    fbvbs_asm_compiler_barrier();
+    return *reg;
+#else
+    (void)base;
+    (void)offset;
+    return 0ULL;
+#endif
 }
 
 /*@ assigns \nothing;
 */
 static void amdvi_mmio_write64(uint64_t base, uint32_t offset, uint64_t value)
 {
+#if defined(FBVBS_BAREMETAL_BUILD) && !defined(__FRAMAC__)
+    volatile uint64_t *reg =
+        (volatile uint64_t *)(uintptr_t)(base + (uint64_t)offset);
+    *reg = value;
+    fbvbs_asm_mfence();
+#else
     (void)base;
     (void)offset;
     (void)value;
+#endif
 }
 
 /* ================================================================
@@ -519,10 +535,7 @@ int fbvbs_amdvi_detect(struct fbvbs_global_security_state *state)
         }
     }
 
-    state->iommu.dma_remapping = 1;
-    state->iommu.interrupt_remapping = 1;
-
-    return 0;
+    return amdvi_probe_capabilities(state, &info);
 }
 
 /*@ requires \valid(state);
@@ -542,6 +555,7 @@ int fbvbs_amdvi_init(struct fbvbs_global_security_state *state)
     state->iommu.dma_remapping = 1;
     state->iommu.interrupt_remapping = 1;
     state->iommu.acs_available = 1;
+    state->iommu.kernel_dma_protection = 1;
     return 0;
 #else
     /* Re-parse IVRS to get MMIO base addresses */
@@ -643,6 +657,7 @@ amdvi_init_ok: ;
         (void)irte;
     }
 
+    state->iommu.kernel_dma_protection = 1;
     return 0;
 #endif
 }

@@ -120,8 +120,19 @@ _Static_assert(
     "fbvbs_vmx_leaf_exit.detail.mmio.value offset drift"
 );
 
+/*@ requires \valid(caps) || caps == \null;
+    behavior null_ptr:
+      assumes caps == \null;
+      assigns \nothing;
+      ensures \result == INVALID_PARAMETER;
+    behavior valid_ptr:
+      assumes caps != \null;
+      assigns *caps;
+      ensures \result == OK;
+    complete behaviors;
+    disjoint behaviors;
+*/
 int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps);
-
 int fbvbs_vmx_leaf_run_vcpu(
     const struct fbvbs_vmx_capabilities *caps,
     const struct fbvbs_vcpu *vcpu,

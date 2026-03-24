@@ -15,6 +15,7 @@ This document covers the retained C boundary that remains inside the microhyperv
 - `hypervisor/src/kernel.c`
 - `hypervisor/src/cpu_security.c`
 - `hypervisor/src/boot_multiboot.c`
+- `hypervisor/src/page_alloc.c`
 
 The scope is intentionally narrower than a production-assurance claim. It documents what the repository can currently show, and which features are deliberately gated off instead of being overclaimed.
 
@@ -41,9 +42,16 @@ The repository currently exposes these executable checks:
 - `make -C hypervisor test`
   - runs `fbvbs_leaf_boundary_tests`
   - runs `fbvbs_policy_security_tests`
+  - runs `fbvbs_fault_injection_tests`
 - `make -C hypervisor frama-c-wp`
-  - runs Frama-C WP only when the WP plugin is installed
-  - in the current environment this target exits with `Frama-C WP plugin is not installed in this environment.`
+  - prefers the `opam` Frama-C installation when available
+  - in the current environment WP starts successfully, but proof gaps, warnings, and timeouts remain
+- `make -C hypervisor baremetal-iso`
+  - builds a Multiboot2 bare-metal ELF and GRUB ISO
+- `make -C hypervisor run-qemu-smoke`
+  - boots the Multiboot2 image under QEMU/TCG and checks for retained-C init reaching either successful initialization or an explicit fail-closed platform gate
+- `make -C hypervisor run-qemu-kvm-smoke`
+  - when `/dev/kvm` and passwordless `sudo` are available, boots the same Multiboot2 image under QEMU/KVM and checks for the same retained-C init boundary
 
 No repository-local placeholder scripts are treated as evidence.
 
@@ -62,12 +70,14 @@ Annotation presence does not by itself imply full proof discharge in the current
 
 The current retained C implementation intentionally refuses success in several areas until the required security evidence exists:
 
-- `KCI_SET_WX`
-  - execute permission is not granted because artifact bytes are not yet cryptographically bound to the target GPA range in the retained C model
+- `PARTITION_LOAD_IMAGE`
+  - image identity and register intent are validated, but the retained-C build still lacks an authoritative ELF/image materializer and therefore refuses to claim a `Loaded` state
 - `VM_ASSIGN_DEVICE` and `VM_RELEASE_DEVICE`
   - passthrough is disabled because authoritative ACS validation, interrupt remapping control, and safe reset/FLR are not implemented
 - `fbvbs_hypervisor_init`
   - platform initialization fails closed until IOMMU and boot-integrity bring-up provide authoritative evidence instead of model-only detection
+- `fbvbs_deprivilege_host`
+  - VMCS preparation exists, but the final host deprivilege / `VMLAUNCH` handoff still fails closed instead of claiming a runnable VM entry path
 
 These gates are deliberate. They reduce the chance that the retained C model accidentally claims a security property it does not yet enforce.
 
@@ -84,14 +94,15 @@ These gates are deliberate. They reduce the chance that the retained C model acc
 The retained C repository currently demonstrates:
 
 - analyzer-clean builds under GCC `-fanalyzer`
-- unit-test coverage for leaf ABI, policy boundaries, shared-memory accounting, fail-closed platform gates, and selected security invariants
+- unit-test coverage for leaf ABI, policy boundaries, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
 - explicit fail-closed behavior where the model cannot yet uphold the design-level guarantee
 
 The retained C repository does not currently demonstrate:
 
 - a complete Frama-C WP proof run in this environment
-- production-ready `KCI_SET_WX` page binding
+- production-ready executable image loader/materializer for `PARTITION_LOAD_IMAGE`
 - production-ready device passthrough qualification and teardown
 - authoritative boot-integrity and IOMMU bring-up
+- production-ready host deprivilege / `VMLAUNCH` handoff
 
 The correct interpretation is therefore: retained C prototype with explicit fail-closed security gates, not production-ready formal completion.

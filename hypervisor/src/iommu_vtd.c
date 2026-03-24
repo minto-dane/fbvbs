@@ -1,4 +1,5 @@
 #include "fbvbs_hypervisor.h"
+#include "fbvbs_asm.h"
 
 /* ================================================================
  * Intel VT-d DMAR table parser
@@ -126,6 +127,11 @@ struct fbvbs_dmar_info {
     struct fbvbs_drhd_unit drhd_units[FBVBS_MAX_DRHD_UNITS];
     struct fbvbs_rmrr_region rmrr_regions[FBVBS_MAX_RMRR_REGIONS];
 };
+
+/* Forward declarations for helpers referenced before their definitions. */
+static int vtd_probe_capabilities(
+    struct fbvbs_global_security_state *state,
+    const struct fbvbs_dmar_info *info);
 
 /* ================================================================
  * ACPI checksum verification
@@ -382,10 +388,9 @@ fbvbs_dmar_parse(
 /* ================================================================
  * DMAR table search via ACPI
  *
- * PRODUCTION NOTE: This function searches for the DMAR table via
- * ACPI RSDP → XSDT → DMAR. In the model, it returns NULL.
- * Production must implement RSDP discovery (EFI system table or
- * BIOS memory scan at 0xE0000-0xFFFFF) and XSDT traversal.
+ * This path uses the generic ACPI discovery helper. In bare-metal
+ * builds it searches bootloader-provided RSDP first, then falls back
+ * to EBDA/BIOS scanning. Hosted/test builds return NULL fail-closed.
  * ================================================================ */
 
 /*@ assigns \nothing;
@@ -393,18 +398,12 @@ fbvbs_dmar_parse(
 */
 static const struct dmar_table_header *fbvbs_acpi_find_dmar(void)
 {
-#if defined(__FRAMAC__)
-    return (const struct dmar_table_header *)0;
-#else
-    /* PRODUCTION NOTE: Implement ACPI table search.
-     * 1. Locate RSDP (from UEFI EFI_SYSTEM_TABLE or BIOS scan)
-     * 2. Follow RSDP.XsdtAddress to XSDT
-     * 3. Scan XSDT entries for DMAR signature
-     * 4. Validate DMAR checksum and return pointer
-     * Until implemented, return NULL (fail-closed). */
-    return (const struct dmar_table_header *)0;
-#endif
+    return (const struct dmar_table_header *)fbvbs_acpi_find_table(ACPI_SIG_DMAR);
 }
+
+static int vtd_probe_capabilities(
+    struct fbvbs_global_security_state *state,
+    const struct fbvbs_dmar_info *info);
 
 /* ================================================================
  * IOMMU detection entry point (called from cpu_security.c)
@@ -440,14 +439,7 @@ int fbvbs_vtd_detect(struct fbvbs_global_security_state *state)
         }
     }
 
-    state->iommu.dma_remapping = 1;
-
-    /* Check for interrupt remapping support via capability register
-     * at each DRHD's register base. For now, assume available if
-     * DMAR table exists (refined in Phase 0B-2 register probing). */
-    state->iommu.interrupt_remapping = 1;
-
-    return 0;
+    return vtd_probe_capabilities(state, &info);
 }
 
 /* ================================================================
@@ -595,13 +587,18 @@ struct fbvbs_vtd_domain {
 */
 static uint32_t vtd_mmio_read32(uint64_t base, uint32_t offset)
 {
+#if defined(__FRAMAC__)
     (void)base;
     (void)offset;
-#if defined(__FRAMAC__)
     return 0U;
+#elif defined(FBVBS_BAREMETAL_BUILD)
+    volatile const uint32_t *reg =
+        (volatile const uint32_t *)(uintptr_t)(base + (uint64_t)offset);
+    fbvbs_asm_compiler_barrier();
+    return *reg;
 #else
-    /* PRODUCTION NOTE: Map base + offset as volatile uint32_t* and read.
-     * Fail-closed: return 0 (no status bits set). */
+    (void)base;
+    (void)offset;
     return 0U;
 #endif
 }
@@ -611,12 +608,18 @@ static uint32_t vtd_mmio_read32(uint64_t base, uint32_t offset)
 */
 static uint64_t vtd_mmio_read64(uint64_t base, uint32_t offset)
 {
+#if defined(__FRAMAC__)
     (void)base;
     (void)offset;
-#if defined(__FRAMAC__)
     return 0ULL;
+#elif defined(FBVBS_BAREMETAL_BUILD)
+    volatile const uint64_t *reg =
+        (volatile const uint64_t *)(uintptr_t)(base + (uint64_t)offset);
+    fbvbs_asm_compiler_barrier();
+    return *reg;
 #else
-    /* PRODUCTION NOTE: Map base + offset as volatile uint64_t* and read. */
+    (void)base;
+    (void)offset;
     return 0ULL;
 #endif
 }
@@ -625,21 +628,32 @@ static uint64_t vtd_mmio_read64(uint64_t base, uint32_t offset)
 */
 static void vtd_mmio_write32(uint64_t base, uint32_t offset, uint32_t value)
 {
+#if defined(FBVBS_BAREMETAL_BUILD) && !defined(__FRAMAC__)
+    volatile uint32_t *reg =
+        (volatile uint32_t *)(uintptr_t)(base + (uint64_t)offset);
+    *reg = value;
+    fbvbs_asm_mfence();
+#else
     (void)base;
     (void)offset;
     (void)value;
-    /* PRODUCTION NOTE: Map base + offset as volatile uint32_t* and write.
-     * Must issue mfence after GCMD writes. */
+#endif
 }
 
 /*@ assigns \nothing;
 */
 static void vtd_mmio_write64(uint64_t base, uint32_t offset, uint64_t value)
 {
+#if defined(FBVBS_BAREMETAL_BUILD) && !defined(__FRAMAC__)
+    volatile uint64_t *reg =
+        (volatile uint64_t *)(uintptr_t)(base + (uint64_t)offset);
+    *reg = value;
+    fbvbs_asm_mfence();
+#else
     (void)base;
     (void)offset;
     (void)value;
-    /* PRODUCTION NOTE: Map base + offset as volatile uint64_t* and write. */
+#endif
 }
 
 /* ================================================================
@@ -893,6 +907,7 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
     state->iommu.dma_remapping = 1;
     state->iommu.interrupt_remapping = 1;
     state->iommu.acs_available = 1;
+    state->iommu.kernel_dma_protection = 1;
     state->iommu.scalable_mode = 0;
     return 0;
 #else
@@ -1008,6 +1023,7 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
         (void)irte;
     }
 
+    state->iommu.kernel_dma_protection = 1;
     return 0;
 #endif
 }

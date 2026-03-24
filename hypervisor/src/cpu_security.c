@@ -26,7 +26,13 @@
  * void* operations are avoided for Typed+Cast model compatibility.
  */
 
+#include <stddef.h>
+
 #include "fbvbs_cpu_security.h"
+
+#define ACPI_SIG_TPM2 0x324D5054U
+
+extern const void *fbvbs_acpi_find_table(uint32_t signature);
 
 /* ================================================================
  * Internal CPUID/MSR helpers
@@ -797,6 +803,30 @@ int fbvbs_iommu_detect(struct fbvbs_global_security_state *state)
     }
 }
 
+/*@ requires \valid_read(state);
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+int fbvbs_iommu_runtime_ready(const struct fbvbs_global_security_state *state)
+{
+    if (state == NULL) {
+        return 0;
+    }
+
+    if ((state->iommu.iommu_type != IOMMU_TYPE_VTD) &&
+        (state->iommu.iommu_type != IOMMU_TYPE_AMD_VI)) {
+        return 0;
+    }
+
+    if (state->iommu.dma_remapping == 0U ||
+        state->iommu.interrupt_remapping == 0U ||
+        state->iommu.kernel_dma_protection == 0U) {
+        return 0;
+    }
+
+    return 1;
+}
+
 /* ================================================================
  * Boot integrity detection (platform-level stub)
  * ================================================================ */
@@ -841,22 +871,13 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
     }
 
     /* Phase 1-5: TPM 2.0 detection.
-     * PRODUCTION NOTE: TPM is accessed via:
-     *   - MMIO at 0xFED40000 (TPM TIS interface)
-     *   - Or via CRB (Command Response Buffer) interface
-     * Steps:
-     *   1. Read TPM_ACCESS_0 register (0xFED40000)
-     *   2. Check tpmRegValidSts bit
-     *   3. Read TPM_INTF_CAPABILITY for supported interface
-     *   4. Read TPM2_PT_FAMILY_INDICATOR for version
-     * Model: check platform configuration. */
+     * Use ACPI TPM2 table discovery as the authoritative retained-C signal
+     * that a TPM 2.0 interface is exposed by firmware. Production can later
+     * refine this with TIS/CRB register probing and PCR policy checks. */
 #ifndef __FRAMAC__
-    /* Model detection: if DRTM is available, assume TPM is present
-     * (DRTM requires TPM for PCR measurements). Production must
-     * actually probe the TPM interface. */
-    if (state->boot.drtm_available != 0U) {
+    if (fbvbs_acpi_find_table(ACPI_SIG_TPM2) != NULL) {
         state->boot.tpm_present = 1;
-        state->boot.tpm_version = 20U; /* TPM 2.0 */
+        state->boot.tpm_version = 20U;
     }
 #endif
 

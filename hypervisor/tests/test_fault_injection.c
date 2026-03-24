@@ -86,9 +86,13 @@ static void test_rollback_stale_manifest_generation_rejected(void) {
     struct {
         _Alignas(FBVBS_PAGE_SIZE) struct fbvbs_metadata_set_page page;
     } manifest_page = {0};
+    struct {
+        _Alignas(FBVBS_PAGE_SIZE) uint8_t bytes[FBVBS_PAGE_SIZE];
+    } module_page = {{0}};
     int status;
 
     memset(&state, 0, sizeof(state));
+    memset(module_page.bytes, 0xC3, sizeof(module_page.bytes));
 
     /* Set up manifest with generation 10 */
     manifest.object_id = 0xAAAAU;
@@ -109,6 +113,11 @@ static void test_rollback_stale_manifest_generation_rejected(void) {
     state.artifact_catalog.entries[0].object_id = 0xBBBBU;
     state.artifact_catalog.entries[0].object_kind = FBVBS_ARTIFACT_OBJECT_MODULE;
     state.artifact_catalog.entries[0].related_index = 1U;
+    fbvbs_sha384(
+        module_page.bytes,
+        sizeof(module_page.bytes),
+        state.artifact_catalog.entries[0].payload_hash
+    );
     state.artifact_catalog.entries[1].object_id = 0xAAAAU;
     state.artifact_catalog.entries[1].object_kind = FBVBS_ARTIFACT_OBJECT_MANIFEST;
     state.artifact_catalog.entries[1].related_index = 1U;
@@ -118,6 +127,25 @@ static void test_rollback_stale_manifest_generation_rejected(void) {
     state.approvals[0].manifest_object_id = 0xAAAAU;
     state.approvals[0].manifest_set_id = 1U;
     state.approvals[0].verified_manifest_set_id = 1U;
+
+    state.partitions[0].occupied = true;
+    state.partitions[0].partition_id = 0x100U;
+    state.partitions[0].kind = PARTITION_KIND_FREEBSD_HOST;
+    state.partitions[0].state = FBVBS_PARTITION_STATE_RUNNABLE;
+    state.partitions[0].mapped_bytes = FBVBS_PAGE_SIZE;
+    state.partitions[0].mappings[0].active = true;
+    state.partitions[0].mappings[0].memory_object_id = 0xBBBBU;
+    state.partitions[0].mappings[0].guest_physical_address =
+        (uint64_t)(uintptr_t)module_page.bytes;
+    state.partitions[0].mappings[0].size = FBVBS_PAGE_SIZE;
+    state.partitions[0].mappings[0].permissions = FBVBS_MEMORY_PERMISSION_READ;
+
+    state.memory_objects[0].allocated = true;
+    state.memory_objects[0].object_flags = FBVBS_MEMORY_OBJECT_FLAG_PRIVATE;
+    state.memory_objects[0].memory_object_id = 0xBBBBU;
+    state.memory_objects[0].owner_partition_id = 0x100U;
+    state.memory_objects[0].size = FBVBS_PAGE_SIZE;
+    state.memory_objects[0].map_count = 1U;
 
     /* Attempt with OLDER generation (rollback attempt) */
     request.module_object_id = 0xBBBBU;
@@ -146,9 +174,6 @@ static void test_device_assign_without_iommu_fails_closed(void) {
 
     memset(&state, 0, sizeof(state));
 
-    /* IOMMU not available */
-    state.vmx_caps.iommu_available = 0U;
-
     state.partitions[0].occupied = true;
     state.partitions[0].partition_id = 0x7777U;
     state.partitions[0].kind = PARTITION_KIND_GUEST_VM;
@@ -173,7 +198,10 @@ static void test_device_assign_with_iommu_but_no_qualification_fails_closed(void
     memset(&state, 0, sizeof(state));
 
     /* IOMMU available but device not qualified */
-    state.vmx_caps.iommu_available = 1U;
+    state.cpu_security.iommu.iommu_type = IOMMU_TYPE_VTD;
+    state.cpu_security.iommu.dma_remapping = 1U;
+    state.cpu_security.iommu.interrupt_remapping = 1U;
+    state.cpu_security.iommu.kernel_dma_protection = 1U;
 
     state.partitions[0].occupied = true;
     state.partitions[0].partition_id = 0x7777U;

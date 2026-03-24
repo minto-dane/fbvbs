@@ -25,7 +25,6 @@
   "production_readiness": {
     "status": "not_ready",
     "blocking_items": [
-      "KCI_SET_WX page binding between approved artifact bytes and execute-enabled GPA ranges",
       "authoritative IOMMU and interrupt-remapping bring-up",
       "authoritative boot-integrity chain establishment",
       "device qualification, ACS verification, and safe reset/FLR for passthrough"
@@ -104,10 +103,6 @@
     ]
   },
   "current_fail_closed_gates": [
-    {
-      "area": "KCI_SET_WX",
-      "reason": "Executable-page byte binding is not implemented strongly enough in the retained C model."
-    },
     {
       "area": "VM_ASSIGN_DEVICE / VM_RELEASE_DEVICE",
       "reason": "Authoritative device qualification, ACS validation, interrupt remapping, and safe reset/FLR are not implemented."

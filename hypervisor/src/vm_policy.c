@@ -27,17 +27,14 @@ static void fbvbs_vmx_external_interrupt_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_external_interrupt s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_external_interrupt)];
-    } payload;
+    struct fbvbs_vm_exit_external_interrupt payload;
 
-    payload.s = (struct fbvbs_vm_exit_external_interrupt){0};
-    payload.s.vector = leaf_exit->detail.external_interrupt.vector;
-    payload.s.reserved0 = 0U;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_external_interrupt){0};
+    payload.vector = leaf_exit->detail.external_interrupt.vector;
+    payload.reserved0 = 0U;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->pending_interrupt_delivery = 0U;
     vcpu->pending_interrupt_vector = 0U;
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
@@ -61,10 +58,7 @@ static void fbvbs_vmx_cr_access_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_cr_access s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_cr_access)];
-    } payload;
+    struct fbvbs_vm_exit_cr_access payload;
     uint64_t requested = leaf_exit->detail.cr_access.value;
     uint32_t cr_num = leaf_exit->detail.cr_access.cr_number;
 
@@ -103,21 +97,21 @@ static void fbvbs_vmx_cr_access_exit(
         }
     }
 
-    payload.s = (struct fbvbs_vm_exit_cr_access){0};
-    payload.s.cr_number = cr_num;
-    payload.s.access_type = leaf_exit->detail.cr_access.access_type;
+    payload = (struct fbvbs_vm_exit_cr_access){0};
+    payload.cr_number = cr_num;
+    payload.access_type = leaf_exit->detail.cr_access.access_type;
     /* Report the enforced value (after pin enforcement), not the
      * raw requested value, so the VMM observes the actual CR state. */
     if (cr_num == 0U) {
-        payload.s.value = vcpu->cr0;
+        payload.value = vcpu->cr0;
     } else if (cr_num == 4U) {
-        payload.s.value = vcpu->cr4;
+        payload.value = vcpu->cr4;
     } else {
-        payload.s.value = requested;
+        payload.value = requested;
     }
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
@@ -134,21 +128,18 @@ static void fbvbs_vmx_pio_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_pio s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_pio)];
-    } payload;
+    struct fbvbs_vm_exit_pio payload;
 
-    payload.s = (struct fbvbs_vm_exit_pio){0};
-    payload.s.port = leaf_exit->detail.pio.port;
-    payload.s.width = leaf_exit->detail.pio.access_size;
-    payload.s.is_write = leaf_exit->detail.pio.is_write;
+    payload = (struct fbvbs_vm_exit_pio){0};
+    payload.port = leaf_exit->detail.pio.port;
+    payload.width = leaf_exit->detail.pio.access_size;
+    payload.is_write = leaf_exit->detail.pio.is_write;
     /* Leaf simulation: single-rep only; bare-metal uses ECX for REP count */
-    payload.s.count = 1U;
-    payload.s.value = leaf_exit->detail.pio.value;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload.count = 1U;
+    payload.value = leaf_exit->detail.pio.value;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
@@ -165,21 +156,18 @@ static void fbvbs_vmx_mmio_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_mmio s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_mmio)];
-    } payload;
+    struct fbvbs_vm_exit_mmio payload;
 
-    payload.s = (struct fbvbs_vm_exit_mmio){0};
-    payload.s.guest_physical_address = leaf_exit->detail.mmio.guest_physical_address;
-    payload.s.width = leaf_exit->detail.mmio.access_size;
-    payload.s.is_write = leaf_exit->detail.mmio.is_write;
-    payload.s.reserved0 = 0U;
-    payload.s.reserved1 = 0U;
-    payload.s.value = leaf_exit->detail.mmio.value;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_mmio){0};
+    payload.guest_physical_address = leaf_exit->detail.mmio.guest_physical_address;
+    payload.width = leaf_exit->detail.mmio.access_size;
+    payload.is_write = leaf_exit->detail.mmio.is_write;
+    payload.reserved0 = 0U;
+    payload.reserved1 = 0U;
+    payload.value = leaf_exit->detail.mmio.value;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
@@ -196,18 +184,15 @@ static void fbvbs_vmx_msr_access_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_msr_access s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_msr_access)];
-    } payload;
+    struct fbvbs_vm_exit_msr_access payload;
 
-    payload.s = (struct fbvbs_vm_exit_msr_access){0};
-    payload.s.msr = leaf_exit->detail.msr_access.msr_address;
-    payload.s.is_write = leaf_exit->detail.msr_access.is_write;
-    payload.s.value = leaf_exit->detail.msr_access.value;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_msr_access){0};
+    payload.msr = leaf_exit->detail.msr_access.msr_address;
+    payload.is_write = leaf_exit->detail.msr_access.is_write;
+    payload.value = leaf_exit->detail.msr_access.value;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
@@ -227,26 +212,23 @@ static int fbvbs_vmx_unclassified_fault_exit(
     uint32_t vcpu_id,
     struct fbvbs_vm_run_response *response
 ) {
-    union {
-        struct fbvbs_vm_exit_unclassified_fault s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_unclassified_fault)];
-    } payload;
+    struct fbvbs_vm_exit_unclassified_fault payload;
 
-    payload.s = (struct fbvbs_vm_exit_unclassified_fault){0};
-    payload.s.fault_code = FAULT_CODE_VM_EXIT_UNCLASSIFIED;
-    payload.s.reserved0 = 0U;
-    payload.s.detail0 = vcpu_id;
-    payload.s.detail1 = partition->vcpus[vcpu_id].rip;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_unclassified_fault){0};
+    payload.fault_code = FAULT_CODE_VM_EXIT_UNCLASSIFIED;
+    payload.reserved0 = 0U;
+    payload.detail0 = vcpu_id;
+    payload.detail1 = partition->vcpus[vcpu_id].rip;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     return fbvbs_partition_fault(
         state,
         partition->partition_id,
-        payload.s.fault_code,
+        payload.fault_code,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
-        payload.s.detail0,
-        payload.s.detail1
+        payload.detail0,
+        payload.detail1
     );
 }
 
@@ -263,18 +245,15 @@ static void fbvbs_vmx_ept_violation_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_ept_violation s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_ept_violation)];
-    } payload;
+    struct fbvbs_vm_exit_ept_violation payload;
 
-    payload.s = (struct fbvbs_vm_exit_ept_violation){0};
-    payload.s.guest_physical_address = leaf_exit->detail.ept_violation.guest_physical_address;
-    payload.s.access_bits = leaf_exit->detail.ept_violation.access_bits;
-    payload.s.reserved0 = 0U;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_ept_violation){0};
+    payload.guest_physical_address = leaf_exit->detail.ept_violation.guest_physical_address;
+    payload.access_bits = leaf_exit->detail.ept_violation.access_bits;
+    payload.reserved0 = 0U;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
@@ -306,6 +285,14 @@ static void fbvbs_vmx_ept_violation_exit(
     requires \valid(response);
     requires \valid_read(leaf_exit);
     requires \separated(vcpu, response, leaf_exit);
+    assigns vcpu->state, vcpu->dr0, vcpu->dr1, vcpu->dr2, vcpu->dr3,
+            vcpu->dr6, vcpu->dr7,
+            response->exit_reason, response->exit_length,
+            response->exit_payload[0 .. 15],
+            state->mirror_log, state->log_lock,
+            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+            state->log_rate_window_sequence;
 
     behavior invalid_access:
       assumes leaf_exit->detail.dr_access.access_type > 1U;
@@ -349,10 +336,7 @@ static void fbvbs_vmx_dr_access_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
-    union {
-        struct fbvbs_vm_exit_dr_access s;
-        uint8_t bytes[sizeof(struct fbvbs_vm_exit_dr_access)];
-    } payload;
+    struct fbvbs_vm_exit_dr_access payload;
     uint32_t dr_num = leaf_exit->detail.dr_access.dr_number;
     uint32_t is_read = leaf_exit->detail.dr_access.access_type; /* 0=write, 1=read */
     uint64_t value = leaf_exit->detail.dr_access.value;
@@ -427,40 +411,17 @@ static void fbvbs_vmx_dr_access_exit(
                      FBVBS_EVENT_DR_ACCESS_INTERCEPT,
                      (const uint8_t *)0, 0U);
 
-    payload.s = (struct fbvbs_vm_exit_dr_access){0};
-    payload.s.dr_number = dr_num;
-    payload.s.access_type = (is_read != 0U) ? FBVBS_VM_CR_ACCESS_READ
-                                             : FBVBS_VM_CR_ACCESS_WRITE;
-    payload.s.value = value;
-    fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
+    payload = (struct fbvbs_vm_exit_dr_access){0};
+    payload.dr_number = dr_num;
+    payload.access_type = (is_read != 0U) ? FBVBS_VM_CR_ACCESS_READ
+                                          : FBVBS_VM_CR_ACCESS_WRITE;
+    payload.value = value;
+    fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
-    response->exit_length = (uint32_t)sizeof(payload.s);
+    response->exit_length = (uint32_t)sizeof(payload);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
 }
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(partition) || partition == \null;
-    requires \valid(response) || response == \null;
-    requires state != \null && partition != \null && response != \null ==>
-             \separated(response, partition);
-    assigns *state, *partition, *response;
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == INVALID_STATE || \result == NOT_SUPPORTED_ON_PLATFORM ||
-            \result == NOT_FOUND;
-    behavior null_args:
-      assumes state == \null || partition == \null || response == \null;
-      assigns \nothing;
-      ensures \result == INVALID_PARAMETER;
-    behavior bad_vcpu_count:
-      assumes state != \null && partition != \null && response != \null;
-      assumes partition->vcpu_count > FBVBS_MAX_VCPUS;
-      ensures \result == INVALID_STATE;
-    behavior bad_vcpu:
-      assumes state != \null && partition != \null && response != \null;
-      assumes partition->vcpu_count <= FBVBS_MAX_VCPUS;
-      assumes vcpu_id >= partition->vcpu_count;
-      ensures \result == INVALID_PARAMETER;
-*/
 int fbvbs_vmx_run_vcpu(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition,

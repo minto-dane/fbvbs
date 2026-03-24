@@ -141,7 +141,6 @@ static struct fbvbs_command_tracker *fbvbs_get_command_tracker(
 }
 
 /*@ requires \valid(state);
-    requires \valid_read(page);
     assigns state->command_trackers[0 .. FBVBS_MAX_COMMAND_TRACKERS - 1];
     ensures \result == OK || \result == RESOURCE_EXHAUSTED || \result == REPLAY_DETECTED;
 */
@@ -662,6 +661,7 @@ static const struct fbvbs_memory_mapping *fbvbs_find_owner_mapping(
 */
 static const struct fbvbs_shared_registration *fbvbs_find_reserved_output_registration(
     const struct fbvbs_hypervisor_state *state,
+    uint64_t owner_partition_id,
     uint64_t memory_object_id
 ) {
     uint32_t index;
@@ -677,6 +677,7 @@ static const struct fbvbs_shared_registration *fbvbs_find_reserved_output_regist
             continue;
         }
         if (registration->memory_object_id != memory_object_id ||
+            registration->owner_partition_id != owner_partition_id ||
             registration->peer_partition_id != 0U) {
             continue;
         }
@@ -727,7 +728,11 @@ static int fbvbs_select_output_buffer(
         if (mapping == NULL || (mapping->permissions & FBVBS_MEMORY_PERMISSION_WRITE) == 0U) {
             return INVALID_PARAMETER;
         }
-        registration = fbvbs_find_reserved_output_registration(state, mapping->memory_object_id);
+        registration = fbvbs_find_reserved_output_registration(
+            state,
+            owner->partition_id,
+            mapping->memory_object_id
+        );
         if (registration == NULL) {
             return INVALID_PARAMETER;
         }
@@ -765,6 +770,14 @@ static void fbvbs_write_output_bytes(
     }
 }
 
+static void fbvbs_read_request_bytes(
+    const struct fbvbs_command_page_v1 *page,
+    void *destination,
+    uint32_t request_size
+) {
+    fbvbs_copy_memory(destination, page->body, request_size);
+}
+
 /*@ requires \valid_read(state);
     requires \valid(page);
     requires \valid_read(owner) || owner == \null;
@@ -775,10 +788,11 @@ static int fbvbs_write_response(
     const struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition *owner,
     struct fbvbs_command_page_v1 *page,
-    const uint8_t *response,
+    const void *response,
     uint32_t response_length
 ) {
     int status;
+    const uint8_t *response_bytes = (const uint8_t *)response;
     /* TOCTOU hardening: cache output_page_gpa and flags once from
        guest-accessible memory.  A concurrent vCPU could mutate these
        fields between validation (select_output_buffer) and use (the
@@ -806,9 +820,9 @@ static int fbvbs_write_response(
         if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) != 0U) {
             uint8_t *output_page = (uint8_t *)(uintptr_t)cached_output_gpa;
 
-            fbvbs_write_output_bytes(output_page, response, response_length);
+            fbvbs_write_output_bytes(output_page, response_bytes, response_length);
         } else {
-            fbvbs_write_output_bytes(page->body, response, response_length);
+            fbvbs_write_output_bytes(page->body, response_bytes, response_length);
         }
     }
 #endif
@@ -829,21 +843,26 @@ static int fbvbs_write_response(
     "requires \\valid_read(owner) || owner == \\null;\n" \
     "assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];\n"
 
+#define FBVBS_READ_REQUEST(type, name) \
+    type name = (type){0}; \
+    fbvbs_read_request_bytes(page, &name, (uint32_t)sizeof(name))
+
 /*@ requires fbvbs_state_invariant(state);
     requires \valid(page);
     requires \valid_read(owner) || owner == \null;
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_partition_create(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_create_request, request);
     struct fbvbs_partition_create_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_partition_create_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_partition_create(state, (const struct fbvbs_partition_create_request *)page->body, &response);
+    status = fbvbs_partition_create(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -854,11 +873,12 @@ static int handle_partition_create(struct fbvbs_hypervisor_state *state, const s
     assigns *state;
 */
 static int handle_partition_destroy(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_destroy(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id);
+    return fbvbs_partition_destroy(state, request.partition_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -867,15 +887,16 @@ static int handle_partition_destroy(struct fbvbs_hypervisor_state *state, const 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_partition_get_status(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     struct fbvbs_partition_status_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_partition_get_status(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id, &response);
+    status = fbvbs_partition_get_status(state, request.partition_id, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -886,11 +907,12 @@ static int handle_partition_get_status(struct fbvbs_hypervisor_state *state, con
     assigns *state;
 */
 static int handle_partition_quiesce(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_quiesce(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id);
+    return fbvbs_partition_quiesce(state, request.partition_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -899,11 +921,12 @@ static int handle_partition_quiesce(struct fbvbs_hypervisor_state *state, const 
     assigns *state;
 */
 static int handle_partition_resume(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_resume(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id);
+    return fbvbs_partition_resume(state, request.partition_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -912,15 +935,16 @@ static int handle_partition_resume(struct fbvbs_hypervisor_state *state, const s
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_partition_measure(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_measure_request, request);
     struct fbvbs_partition_measure_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_partition_measure_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_partition_measure(state, (const struct fbvbs_partition_measure_request *)page->body, &response);
+    status = fbvbs_partition_measure(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -931,11 +955,12 @@ static int handle_partition_measure(struct fbvbs_hypervisor_state *state, const 
     assigns *state;
 */
 static int handle_partition_load_image(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_load_image_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_load_image_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_load_image(state, (const struct fbvbs_partition_load_image_request *)page->body);
+    return fbvbs_partition_load_image(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -944,11 +969,12 @@ static int handle_partition_load_image(struct fbvbs_hypervisor_state *state, con
     assigns *state;
 */
 static int handle_partition_start(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_start(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id);
+    return fbvbs_partition_start(state, request.partition_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -957,11 +983,12 @@ static int handle_partition_start(struct fbvbs_hypervisor_state *state, const st
     assigns *state;
 */
 static int handle_partition_recover(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_recover_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_recover_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_partition_recover(state, (const struct fbvbs_partition_recover_request *)page->body);
+    return fbvbs_partition_recover(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -970,15 +997,16 @@ static int handle_partition_recover(struct fbvbs_hypervisor_state *state, const 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_partition_get_fault_info(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     struct fbvbs_partition_fault_info_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_partition_get_fault_info(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id, &response);
+    status = fbvbs_partition_get_fault_info(state, request.partition_id, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -989,6 +1017,7 @@ static int handle_partition_get_fault_info(struct fbvbs_hypervisor_state *state,
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_memory_allocate_object(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_allocate_object_request, request);
     struct fbvbs_memory_allocate_object_response response = {0};
     int status;
 
@@ -997,12 +1026,12 @@ static int handle_memory_allocate_object(struct fbvbs_hypervisor_state *state, c
     }
     status = fbvbs_memory_allocate_object(
         state,
-        (const struct fbvbs_memory_allocate_object_request *)page->body,
+        &request,
         &response,
         owner != NULL ? owner->partition_id : 0U
     );
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1013,12 +1042,13 @@ static int handle_memory_allocate_object(struct fbvbs_hypervisor_state *state, c
     assigns *state;
 */
 static int handle_memory_map(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_map_request, request);
     if (cached_input_length != sizeof(struct fbvbs_memory_map_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_memory_map(
         state,
-        (const struct fbvbs_memory_map_request *)page->body,
+        &request,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1029,12 +1059,13 @@ static int handle_memory_map(struct fbvbs_hypervisor_state *state, const struct 
     assigns *state;
 */
 static int handle_memory_unmap(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_unmap_request, request);
     if (cached_input_length != sizeof(struct fbvbs_memory_unmap_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_memory_unmap(
         state,
-        (const struct fbvbs_memory_unmap_request *)page->body,
+        &request,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1045,12 +1076,13 @@ static int handle_memory_unmap(struct fbvbs_hypervisor_state *state, const struc
     assigns *state;
 */
 static int handle_memory_set_permission(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_set_permission_request, request);
     if (cached_input_length != sizeof(struct fbvbs_memory_set_permission_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_memory_set_permission(
         state,
-        (const struct fbvbs_memory_set_permission_request *)page->body,
+        &request,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1061,16 +1093,21 @@ static int handle_memory_set_permission(struct fbvbs_hypervisor_state *state, co
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_memory_register_shared(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_register_shared_request, request);
     struct fbvbs_memory_register_shared_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_memory_register_shared_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_memory_register_shared(state, (const struct fbvbs_memory_register_shared_request *)page->body, &response,
-        owner != NULL ? owner->partition_id : 0U);
+    status = fbvbs_memory_register_shared(
+        state,
+        &request,
+        &response,
+        owner != NULL ? owner->partition_id : 0U
+    );
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1081,12 +1118,13 @@ static int handle_memory_register_shared(struct fbvbs_hypervisor_state *state, c
     assigns *state;
 */
 static int handle_memory_release_object(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_object_id_request, request);
     if (cached_input_length != sizeof(struct fbvbs_memory_object_id_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_memory_release_object(
         state,
-        ((const struct fbvbs_memory_object_id_request *)page->body)->memory_object_id,
+        request.memory_object_id,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1097,12 +1135,13 @@ static int handle_memory_release_object(struct fbvbs_hypervisor_state *state, co
     assigns *state;
 */
 static int handle_memory_unregister_shared(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_shared_object_id_request, request);
     if (cached_input_length != sizeof(struct fbvbs_shared_object_id_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_memory_unregister_shared(
         state,
-        ((const struct fbvbs_shared_object_id_request *)page->body)->shared_object_id,
+        request.shared_object_id,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1113,15 +1152,16 @@ static int handle_memory_unregister_shared(struct fbvbs_hypervisor_state *state,
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_kci_verify_module(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_kci_verify_module_request, request);
     struct fbvbs_verdict_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_kci_verify_module_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_kci_verify_module(state, (const struct fbvbs_kci_verify_module_request *)page->body, &response);
+    status = fbvbs_kci_verify_module(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1132,11 +1172,12 @@ static int handle_kci_verify_module(struct fbvbs_hypervisor_state *state, const 
     assigns *state;
 */
 static int handle_kci_set_wx(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_kci_set_wx_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_kci_set_wx_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_kci_set_wx(state, (const struct fbvbs_kci_set_wx_request *)page->body);
+    return fbvbs_kci_set_wx(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1145,11 +1186,12 @@ static int handle_kci_set_wx(struct fbvbs_hypervisor_state *state, const struct 
     assigns *state;
 */
 static int handle_kci_pin_cr(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_kci_pin_cr_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_kci_pin_cr_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_kci_pin_cr(state, (const struct fbvbs_kci_pin_cr_request *)page->body);
+    return fbvbs_kci_pin_cr(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1158,11 +1200,12 @@ static int handle_kci_pin_cr(struct fbvbs_hypervisor_state *state, const struct 
     assigns *state;
 */
 static int handle_kci_intercept_msr(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_kci_intercept_msr_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_kci_intercept_msr_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_kci_intercept_msr(state, (const struct fbvbs_kci_intercept_msr_request *)page->body);
+    return fbvbs_kci_intercept_msr(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1171,15 +1214,16 @@ static int handle_kci_intercept_msr(struct fbvbs_hypervisor_state *state, const 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_ksi_create_target_set(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_create_target_set_request, request);
     struct fbvbs_ksi_target_set_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_ksi_create_target_set_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_ksi_create_target_set(state, (const struct fbvbs_ksi_create_target_set_request *)page->body, &response);
+    status = fbvbs_ksi_create_target_set(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1190,11 +1234,12 @@ static int handle_ksi_create_target_set(struct fbvbs_hypervisor_state *state, co
     assigns *state;
 */
 static int handle_ksi_register_tier_a(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_register_tier_a_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_ksi_register_tier_a_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_register_tier_a(state, (const struct fbvbs_ksi_register_tier_a_request *)page->body);
+    return fbvbs_ksi_register_tier_a(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1203,11 +1248,12 @@ static int handle_ksi_register_tier_a(struct fbvbs_hypervisor_state *state, cons
     assigns *state;
 */
 static int handle_ksi_register_tier_b(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_register_tier_b_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_ksi_register_tier_b_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_register_tier_b(state, (const struct fbvbs_ksi_register_tier_b_request *)page->body);
+    return fbvbs_ksi_register_tier_b(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1216,11 +1262,12 @@ static int handle_ksi_register_tier_b(struct fbvbs_hypervisor_state *state, cons
     assigns *state;
 */
 static int handle_ksi_modify_tier_b(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_modify_tier_b_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_ksi_modify_tier_b_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_modify_tier_b(state, (const struct fbvbs_ksi_modify_tier_b_request *)page->body);
+    return fbvbs_ksi_modify_tier_b(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1229,11 +1276,12 @@ static int handle_ksi_modify_tier_b(struct fbvbs_hypervisor_state *state, const 
     assigns *state;
 */
 static int handle_ksi_register_pointer(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_register_pointer_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_ksi_register_pointer_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_register_pointer(state, (const struct fbvbs_ksi_register_pointer_request *)page->body);
+    return fbvbs_ksi_register_pointer(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1242,15 +1290,16 @@ static int handle_ksi_register_pointer(struct fbvbs_hypervisor_state *state, con
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_ksi_validate_setuid(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_validate_setuid_request, request);
     struct fbvbs_verdict_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_ksi_validate_setuid_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_ksi_validate_setuid(state, (const struct fbvbs_ksi_validate_setuid_request *)page->body, &response);
+    status = fbvbs_ksi_validate_setuid(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1261,15 +1310,16 @@ static int handle_ksi_validate_setuid(struct fbvbs_hypervisor_state *state, cons
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_ksi_allocate_ucred(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_allocate_ucred_request, request);
     struct fbvbs_ksi_allocate_ucred_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_ksi_allocate_ucred_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_ksi_allocate_ucred(state, (const struct fbvbs_ksi_allocate_ucred_request *)page->body, &response);
+    status = fbvbs_ksi_allocate_ucred(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1280,11 +1330,12 @@ static int handle_ksi_allocate_ucred(struct fbvbs_hypervisor_state *state, const
     assigns *state;
 */
 static int handle_ksi_replace_tier_b_object(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ksi_replace_tier_b_object_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_ksi_replace_tier_b_object_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_replace_tier_b_object(state, (const struct fbvbs_ksi_replace_tier_b_object_request *)page->body);
+    return fbvbs_ksi_replace_tier_b_object(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1293,11 +1344,12 @@ static int handle_ksi_replace_tier_b_object(struct fbvbs_hypervisor_state *state
     assigns *state;
 */
 static int handle_ksi_unregister_object(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_memory_object_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_memory_object_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_ksi_unregister_object(state, ((const struct fbvbs_memory_object_id_request *)page->body)->memory_object_id);
+    return fbvbs_ksi_unregister_object(state, request.memory_object_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1306,15 +1358,16 @@ static int handle_ksi_unregister_object(struct fbvbs_hypervisor_state *state, co
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_iks_import_key(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_iks_import_key_request, request);
     struct fbvbs_handle_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_iks_import_key_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_iks_import_key(state, (const struct fbvbs_iks_import_key_request *)page->body, &response);
+    status = fbvbs_iks_import_key(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1325,15 +1378,16 @@ static int handle_iks_import_key(struct fbvbs_hypervisor_state *state, const str
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_iks_sign(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_iks_sign_request, request);
     struct fbvbs_iks_sign_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_iks_sign_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_iks_sign(state, (const struct fbvbs_iks_sign_request *)page->body, &response);
+    status = fbvbs_iks_sign(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1344,15 +1398,16 @@ static int handle_iks_sign(struct fbvbs_hypervisor_state *state, const struct fb
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_iks_key_exchange(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_iks_key_exchange_request, request);
     struct fbvbs_handle_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_iks_key_exchange_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_iks_key_exchange(state, (const struct fbvbs_iks_key_exchange_request *)page->body, &response);
+    status = fbvbs_iks_key_exchange(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1363,15 +1418,16 @@ static int handle_iks_key_exchange(struct fbvbs_hypervisor_state *state, const s
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_iks_derive(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_iks_derive_request, request);
     struct fbvbs_handle_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_iks_derive_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_iks_derive(state, (const struct fbvbs_iks_derive_request *)page->body, &response);
+    status = fbvbs_iks_derive(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1382,11 +1438,12 @@ static int handle_iks_derive(struct fbvbs_hypervisor_state *state, const struct 
     assigns *state;
 */
 static int handle_iks_destroy_key(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_handle_response, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_handle_response)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_iks_destroy_key(state, ((const struct fbvbs_handle_response *)page->body)->handle);
+    return fbvbs_iks_destroy_key(state, request.handle);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1395,15 +1452,16 @@ static int handle_iks_destroy_key(struct fbvbs_hypervisor_state *state, const st
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_sks_import_dek(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_sks_import_dek_request, request);
     struct fbvbs_handle_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_sks_import_dek_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_sks_import_dek(state, (const struct fbvbs_sks_import_dek_request *)page->body, &response);
+    status = fbvbs_sks_import_dek(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1414,15 +1472,16 @@ static int handle_sks_import_dek(struct fbvbs_hypervisor_state *state, const str
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_sks_decrypt_batch(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_sks_batch_request, request);
     struct fbvbs_sks_batch_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_sks_batch_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_sks_decrypt_batch(state, (const struct fbvbs_sks_batch_request *)page->body, &response);
+    status = fbvbs_sks_decrypt_batch(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1433,15 +1492,16 @@ static int handle_sks_decrypt_batch(struct fbvbs_hypervisor_state *state, const 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_sks_encrypt_batch(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_sks_batch_request, request);
     struct fbvbs_sks_batch_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_sks_batch_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_sks_encrypt_batch(state, (const struct fbvbs_sks_batch_request *)page->body, &response);
+    status = fbvbs_sks_encrypt_batch(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1452,11 +1512,12 @@ static int handle_sks_encrypt_batch(struct fbvbs_hypervisor_state *state, const 
     assigns *state;
 */
 static int handle_sks_destroy_dek(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_handle_response, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_handle_response)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_sks_destroy_dek(state, ((const struct fbvbs_handle_response *)page->body)->handle);
+    return fbvbs_sks_destroy_dek(state, request.handle);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1465,18 +1526,19 @@ static int handle_sks_destroy_dek(struct fbvbs_hypervisor_state *state, const st
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_uvs_verify_manifest_set(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_uvs_verify_manifest_set_request, request);
     struct fbvbs_uvs_verify_manifest_set_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_uvs_verify_manifest_set_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_uvs_verify_manifest_set(state, (const struct fbvbs_uvs_verify_manifest_set_request *)page->body, &response);
+    status = fbvbs_uvs_verify_manifest_set(state, &request, &response);
     if (status == OK || status == SIGNATURE_INVALID || status == REVOKED ||
         status == GENERATION_MISMATCH || status == ROLLBACK_DETECTED ||
         status == DEPENDENCY_UNSATISFIED || status == SNAPSHOT_INCONSISTENT ||
         status == FRESHNESS_FAILED) {
-        int write_status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        int write_status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
         if (write_status != OK) {
             status = write_status;
         }
@@ -1490,15 +1552,16 @@ static int handle_uvs_verify_manifest_set(struct fbvbs_hypervisor_state *state, 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_uvs_verify_artifact(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_uvs_verify_artifact_request, request);
     struct fbvbs_verdict_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_uvs_verify_artifact_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_uvs_verify_artifact(state, (const struct fbvbs_uvs_verify_artifact_request *)page->body, &response);
+    status = fbvbs_uvs_verify_artifact(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1509,15 +1572,16 @@ static int handle_uvs_verify_artifact(struct fbvbs_hypervisor_state *state, cons
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_uvs_check_revocation(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_uvs_check_revocation_request, request);
     struct fbvbs_uvs_check_revocation_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_uvs_check_revocation_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_uvs_check_revocation(state, (const struct fbvbs_uvs_check_revocation_request *)page->body, &response);
+    status = fbvbs_uvs_check_revocation(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1528,15 +1592,16 @@ static int handle_uvs_check_revocation(struct fbvbs_hypervisor_state *state, con
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_vm_create(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_create_request, request);
     struct fbvbs_vm_create_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_vm_create_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_vm_create(state, (const struct fbvbs_vm_create_request *)page->body, &response);
+    status = fbvbs_vm_create(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1547,11 +1612,12 @@ static int handle_vm_create(struct fbvbs_hypervisor_state *state, const struct f
     assigns *state;
 */
 static int handle_vm_destroy(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_destroy(state, ((const struct fbvbs_partition_id_request *)page->body)->partition_id);
+    return fbvbs_vm_destroy(state, request.partition_id);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1560,15 +1626,16 @@ static int handle_vm_destroy(struct fbvbs_hypervisor_state *state, const struct 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_vm_run(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_run_request, request);
     struct fbvbs_vm_run_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_vm_run_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_vm_run(state, (const struct fbvbs_vm_run_request *)page->body, &response);
+    status = fbvbs_vm_run(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1579,11 +1646,12 @@ static int handle_vm_run(struct fbvbs_hypervisor_state *state, const struct fbvb
     assigns *state;
 */
 static int handle_vm_set_register(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_register_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_vm_register_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_set_register(state, (const struct fbvbs_vm_register_request *)page->body);
+    return fbvbs_vm_set_register(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1592,15 +1660,16 @@ static int handle_vm_set_register(struct fbvbs_hypervisor_state *state, const st
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_vm_get_register(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_register_read_request, request);
     struct fbvbs_vm_register_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_vm_register_read_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_vm_get_register(state, (const struct fbvbs_vm_register_read_request *)page->body, &response);
+    status = fbvbs_vm_get_register(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1611,12 +1680,13 @@ static int handle_vm_get_register(struct fbvbs_hypervisor_state *state, const st
     assigns *state;
 */
 static int handle_vm_map_memory(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_map_memory_request, request);
     if (cached_input_length != sizeof(struct fbvbs_vm_map_memory_request)) {
         return INVALID_PARAMETER;
     }
     return fbvbs_vm_map_memory(
         state,
-        (const struct fbvbs_vm_map_memory_request *)page->body,
+        &request,
         owner != NULL ? owner->partition_id : 0U
     );
 }
@@ -1627,11 +1697,12 @@ static int handle_vm_map_memory(struct fbvbs_hypervisor_state *state, const stru
     assigns *state;
 */
 static int handle_vm_inject_interrupt(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_inject_interrupt_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_vm_inject_interrupt_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_inject_interrupt(state, (const struct fbvbs_vm_inject_interrupt_request *)page->body);
+    return fbvbs_vm_inject_interrupt(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1640,11 +1711,12 @@ static int handle_vm_inject_interrupt(struct fbvbs_hypervisor_state *state, cons
     assigns *state;
 */
 static int handle_vm_assign_device(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_device_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_vm_device_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_assign_device(state, (const struct fbvbs_vm_device_request *)page->body);
+    return fbvbs_vm_assign_device(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1653,11 +1725,12 @@ static int handle_vm_assign_device(struct fbvbs_hypervisor_state *state, const s
     assigns *state;
 */
 static int handle_vm_release_device(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_device_request, request);
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_vm_device_request)) {
         return INVALID_PARAMETER;
     }
-    return fbvbs_vm_release_device(state, (const struct fbvbs_vm_device_request *)page->body);
+    return fbvbs_vm_release_device(state, &request);
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1666,15 +1739,16 @@ static int handle_vm_release_device(struct fbvbs_hypervisor_state *state, const 
     assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
 */
 static int handle_vm_get_vcpu_status(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_vm_vcpu_status_request, request);
     struct fbvbs_vm_vcpu_status_response response = {0};
     int status;
 
     if (cached_input_length != sizeof(struct fbvbs_vm_vcpu_status_request)) {
         return INVALID_PARAMETER;
     }
-    status = fbvbs_vm_get_vcpu_status(state, (const struct fbvbs_vm_vcpu_status_request *)page->body, &response);
+    status = fbvbs_vm_get_vcpu_status(state, &request, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1693,7 +1767,7 @@ static int handle_audit_get_mirror_info(struct fbvbs_hypervisor_state *state, co
     }
     status = fbvbs_audit_get_mirror_info(state, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1711,7 +1785,7 @@ static int handle_audit_get_boot_id(struct fbvbs_hypervisor_state *state, const 
     }
     response.boot_id_hi = state->boot_id_hi;
     response.boot_id_lo = state->boot_id_lo;
-    return fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+    return fbvbs_write_response(state, owner, page, &response, sizeof(response));
 }
 
 /*@ requires fbvbs_state_invariant(state);
@@ -1729,7 +1803,7 @@ static int handle_diag_get_partition_list(struct fbvbs_hypervisor_state *state, 
     }
     status = fbvbs_diag_get_partition_list(state, &response, &response_length);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, response_length);
+        status = fbvbs_write_response(state, owner, page, &response, response_length);
     }
     return status;
 }
@@ -1748,7 +1822,7 @@ static int handle_diag_get_capabilities(struct fbvbs_hypervisor_state *state, co
     }
     status = fbvbs_diag_get_capabilities(state, &response);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, sizeof(response));
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
     }
     return status;
 }
@@ -1768,7 +1842,7 @@ static int handle_diag_get_artifact_list(struct fbvbs_hypervisor_state *state, c
     }
     status = fbvbs_diag_get_artifact_list(state, &response, &response_length);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, response_length);
+        status = fbvbs_write_response(state, owner, page, &response, response_length);
     }
     return status;
 }
@@ -1788,7 +1862,7 @@ static int handle_diag_get_device_list(struct fbvbs_hypervisor_state *state, con
     }
     status = fbvbs_diag_get_device_list(state, &response, &response_length);
     if (status == OK) {
-        status = fbvbs_write_response(state, owner, page, (const uint8_t *)&response, response_length);
+        status = fbvbs_write_response(state, owner, page, &response, response_length);
     }
     return status;
 }

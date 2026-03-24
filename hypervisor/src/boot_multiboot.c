@@ -45,7 +45,8 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
         total_size = buffer_size;
     }
 
-    /* Initialize memory map count */
+    /* Initialize parsed boot metadata */
+    state->acpi_rsdp = NULL;
     state->memory_map_count = 0U;
 
     /* Iterate through tags */
@@ -161,6 +162,19 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                     state->boot_device = biosdev;
                     state->boot_partition = partition_num;
                     state->boot_sub_partition = sub_partition;
+                }
+                break;
+
+            case 14:  /* ACPI RSDP v1 */
+                if (size >= 28U && state->acpi_rsdp == NULL) {
+                    state->acpi_rsdp = tag_ptr + 8U;
+                }
+                break;
+
+            case 15:  /* ACPI RSDP v2+ */
+                if (size >= 36U) {
+                    /* Prefer the newer ACPI handoff if both are present. */
+                    state->acpi_rsdp = tag_ptr + 8U;
                 }
                 break;
 
