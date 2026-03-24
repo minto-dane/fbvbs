@@ -11,6 +11,8 @@
  * critical VMX features. They produce configuration values that
  * must be applied via VMWRITE in assembly.
  *
+ * Requirements: REQ-0332 (Shadow Stack EPT)
+ *
  * Reference: Intel SDM Vol. 3, Chapter 24-26
  * ================================================================ */
 
@@ -391,24 +393,29 @@ int fbvbs_vmx_build_security_controls(
     controls->preemption_timer_value = preempt.preemption_timer_value;
     controls->notify_window = preempt.notify_window;
 
-    /* CET if available */
+    /* CET if available — fail-closed: if hardware supports CET but
+     * allocation fails, the entire security controls init fails.
+     * Running without CET on CET-capable hardware is a downgrade. */
     if (caps->cet_available != 0U) {
         struct fbvbs_cet_vmcs_config cet_config;
-        if (fbvbs_cet_build_vmcs_config(&cet_config, caps) == 0) {
-            controls->entry_controls_or |= cet_config.entry_controls_or;
-            controls->exit_controls_or |= cet_config.exit_controls_or;
-            controls->host_s_cet = cet_config.host_s_cet;
-            controls->host_ssp = cet_config.host_ssp;
-            controls->guest_s_cet = cet_config.guest_s_cet;
+        if (fbvbs_cet_build_vmcs_config(&cet_config, caps) != 0) {
+            return -1;  /* CET available but SSP/ISST alloc failed */
         }
+        controls->entry_controls_or |= cet_config.entry_controls_or;
+        controls->exit_controls_or |= cet_config.exit_controls_or;
+        controls->host_s_cet = cet_config.host_s_cet;
+        controls->host_ssp = cet_config.host_ssp;
+        controls->host_isst_addr = cet_config.host_isst_addr;
+        controls->guest_s_cet = cet_config.guest_s_cet;
     }
 
     /* PRODUCTION NOTE: The MSR bitmap physical address must be written
      * to VMCS_MSR_BITMAP (0x2004). The bitmap.data contents must be
      * copied to a 4KB-aligned physical page. */
 
-    /* Validate CET save/restore functions are callable */
-    {
+    /* Validate CET save/restore functions are callable.
+     * Only run on CET-capable hardware to avoid #GP on non-CET MSRs. */
+    if (caps->cet_available != 0U) {
         struct fbvbs_cet_state guest_cet;
         struct fbvbs_cet_state host_cet = {0};
         fbvbs_cet_save_guest(&guest_cet, &host_cet);

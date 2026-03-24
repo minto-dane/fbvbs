@@ -7,6 +7,9 @@
  * VT-d hardware units and their configurations. This is the first
  * step in enabling IOMMU protection for device passthrough.
  *
+ * Requirements: REQ-0003 (IOMMU 必須), REQ-0350 (DMA remapping),
+ *   REQ-0351 (Interrupt remapping), REQ-0353 (外部 DMA 分離)
+ *
  * Reference: Intel VT-d Specification, Chapter 8 (BIOS Considerations)
  * ================================================================ */
 
@@ -222,7 +225,12 @@ static void parse_device_scopes(
     ensures \result == 0 ==> info->valid == 1;
     ensures \result == -1 ==> info->valid == 0;
 */
-static int fbvbs_dmar_parse(
+#ifdef FUZZ_TARGET
+int
+#else
+static int
+#endif
+fbvbs_dmar_parse(
     const struct dmar_table_header *table,
     uint32_t table_length,
     struct fbvbs_dmar_info *info)

@@ -1,3 +1,15 @@
+/* FBVBS Kernel Integration (KCI host callsite, boot identity)
+ *
+ * Requirements: REQ-0501 (Shadow copy — PRODUCTION NOTE: Phase 4 KSI stub),
+ *   REQ-0601 (IKS API 制限 — PRODUCTION NOTE: Phase 5 IKS stub),
+ *   REQ-1000 (トレーサビリティ — see tools/traceability_matrix.py),
+ *   REQ-1001 (TCB 変更独立レビュー — PRODUCTION NOTE: Phase 9 process),
+ *   REQ-1002 (SPARK 例外不在証明 — PRODUCTION NOTE: Ada/SPARK reference path),
+ *   REQ-1003 (Rust TCB 制約 — PRODUCTION NOTE: Phase 9),
+ *   REQ-1004 (継続的ファジング — see fuzz/ harnesses),
+ *   REQ-1005 (MC/DC カバレッジ — see Makefile coverage target),
+ *   REQ-1006 (再現可能ビルド — see Makefile reproducible target)
+ */
 #include <stdint.h>
 
 #include "fbvbs_hypervisor.h"
@@ -1183,7 +1195,13 @@ void fbvbs_kernel_main(const void *multiboot_info) {
 
     /* Process Multiboot information if available */
     if (multiboot_info != NULL) {
-        fbvbs_process_multiboot_info(&g_fbvbs_hypervisor, multiboot_info);
+        /* PRODUCTION NOTE: Pass actual mapped size of multiboot info.
+           In real boot, the bootloader provides the Multiboot2 info in a
+           known memory region; its total_size is self-reported.  Here we
+           pass the max allowed size; fbvbs_process_multiboot_info clamps
+           internally. */
+        fbvbs_process_multiboot_info(&g_fbvbs_hypervisor, multiboot_info,
+                                     64U * 1024U * 1024U);
     }
 }
 

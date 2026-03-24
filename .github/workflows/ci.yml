@@ -1,0 +1,153 @@
+# FBVBS Continuous Integration Pipeline (Phase 9-8, REQ-1000)
+#
+# Runs on every push and pull request to main/dev branches.
+# Gates: GCC -fanalyzer, cppcheck, unit tests, fuzz harness build,
+#        reproducible build verification, traceability check.
+#
+# Frama-C WP is run on a weekly schedule due to resource requirements
+# (~4GB RAM, 30+ minutes per run).
+
+name: FBVBS CI
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'hypervisor/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'hypervisor/**'
+
+permissions:
+  contents: read
+
+env:
+  CC: gcc-13
+
+jobs:
+  # ---------- Gate 1: Static Analysis ----------
+  static-analysis:
+    name: GCC -fanalyzer + cppcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13 cppcheck
+
+      - name: GCC -fanalyzer (24 sources + UEFI)
+        run: make -C hypervisor analyze CC=gcc-13
+
+      - name: cppcheck (warning + performance + portability)
+        run: make -C hypervisor cppcheck
+
+  # ---------- Gate 2: Unit Tests ----------
+  unit-tests:
+    name: Unit tests (3 suites)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13
+
+      - name: Build and run tests
+        run: make -C hypervisor test CC=gcc-13
+
+  # ---------- Gate 3: Fuzz Harness Build ----------
+  fuzz-build:
+    name: Fuzz harness build (4 harnesses)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13
+
+      - name: Build fuzz harnesses
+        run: make -C hypervisor fuzz-build CC=gcc-13
+
+  # ---------- Gate 4: Branch Coverage ----------
+  coverage:
+    name: Branch coverage (gcov)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13
+
+      - name: Build and run with coverage
+        run: make -C hypervisor coverage CC=gcc-13
+
+  # ---------- Gate 5: Reproducible Build ----------
+  reproducible-build:
+    name: Reproducible build verification
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-13
+
+      - name: Verify deterministic build
+        run: make -C hypervisor reproducible CC=gcc-13
+
+      - name: Generate SBOM
+        run: make -C hypervisor sbom CC=gcc-13
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: hypervisor/build/sbom.txt
+
+  # ---------- Gate 6: Traceability ----------
+  traceability:
+    name: Requirement traceability (115 REQs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check requirement traceability
+        run: |
+          cd hypervisor
+          python3 tools/traceability_matrix.py > build_traceability.md 2>&1
+          # Fail if any requirements have no source reference
+          if python3 tools/traceability_matrix.py 2>&1 | grep -q "no source reference"; then
+            echo "FAIL: Some requirements have no source reference"
+            python3 tools/traceability_matrix.py 2>&1 | grep "no source reference"
+            exit 1
+          fi
+          echo "PASS: All requirements have source references"
+
+  # ---------- Weekly: Frama-C WP Proof ----------
+  frama-c-wp:
+    name: Frama-C WP formal proof (9 files)
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[run-wp]')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install opam and Frama-C
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y opam
+          opam init --auto-setup --disable-sandboxing -y
+          opam install frama-c alt-ergo z3 -y
+
+      - name: Run WP proof
+        run: |
+          eval $(opam env)
+          make -C hypervisor frama-c-wp

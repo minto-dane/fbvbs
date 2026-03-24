@@ -1,3 +1,13 @@
+/* FBVBS Partition Management
+ *
+ * Requirements: REQ-0200 (責務限定), REQ-0202 (パーティション状態),
+ *   REQ-0203 (メモリゼロ化), REQ-0204 (capability 管理),
+ *   REQ-0211 (lifecycle 遷移限定), REQ-0212 (RESUME/RECOVER 分離),
+ *   REQ-0604 (KEY_EXCHANGE ハンドル — PRODUCTION NOTE: Phase 5 IKS),
+ *   REQ-0902 (未分類 exit fail-closed),
+ *   REQ-0903 (再利用前ゼロ化),
+ *   REQ-1105 (passthrough qualification — PRODUCTION NOTE: Phase 9 release gate)
+ */
 #include "fbvbs_hypervisor.h"
 
 /*@ requires \valid(state);
@@ -927,12 +937,14 @@ static int fbvbs_iommu_domain_create(
     domain->attached_device_count = 0U;
 
     partition->iommu_domain_id = domain->domain_id;
-    state->next_iommu_domain_id += 1U;
-
-    /* Prevent next allocation from using sentinel value 0 */
-    if (state->next_iommu_domain_id == 0U) {
-        state->next_iommu_domain_id = 1U;
+    if (!fbvbs_id_allocator_can_advance(state->next_iommu_domain_id, 1U)) {
+        /* Domain ID space exhausted — fail-closed.  Domain IDs are
+         * monotonic and never reused to prevent stale-ID collisions. */
+        domain->active = false;
+        partition->iommu_domain_id = 0U;
+        return RESOURCE_EXHAUSTED;
     }
+    state->next_iommu_domain_id += 1U;
 
     fbvbs_log_iommu_domain_event(
         state,
@@ -1518,6 +1530,9 @@ int fbvbs_partition_measure(
     if (service_profile != NULL) {
         partition->service_kind = service_profile->service_kind;
     }
+    if (partition->measurement_epoch == UINT64_MAX) {
+        return RESOURCE_EXHAUSTED;
+    }
     partition->measurement_epoch += 1U;
     partition->measurement_digest_id = state->next_measurement_digest_id++;
     partition->state = FBVBS_PARTITION_STATE_MEASURED;
@@ -1780,6 +1795,9 @@ int fbvbs_partition_recover(
         }
     }
 
+    if (partition->measurement_epoch == UINT64_MAX) {
+        return RESOURCE_EXHAUSTED;
+    }
     partition->measurement_epoch += 1U;
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
     fbvbs_partition_reset_vcpus(partition, FBVBS_VCPU_STATE_RUNNABLE);
@@ -1972,7 +1990,7 @@ int fbvbs_vm_create(
     struct fbvbs_vm_create_response *response
 ) {
     struct fbvbs_partition *partition = NULL;
-    uint32_t supported_flags = VM_FLAG_NESTED_VIRT_DISABLED;
+    uint32_t supported_flags = VM_FLAG_NESTED_VIRT_DISABLED;  /* REQ-0905 */
     int status;
 
     if (state == NULL || request == NULL || response == NULL) {
@@ -2045,7 +2063,7 @@ int fbvbs_vm_destroy(struct fbvbs_hypervisor_state *state, uint64_t vm_partition
     assigns *response;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND;
 */
-int fbvbs_vm_get_vcpu_status(
+int fbvbs_vm_get_vcpu_status(  /* REQ-0908 */
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_vcpu_status_request *request,
     struct fbvbs_vm_vcpu_status_response *response
@@ -2480,7 +2498,7 @@ int fbvbs_memory_register_shared(
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND ||
             \result == PERMISSION_DENIED || \result == INTERNAL_CORRUPTION || \result == RESOURCE_BUSY;
 */
-int fbvbs_memory_unregister_shared(
+int fbvbs_memory_unregister_shared(  /* REQ-0909 */
     struct fbvbs_hypervisor_state *state,
     uint64_t shared_object_id,
     uint64_t requester_partition_id
@@ -2570,7 +2588,7 @@ int fbvbs_vm_run(
     if (partition->kind != PARTITION_KIND_GUEST_VM) {
         return INVALID_PARAMETER;
     }
-    if (!partition->occupied || partition->state != FBVBS_PARTITION_STATE_RUNNABLE) {
+    if (!partition->occupied || partition->state != FBVBS_PARTITION_STATE_RUNNABLE) {  /* REQ-0906 */
         return INVALID_STATE;
     }
 
@@ -2834,10 +2852,12 @@ int fbvbs_vm_assign_device(
         struct fbvbs_iommu_domain *domain =
             fbvbs_find_iommu_domain(state, partition->iommu_domain_id);
         if (domain != NULL) {
-            domain->attached_device_count = (uint16_t)(domain->attached_device_count + 1U);
+            if (domain->attached_device_count < UINT16_MAX) {
+                domain->attached_device_count = (uint16_t)(domain->attached_device_count + 1U);
+            }
             fbvbs_log_iommu_domain_event(
                 state,
-                FBVBS_EVENT_IOMMU_DOMAIN_CREATE,
+                FBVBS_EVENT_VM_DEVICE_ASSIGN,
                 partition->partition_id,
                 domain->domain_id,
                 (uint32_t)domain->attached_device_count

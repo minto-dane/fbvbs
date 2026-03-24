@@ -9,6 +9,8 @@
  * provides the C-level field setup; actual VMWRITE/VMREAD/VMLAUNCH
  * require assembly support code.
  *
+ * Requirements: REQ-0201 (形式的解析証拠 — VMCS documents VM deprivilege)
+ *
  * Reference: Intel SDM Vol. 3, Chapter 24 (VMCS Fields)
  *            Intel SDM Vol. 3, Chapter 25 (VM Entries)
  *            Intel SDM Vol. 3, Chapter 26 (VM Exits)
@@ -272,7 +274,14 @@ struct fbvbs_vmcs_config {
     assigns *config;
 */
 /* Next VPID to allocate. VPID 0 is reserved (no VPID), start at 1.
- * Each vCPU gets a unique VPID for TLB isolation (REQ-0341). */
+ * Each vCPU gets a unique VPID for TLB isolation (REQ-0341).
+ *
+ * SERIALIZATION: This counter is only modified by fbvbs_vmcs_build_host_config,
+ * which is called from fbvbs_deprivilege_host. The deprivilege sequence runs
+ * on the BSP before AP startup (Phase 8 mp_init.c: APs initialize after BSP
+ * completes hypervisor_init). Per-AP VMCS setup in verify_cpu_consistency
+ * does not call this function — each AP gets its VPID from the BSP-built
+ * partition config. No concurrent access is possible. */
 static uint16_t g_next_vpid = 1U;
 
 static void fbvbs_vmcs_build_host_config(
@@ -441,80 +450,86 @@ int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config)
     g_vmcs_page_phys = vmcs_phys;
 
     /* 5. VMWRITE all control fields.
-     *    Any VMWRITE failure → abort (fail-closed). */
+     *    Any VMWRITE failure → free page and abort (fail-closed).
+     *    All VMWRITE errors goto vmwrite_fail to prevent page leak (CWE-401). */
 
     /* Control fields */
-    if (fbvbs_asm_vmwrite(VMCS_VPID, config->vpid) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_PIN_BASED_CONTROLS, config->pin_based_controls) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_PRIMARY_PROC_CONTROLS, config->primary_proc_controls) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_SECONDARY_PROC_CONTROLS, config->secondary_proc_controls) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_EXIT_CONTROLS, config->exit_controls) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_ENTRY_CONTROLS, config->entry_controls) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_EXCEPTION_BITMAP, config->exception_bitmap) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_VPID, config->vpid) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_PIN_BASED_CONTROLS, config->pin_based_controls) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_PRIMARY_PROC_CONTROLS, config->primary_proc_controls) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_SECONDARY_PROC_CONTROLS, config->secondary_proc_controls) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_EXIT_CONTROLS, config->exit_controls) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_ENTRY_CONTROLS, config->entry_controls) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_EXCEPTION_BITMAP, config->exception_bitmap) != 0) { goto vmwrite_fail; }
 
     /* CR mask/shadow */
-    if (fbvbs_asm_vmwrite(VMCS_CR0_GUEST_HOST_MASK, config->cr0_guest_host_mask) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_CR4_GUEST_HOST_MASK, config->cr4_guest_host_mask) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_CR0_READ_SHADOW, config->cr0_read_shadow) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_CR4_READ_SHADOW, config->cr4_read_shadow) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_CR0_GUEST_HOST_MASK, config->cr0_guest_host_mask) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_CR4_GUEST_HOST_MASK, config->cr4_guest_host_mask) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_CR0_READ_SHADOW, config->cr0_read_shadow) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_CR4_READ_SHADOW, config->cr4_read_shadow) != 0) { goto vmwrite_fail; }
 
     /* EPT pointer */
-    if (fbvbs_asm_vmwrite(VMCS_EPT_POINTER, config->ept_pointer) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_EPT_POINTER, config->ept_pointer) != 0) { goto vmwrite_fail; }
 
     /* Host state */
-    if (fbvbs_asm_vmwrite(VMCS_HOST_CR0, config->host_cr0) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_CR3, config->host_cr3) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_CR4, config->host_cr4) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_RSP, config->host_rsp) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_RIP, config->host_rip) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_IA32_EFER, config->host_efer) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_GDTR_BASE, config->host_gdtr_base) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_IDTR_BASE, config->host_idtr_base) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_BASE, config->host_tr_base) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR0, config->host_cr0) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR3, config->host_cr3) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CR4, config->host_cr4) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_RSP, config->host_rsp) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_RIP, config->host_rip) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_IA32_EFER, config->host_efer) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_GDTR_BASE, config->host_gdtr_base) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_IDTR_BASE, config->host_idtr_base) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_BASE, config->host_tr_base) != 0) { goto vmwrite_fail; }
 
     /* Host segment selectors */
-    if (fbvbs_asm_vmwrite(VMCS_HOST_CS_SELECTOR, config->host_cs) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_SS_SELECTOR, config->host_ss) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_DS_SELECTOR, config->host_ds) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_ES_SELECTOR, config->host_es) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_FS_SELECTOR, config->host_fs) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_GS_SELECTOR, config->host_gs) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_SELECTOR, config->host_tr) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_CS_SELECTOR, config->host_cs) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_SS_SELECTOR, config->host_ss) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_DS_SELECTOR, config->host_ds) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_ES_SELECTOR, config->host_es) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_FS_SELECTOR, config->host_fs) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_GS_SELECTOR, config->host_gs) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_HOST_TR_SELECTOR, config->host_tr) != 0) { goto vmwrite_fail; }
 
     /* Guest state */
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR0, config->guest_cr0) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR3, config->guest_cr3) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR4, config->guest_cr4) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_RSP, config->guest_rsp) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_RIP, config->guest_rip) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_RFLAGS, config->guest_rflags) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_IA32_EFER, config->guest_efer) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR0, config->guest_cr0) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR3, config->guest_cr3) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CR4, config->guest_cr4) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RSP, config->guest_rsp) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RIP, config->guest_rip) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_RFLAGS, config->guest_rflags) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IA32_EFER, config->guest_efer) != 0) { goto vmwrite_fail; }
 
     /* Guest segment selectors */
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_CS_SELECTOR, config->guest_cs) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_SS_SELECTOR, config->guest_ss) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_DS_SELECTOR, config->guest_ds) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_ES_SELECTOR, config->guest_es) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_TR_SELECTOR, config->guest_tr) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_CS_SELECTOR, config->guest_cs) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_SS_SELECTOR, config->guest_ss) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_DS_SELECTOR, config->guest_ds) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_ES_SELECTOR, config->guest_es) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_TR_SELECTOR, config->guest_tr) != 0) { goto vmwrite_fail; }
 
     /* Guest descriptor table bases/limits */
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_BASE, config->guest_gdtr_base) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_LIMIT, config->guest_gdtr_limit) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_BASE, config->guest_idtr_base) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_LIMIT, config->guest_idtr_limit) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_BASE, config->guest_gdtr_base) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_GDTR_LIMIT, config->guest_gdtr_limit) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_BASE, config->guest_idtr_base) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_IDTR_LIMIT, config->guest_idtr_limit) != 0) { goto vmwrite_fail; }
 
     /* Guest activity and interruptibility (normal execution, no blocking) */
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0U) != 0) { return -1; }
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_INTERRUPTIBILITY, 0U) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0U) != 0) { goto vmwrite_fail; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_INTERRUPTIBILITY, 0U) != 0) { goto vmwrite_fail; }
 
     /* Guest DR7 (debug registers — default value) */
-    if (fbvbs_asm_vmwrite(VMCS_GUEST_DR7, 0x400ULL) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(VMCS_GUEST_DR7, 0x400ULL) != 0) { goto vmwrite_fail; }
 
     /* VMCS link pointer — required to be FFFFFFFF_FFFFFFFF when
      * VMCS shadowing is not used */
-    if (fbvbs_asm_vmwrite(0x2800U, UINT64_MAX) != 0) { return -1; }
+    if (fbvbs_asm_vmwrite(0x2800U, UINT64_MAX) != 0) { goto vmwrite_fail; }
 
     return 0;
+
+vmwrite_fail:
+    (void)fbvbs_page_free(vmcs_phys);
+    g_vmcs_page_phys = 0U;
+    return -1;
 }
 
 /* ================================================================

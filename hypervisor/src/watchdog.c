@@ -82,15 +82,26 @@ int fbvbs_watchdog_on_timer_exit(
     }
 
     /* Fault the partition — fail-safe halt, not panic.
-     * partition_fault transitions to FAULTED state with audit record. */
-    (void)fbvbs_partition_fault(
-        state,
-        part->partition_id,
-        FBVBS_FAULT_WATCHDOG_TIMEOUT,
-        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
-        (uint64_t)count,
-        (uint64_t)partition_idx
-    );
+     * partition_fault transitions to FAULTED state with audit record.
+     * If it returns non-OK (e.g., INVALID_STATE because another CPU
+     * faulted the partition between our state check and this call),
+     * skip the counter increment — the fault didn't happen from us. */
+    {
+        int fault_status = fbvbs_partition_fault(
+            state,
+            part->partition_id,
+            FBVBS_FAULT_WATCHDOG_TIMEOUT,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            (uint64_t)count,
+            (uint64_t)partition_idx
+        );
+        if (fault_status != 0) {
+            /* Partition was already faulted/destroyed by another path.
+             * Reset counter but don't increment fault total. */
+            part->consecutive_timer_exits = 0U;
+            return 1;
+        }
+    }
 
     /* Track total watchdog faults for diagnostics */
     if (part->watchdog_faults_total < UINT32_MAX) {
@@ -111,5 +122,19 @@ void fbvbs_watchdog_on_voluntary_exit(
     struct fbvbs_hypervisor_state *state,
     uint32_t partition_idx)
 {
-    state->partitions[partition_idx].consecutive_timer_exits = 0U;
+    struct fbvbs_partition *part;
+
+    if (partition_idx >= FBVBS_MAX_PARTITIONS) {
+        return;  /* Defensive: out-of-bounds index */
+    }
+
+    part = &state->partitions[partition_idx];
+
+    /* Only reset counter for occupied partitions — writing to an
+     * unoccupied slot is a logic error at the call site. */
+    if (!part->occupied) {
+        return;
+    }
+
+    part->consecutive_timer_exits = 0U;
 }

@@ -122,7 +122,7 @@ struct fbvbs_log_record_v1 {
 #define FBVBS_PARTITION_STATE_FAULTED 7U
 #define FBVBS_PARTITION_STATE_DESTROYED 8U
 
-/* vCPU states — L.1.B */
+/* vCPU states — L.1.B (REQ-0907) */
 #define FBVBS_VCPU_STATE_CREATED 1U
 #define FBVBS_VCPU_STATE_RUNNABLE 2U
 #define FBVBS_VCPU_STATE_RUNNING 3U
@@ -304,7 +304,7 @@ struct fbvbs_log_record_v1 {
 
 /* VM flags — L.1.B */
 #define VM_FLAG_X2APIC 0x0001U
-#define VM_FLAG_NESTED_VIRT_DISABLED 0x0002U
+#define VM_FLAG_NESTED_VIRT_DISABLED 0x0002U  /* REQ-0905 */
 #define VM_RUN_FLAG_NONE 0x0000U
 
 /* VM register IDs — L.1.B */

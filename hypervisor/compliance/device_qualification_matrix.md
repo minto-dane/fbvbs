@@ -1,6 +1,6 @@
 # FBVBS Device Qualification Matrix
 
-**Requirements:** REQ-0352 (DMA remapping), REQ-0904 (device assignment safety)
+**Requirements:** REQ-0352 (DMA remapping), REQ-0904 (device assignment safety), REQ-1105 (passthrough qualification)
 
 ## Qualification Criteria
 

@@ -1,3 +1,24 @@
+/* FBVBS Security Services (KCI/KSI/IKS/SKS/UVS)
+ *
+ * Requirements: REQ-0004 (ロールバック防止), REQ-0400 (W^X),
+ *   REQ-0401 (モジュール署名), REQ-0402 (翻訳整合性連携 KCI→HLAT/NPT),
+ *   REQ-0500 (KSI), REQ-0502 (Reference pointer 制限 — PRODUCTION NOTE: Phase 4),
+ *   REQ-0503 (setuid/setgid 検証 — PRODUCTION NOTE: Phase 4),
+ *   REQ-0504 (fsid + fileid — PRODUCTION NOTE: Phase 4),
+ *   REQ-0505 (fd 継承リスク — PRODUCTION NOTE: Phase 4),
+ *   REQ-0506 (Callsite 検証 RIP — PRODUCTION NOTE: Phase 4),
+ *   REQ-0507 (setuid DB 照合 — PRODUCTION NOTE: Phase 4),
+ *   REQ-0508 (許可 callsite table — PRODUCTION NOTE: Phase 4),
+ *   REQ-0600 (IKS), REQ-0602 (外部暗号 TCB — PRODUCTION NOTE: Phase 5),
+ *   REQ-0603 (SKS),
+ *   REQ-0700 (UVS), REQ-0701 (署名付きマニフェスト),
+ *   REQ-0702 (freshness 検出 — PRODUCTION NOTE: Phase 6),
+ *   REQ-0703 (HSM + dual-approval — PRODUCTION NOTE: Phase 6),
+ *   REQ-0704 (freeze 攻撃検出 — PRODUCTION NOTE: Phase 6),
+ *   REQ-0705 (mix-and-match 防止 — PRODUCTION NOTE: Phase 6),
+ *   REQ-1102 (更新メタデータ freshness — PRODUCTION NOTE: Phase 9 release gate),
+ *   REQ-1104 (暗号 TCB 確定 — PRODUCTION NOTE: Phase 9 release gate)
+ */
 #include "fbvbs_hypervisor.h"
 
 static int fbvbs_is_object_revoked(
@@ -446,13 +467,17 @@ static const struct fbvbs_metadata_manifest *fbvbs_manifest_from_gpa(uint64_t ma
     if (manifest_gpa == 0U) {
         return NULL;
     }
-    /* Hardening: reject misaligned and out-of-range manifest GPAs.
-       Manifests must be naturally aligned to prevent cross-page
-       structure access from a single guest physical address.
-       GPAs beyond the physical address limit are non-canonical. */
+    /* Hardening: reject misaligned, out-of-range, and cross-page GPAs.
+       Manifests must be 8-byte aligned and must not span a page
+       boundary (consecutive GPAs need not map to consecutive HPAs,
+       so a cross-page struct could be forged by an attacker). */
     if ((manifest_gpa & (sizeof(uint64_t) - 1U)) != 0U ||
         manifest_gpa > FBVBS_MAX_PHYSICAL_ADDRESS) {
         return NULL;
+    }
+    if (((manifest_gpa & (FBVBS_PAGE_SIZE - 1U)) +
+         sizeof(struct fbvbs_metadata_manifest)) > FBVBS_PAGE_SIZE) {
+        return NULL;  /* Would cross page boundary */
     }
     return (const struct fbvbs_metadata_manifest *)(uintptr_t)manifest_gpa;
 }
@@ -1579,6 +1604,11 @@ int fbvbs_kci_set_wx(
     if (request->reserved0 != 0U ||
         !fbvbs_page_aligned_range(request->guest_physical_address, request->size) ||
         (request->file_offset % FBVBS_PAGE_SIZE) != 0U) {
+        return INVALID_PARAMETER;
+    }
+    /* Reject file_offset + size overflow (latent: Phase 5 hash computation
+       will iterate file bytes starting at file_offset). */
+    if (request->file_offset + request->size < request->file_offset) {
         return INVALID_PARAMETER;
     }
     if (state->approved_module_object_id == 0U ||

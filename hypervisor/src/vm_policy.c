@@ -1,3 +1,17 @@
+/* FBVBS VM Exit Policy Engine
+ *
+ * Requirements: REQ-0300 (CR ピン留め), REQ-0342 (DR 分離),
+ *   REQ-0343 (RDPMC インターセプト), REQ-0345 (UMIP),
+ *   REQ-0800 (FreeBSD 統合基盤 — PRODUCTION NOTE: Phase 7),
+ *   REQ-0801 (非信頼 ABI 変換層 — PRODUCTION NOTE: Phase 7),
+ *   REQ-0802 (介入点 — PRODUCTION NOTE: Phase 7),
+ *   REQ-0803 (mac(9) 十分性 — PRODUCTION NOTE: Phase 7),
+ *   REQ-0804 (vmm(4) boot-time 介入 — PRODUCTION NOTE: Phase 7),
+ *   REQ-0900 (bhyve 互換 — PRODUCTION NOTE: Phase 8),
+ *   REQ-0901 (libvmmapi 互換 — PRODUCTION NOTE: Phase 8),
+ *   REQ-0902 (未分類 exit fail-closed),
+ *   REQ-1101 (FreeBSD 介入点十分性 — PRODUCTION NOTE: Phase 9 release gate)
+ */
 #include "fbvbs_hypervisor.h"
 
 /*@ requires \valid(vcpu);
@@ -54,43 +68,53 @@ static void fbvbs_vmx_cr_access_exit(
     uint64_t requested = leaf_exit->detail.cr_access.value;
     uint32_t cr_num = leaf_exit->detail.cr_access.cr_number;
 
-    /* Enforce CR pinning: if the guest tried to clear a pinned bit
-     * or set a pinned-clear bit, force the correct value and log. */
-    if (cr_num == 0U && state->pinned_cr0_mask != 0U) {
-        uint64_t enforced = (requested & ~state->pinned_cr0_mask) |
-                            state->pinned_cr0_value;
-        if (enforced != requested) {
-            /* Security violation: guest tried to modify pinned CR0 bits.
-             * Use rate-limited logging to prevent malicious guest from
-             * flooding the audit log via rapid CR0 write loops. */
-            fbvbs_log_append_rate_limited(state, 0U,
-                             FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
-                             FBVBS_SEVERITY_WARNING,
-                             FBVBS_EVENT_CR_PIN_VIOLATION,
-                             (const uint8_t *)0, 0U);
-            vcpu->cr0 = enforced;
-        } else {
-            vcpu->cr0 = requested;
+    /* Update shadow CR state and enforce pinning.  The shadow must
+     * always reflect the guest's requested value (or enforced value
+     * when pins are active).  Without this unconditional update, a
+     * guest CR write with pin mask == 0 would be silently lost and
+     * the hypervisor's model would diverge from the hardware state. */
+    if (cr_num == 0U) {
+        vcpu->cr0 = requested;
+        if (state->pinned_cr0_mask != 0U) {
+            uint64_t enforced = (requested & ~state->pinned_cr0_mask) |
+                                state->pinned_cr0_value;
+            if (enforced != requested) {
+                fbvbs_log_append_rate_limited(state, 0U,
+                                 FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                                 FBVBS_SEVERITY_WARNING,
+                                 FBVBS_EVENT_CR_PIN_VIOLATION,
+                                 (const uint8_t *)0, 0U);
+                vcpu->cr0 = enforced;
+            }
         }
-    } else if (cr_num == 4U && state->pinned_cr4_mask != 0U) {
-        uint64_t enforced = (requested & ~state->pinned_cr4_mask) |
-                            state->pinned_cr4_value;
-        if (enforced != requested) {
-            fbvbs_log_append_rate_limited(state, 0U,
-                             FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
-                             FBVBS_SEVERITY_WARNING,
-                             FBVBS_EVENT_CR_PIN_VIOLATION,
-                             (const uint8_t *)0, 0U);
-            vcpu->cr4 = enforced;
-        } else {
-            vcpu->cr4 = requested;
+    } else if (cr_num == 4U) {
+        vcpu->cr4 = requested;
+        if (state->pinned_cr4_mask != 0U) {
+            uint64_t enforced = (requested & ~state->pinned_cr4_mask) |
+                                state->pinned_cr4_value;
+            if (enforced != requested) {
+                fbvbs_log_append_rate_limited(state, 0U,
+                                 FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                                 FBVBS_SEVERITY_WARNING,
+                                 FBVBS_EVENT_CR_PIN_VIOLATION,
+                                 (const uint8_t *)0, 0U);
+                vcpu->cr4 = enforced;
+            }
         }
     }
 
     payload.s = (struct fbvbs_vm_exit_cr_access){0};
     payload.s.cr_number = cr_num;
     payload.s.access_type = leaf_exit->detail.cr_access.access_type;
-    payload.s.value = requested;
+    /* Report the enforced value (after pin enforcement), not the
+     * raw requested value, so the VMM observes the actual CR state. */
+    if (cr_num == 0U) {
+        payload.s.value = vcpu->cr0;
+    } else if (cr_num == 4U) {
+        payload.s.value = vcpu->cr4;
+    } else {
+        payload.s.value = requested;
+    }
     fbvbs_copy_bytes(response->exit_payload, payload.bytes, sizeof(payload.s));
     response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload.s);
@@ -265,11 +289,16 @@ static void fbvbs_vmx_ept_violation_exit(
  * DR4/DR5 alias DR6/DR7 when CR4.DE=0. With CR4.DE=1 (our pinned
  * configuration), MOV DR4/DR5 cause #UD instead.
  *
- * Guest DR7 is managed via VMCS field (VMCS_GUEST_DR7). With
- * MOV_DR_EXITING active, the guest never reads hardware DRs —
- * all MOV DRx cause VM exit, and the handler returns shadow
- * values from vcpu->drN. fbvbs_debug_save_guest resets DR7 to
- * 0x400 (breakpoints disabled) after each VM exit.
+ * Guest DR writes update per-vCPU shadow state (vcpu->drN) only.
+ * VMCS_GUEST_DR7 is NOT updated on guest DR7 writes because
+ * MOV_DR_EXITING is active: the guest never directly accesses
+ * hardware DRs — all MOV DRx cause VM exit, and this handler
+ * returns shadow values from vcpu->drN on reads. This means
+ * guest debug breakpoints are shadow-only (do not fire on
+ * hardware), which is the correct security posture — guest
+ * debugging capability is denied. fbvbs_debug_save_guest resets
+ * hardware DR7 to 0x400 (breakpoints disabled) after each
+ * VM exit.
  * ================================================================ */
 
 /*@ requires \valid(state);
@@ -280,8 +309,13 @@ static void fbvbs_vmx_ept_violation_exit(
 
     behavior invalid_access:
       assumes leaf_exit->detail.dr_access.access_type > 1U;
-      assigns vcpu->state;
-      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
+      assigns vcpu->state,
+              response->exit_reason, response->exit_length,
+              state->mirror_log, state->log_lock,
+              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+              state->log_rate_window_sequence;
+      ensures vcpu->state == FBVBS_VCPU_STATE_FAULTED;
 
     behavior write_dr:
       assumes leaf_exit->detail.dr_access.access_type == 0U;
@@ -323,10 +357,19 @@ static void fbvbs_vmx_dr_access_exit(
     uint32_t is_read = leaf_exit->detail.dr_access.access_type; /* 0=write, 1=read */
     uint64_t value = leaf_exit->detail.dr_access.value;
 
-    /* Validate access_type is 0 (write) or 1 (read) */
+    /* Validate access_type is 0 (write) or 1 (read).
+     * Invalid values indicate hardware/firmware anomaly — fault the vCPU
+     * and report a defined exit reason rather than silently returning OK
+     * with zeroed exit_reason (CWE-394). */
     if (is_read > 1U) {
-        /* Invalid access type from leaf — treat as no-op, log and return */
-        vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+        fbvbs_log_append_rate_limited(state, 0U,
+                         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                         FBVBS_SEVERITY_ALERT,
+                         FBVBS_EVENT_DR_ACCESS_INTERCEPT,
+                         (const uint8_t *)0, 0U);
+        response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
+        response->exit_length = 0U;
+        vcpu->state = FBVBS_VCPU_STATE_FAULTED;
         return;
     }
 
@@ -513,6 +556,8 @@ int fbvbs_vmx_run_vcpu(
             vcpu->state = FBVBS_VCPU_STATE_BLOCKED;
             return OK;
         default:
+            response->exit_reason = FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
+            response->exit_length = 0U;
             vcpu->state = FBVBS_VCPU_STATE_FAULTED;
             return INVALID_STATE;
     }

@@ -238,7 +238,12 @@ int fbvbs_ept_map_region(
 
     /* Map each 4KB page (identity mapped: GPA == HPA).
      * On failure, roll back all pages mapped so far to
-     * maintain transactional EPT consistency. */
+     * maintain transactional EPT consistency.
+     * Save table_page_count before mapping so that intermediate
+     * tables allocated during the failed attempt can be reclaimed,
+     * preventing table tracking quota exhaustion (CWE-400). */
+    {
+    uint32_t saved_table_count = eps->table_page_count;
     for (offset = 0U; offset < size; offset += FBVBS_PAGE_SIZE) {
         if (fbvbs_ept_map_page(eps, gpa + offset, gpa + offset, ept_perm) != 0) {
             /* Rollback: clear all leaf entries we just created */
@@ -264,9 +269,22 @@ int fbvbs_ept_map_region(
                     tbl[ri[3]] = 0U;
                 }
             }
+            /* Free intermediate tables allocated during this failed
+             * map_region call to prevent tracking quota exhaustion. */
+            {
+                uint32_t ti;
+                for (ti = saved_table_count; ti < eps->table_page_count; ++ti) {
+                    if (eps->table_pages[ti] != 0ULL) {
+                        (void)fbvbs_page_free(eps->table_pages[ti]);
+                        eps->table_pages[ti] = 0ULL;
+                    }
+                }
+                eps->table_page_count = saved_table_count;
+            }
             return -1;
         }
     }
+    } /* end saved_table_count scope */
 
     return 0;
 }
@@ -296,6 +314,14 @@ int fbvbs_ept_unmap_region(
     eps = &ept_partitions[idx];
     if (eps->pml4_phys == 0U) {
         return 0;  /* No EPT — nothing to unmap */
+    }
+
+    /* Validate page alignment (match map_region contract) */
+    if ((gpa & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;  /* GPA must be page-aligned */
+    }
+    if (size != 0U && (size & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;  /* Size must be page-aligned */
     }
 
     /* Validate GPA range */
@@ -495,7 +521,7 @@ int fbvbs_memory_allocate_object(
     ensures \result == OK || \result == INVALID_PARAMETER ||
             \result == NOT_FOUND || \result == RESOURCE_BUSY || \result == PERMISSION_DENIED;
 */
-int fbvbs_memory_release_object(
+int fbvbs_memory_release_object(  /* REQ-0909 */
     struct fbvbs_hypervisor_state *state,
     uint64_t memory_object_id,
     uint64_t requester_partition_id

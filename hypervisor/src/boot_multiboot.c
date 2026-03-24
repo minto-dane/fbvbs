@@ -7,12 +7,17 @@
  * information structure. The function is verified by GCC -fanalyzer
  * and manual review instead.
  */
-void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info) {
-    const uint32_t *info = (const uint32_t *)multiboot_info;
+void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
+                                  const void *multiboot_info,
+                                  uint32_t buffer_size) {
+    const uint8_t *info_bytes = (const uint8_t *)multiboot_info;
     uint32_t total_size;
     uint32_t offset;
 
     if (state == NULL || multiboot_info == NULL) {
+        return;
+    }
+    if (buffer_size < 8U) {
         return;
     }
 
@@ -20,8 +25,11 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
      * [0] total_size (bytes)
      * [1] reserved
      * [2...] tags
-     */
-    total_size = info[0];
+     *
+     * Use memcpy for all uint32_t reads: the pointer may not be
+     * 4-byte aligned (e.g. from fuzzer input), so direct cast to
+     * uint32_t* would be undefined behavior per C11 6.3.2.3p7. */
+    fbvbs_copy_memory(&total_size, info_bytes, sizeof(total_size));
     offset = 8;  /* Skip total_size and reserved */
 
     /* Hardening: reject implausible total_size (max 64 MB).
@@ -31,12 +39,18 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
         return;
     }
 
+    /* Clamp total_size to the actual buffer extent to prevent
+       out-of-bounds reads if firmware provides a malformed size. */
+    if (total_size > buffer_size) {
+        total_size = buffer_size;
+    }
+
     /* Initialize memory map count */
     state->memory_map_count = 0U;
 
     /* Iterate through tags */
     while (offset < total_size) {
-        const uint32_t *tag;
+        const uint8_t *tag_ptr;
         uint32_t type;
         uint32_t size;
         uint32_t aligned_size;
@@ -46,9 +60,9 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             return;
         }
 
-        tag = (const uint32_t *)((const uint8_t *)multiboot_info + offset);
-        type = tag[0];
-        size = tag[1];
+        tag_ptr = info_bytes + offset;
+        fbvbs_copy_memory(&type, tag_ptr, sizeof(type));
+        fbvbs_copy_memory(&size, tag_ptr + 4U, sizeof(size));
 
         /* Guard against zero-size tags causing infinite loop */
         if (size < 8U) {
@@ -69,8 +83,9 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             case 4:  /* Basic memory information */
                 if (size >= 16) {
                     /* mem_lower and mem_upper in KB */
-                    uint32_t mem_lower = tag[2];
-                    uint32_t mem_upper = tag[3];
+                    uint32_t mem_lower, mem_upper;
+                    fbvbs_copy_memory(&mem_lower, tag_ptr + 8U, sizeof(mem_lower));
+                    fbvbs_copy_memory(&mem_upper, tag_ptr + 12U, sizeof(mem_upper));
                     /* Store memory information if needed */
                     (void)mem_lower;
                     (void)mem_upper;
@@ -80,8 +95,9 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             case 6:  /* Memory map */
                 /* Process memory map entries */
                 if (size >= 16) {
-                    uint32_t entry_size = tag[2];
-                    uint32_t entry_version = tag[3];
+                    uint32_t entry_size, entry_version;
+                    fbvbs_copy_memory(&entry_size, tag_ptr + 8U, sizeof(entry_size));
+                    fbvbs_copy_memory(&entry_version, tag_ptr + 12U, sizeof(entry_version));
                     uint32_t entry_offset = offset + 16;
 
                     (void)entry_version;
@@ -93,8 +109,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
                         break;
                     }
                     while (entry_offset + entry_size <= offset + size && state->memory_map_count < 32U) {
-                        const uint8_t *entry =
-                            (const uint8_t *)multiboot_info + entry_offset;
+                        const uint8_t *entry = info_bytes + entry_offset;
                         uint64_t base_addr = 0U;
                         uint64_t length = 0U;
                         uint32_t entry_type = 0U;
@@ -118,7 +133,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             case 1:  /* Command line */
                 /* Process command line string */
                 if (size > 8) {
-                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 8);
+                    const char *cmdline = (const char *)(info_bytes + offset + 8U);
                     (void)cmdline;
                 }
                 break;
@@ -126,9 +141,10 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             case 3:  /* Module */
                 /* Process module information */
                 if (size >= 16) {
-                    uint32_t mod_start = tag[2];
-                    uint32_t mod_end = tag[3];
-                    const char *cmdline = (const char *)((const uint8_t *)multiboot_info + offset + 16);
+                    uint32_t mod_start, mod_end;
+                    fbvbs_copy_memory(&mod_start, tag_ptr + 8U, sizeof(mod_start));
+                    fbvbs_copy_memory(&mod_end, tag_ptr + 12U, sizeof(mod_end));
+                    const char *cmdline = (const char *)(info_bytes + offset + 16U);
                     (void)mod_start;
                     (void)mod_end;
                     (void)cmdline;
@@ -138,11 +154,12 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const vo
             case 5:  /* Boot device */
                 /* Process boot device information */
                 if (size >= 20) {
-                    uint32_t biosdev = tag[2];
-                    uint32_t partition = tag[3];
-                    uint32_t sub_partition = tag[4];
+                    uint32_t biosdev, partition_num, sub_partition;
+                    fbvbs_copy_memory(&biosdev, tag_ptr + 8U, sizeof(biosdev));
+                    fbvbs_copy_memory(&partition_num, tag_ptr + 12U, sizeof(partition_num));
+                    fbvbs_copy_memory(&sub_partition, tag_ptr + 16U, sizeof(sub_partition));
                     state->boot_device = biosdev;
-                    state->boot_partition = partition;
+                    state->boot_partition = partition_num;
                     state->boot_sub_partition = sub_partition;
                 }
                 break;

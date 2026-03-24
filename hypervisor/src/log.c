@@ -1,3 +1,14 @@
+/* FBVBS Audit Log Subsystem
+ *
+ * Requirements: REQ-0005 (一次ログ経路), REQ-0100 (一次/ミラー分離),
+ *   REQ-0101 (OOB 経路), REQ-0102 (ミラー非根拠),
+ *   REQ-0103 (レコード形式 fbvbs_log_record_v1),
+ *   REQ-0104 (CRC のみ不可 HMAC — PRODUCTION NOTE: Phase 5 crypto),
+ *   REQ-0105 (ミラー read-only EPT), REQ-0106 (early boot/panic),
+ *   REQ-0107 (リングバッファ形式),
+ *   REQ-1103 (一次ログ経路運用性 — PRODUCTION NOTE: Phase 9 release gate)
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 

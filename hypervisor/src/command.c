@@ -1,3 +1,10 @@
+/* FBVBS Hypercall Command Dispatch
+ *
+ * Requirements: REQ-0205 (hypercall ABI), REQ-0206 (未使用領域ゼロ化),
+ *   REQ-0207 (trap レジスタ規約), REQ-0208 (ABI version check),
+ *   REQ-0209 (caller_sequence), REQ-0210 (command page 状態機械),
+ *   REQ-0902 (未分類 exit fail-closed)
+ */
 #include "fbvbs_hypervisor.h"
 
 /*@ assigns \nothing;
@@ -19,6 +26,7 @@ static int fbvbs_validate_command_page(
     const struct fbvbs_command_page_v1 *page,
     uint32_t cached_input_length
 ) {
+    uint16_t cached_flags;
     uint16_t reserved_flags;
     uint32_t index;
 
@@ -26,7 +34,10 @@ static int fbvbs_validate_command_page(
         return INVALID_PARAMETER;
     }
 
-    reserved_flags = (uint16_t)(page->flags & (uint16_t)(~FBVBS_CMD_FLAG_SEPARATE_OUTPUT));
+    /* TOCTOU hardening: cache flags once from guest-accessible memory.
+       All subsequent flag checks use this cached copy. */
+    cached_flags = page->flags;
+    reserved_flags = (uint16_t)(cached_flags & (uint16_t)(~FBVBS_CMD_FLAG_SEPARATE_OUTPUT));
     if (page->abi_version != FBVBS_ABI_VERSION) {
         return ABI_VERSION_UNSUPPORTED;
     }
@@ -52,10 +63,10 @@ static int fbvbs_validate_command_page(
     if (reserved_flags != 0U) {
         return INVALID_PARAMETER;
     }
-    if ((page->flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) == 0U && page->output_page_gpa != 0U) {
+    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) == 0U && page->output_page_gpa != 0U) {
         return INVALID_PARAMETER;
     }
-    if ((page->flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) != 0U && !fbvbs_is_page_aligned(page->output_page_gpa)) {
+    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) != 0U && !fbvbs_is_page_aligned(page->output_page_gpa)) {
         return INVALID_PARAMETER;
     }
     if (page->command_state == EXECUTING) {
@@ -137,7 +148,8 @@ static struct fbvbs_command_tracker *fbvbs_get_command_tracker(
 static int fbvbs_validate_command_sequence(
     struct fbvbs_hypervisor_state *state,
     uint64_t page_gpa,
-    const struct fbvbs_command_page_v1 *page
+    uint64_t cached_caller_sequence,
+    uint64_t cached_caller_nonce
 ) {
     struct fbvbs_command_tracker *tracker;
 
@@ -145,13 +157,15 @@ static int fbvbs_validate_command_sequence(
     if (tracker == NULL) {
         return RESOURCE_EXHAUSTED;
     }
-    if (tracker->sequence_seen && page->caller_sequence <= tracker->last_sequence) {
+    /* TOCTOU hardening: use cached copies of caller_sequence/caller_nonce
+       (snapshotted once from guest-accessible memory in dispatch). */
+    if (tracker->sequence_seen && cached_caller_sequence <= tracker->last_sequence) {
         return REPLAY_DETECTED;
     }
 
     tracker->sequence_seen = true;
-    tracker->last_sequence = page->caller_sequence;
-    tracker->last_nonce = page->caller_nonce;
+    tracker->last_sequence = cached_caller_sequence;
+    tracker->last_nonce = cached_caller_nonce;
     return OK;
 }
 
@@ -2102,6 +2116,8 @@ int fbvbs_dispatch_hypercall(
     {
         uint16_t cached_call_id = page->call_id;
         uint32_t cached_input_length = page->input_length;
+        uint64_t cached_caller_sequence = page->caller_sequence;
+        uint64_t cached_caller_nonce = page->caller_nonce;
 
         status = fbvbs_validate_command_page(page, cached_input_length);
         if (status != OK) {
@@ -2119,7 +2135,9 @@ int fbvbs_dispatch_hypercall(
             fbvbs_finish_trap(page, registers, status, page->actual_output_length);
             return status;
         }
-        status = fbvbs_validate_command_sequence(state, page_gpa, page);
+        status = fbvbs_validate_command_sequence(state, page_gpa,
+                                                cached_caller_sequence,
+                                                cached_caller_nonce);
         if (status != OK) {
             fbvbs_finish_trap(page, registers, status, page->actual_output_length);
             return status;

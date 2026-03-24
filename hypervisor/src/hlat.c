@@ -17,6 +17,9 @@
  * The HLAT prefix size (1-6) controls how many upper bits of the
  * linear address select into the HLAT PML4 vs the guest's own PML4.
  *
+ * Requirements: REQ-0301 (Intel HLAT 必須),
+ *   REQ-0332 (Shadow Stack EPT), REQ-0402 (翻訳整合性連携)
+ *
  * Reference: Intel SDM Vol. 3, Chapter 28.3 (HLAT)
  *            FBVBS Design Spec Section 21.3 (Translation Integrity)
  * ================================================================ */
@@ -179,6 +182,32 @@ static int fbvbs_hlat_add_region(
     /* Check for overflow (kernel-high addresses can wrap) */
     if (linear_base + size < linear_base) {
         return -1;
+    }
+
+    /* Validate all regions share the same PML4 index.
+     * The model uses single shared PDPT/PD/PT tables per PML4 entry;
+     * if regions span different PML4 entries, the shared tables cause
+     * unintended aliasing (CWE-269). Production must allocate per-PML4
+     * subtables; until then, reject cross-PML4 regions. */
+    {
+        uint32_t new_pml4_idx = (uint32_t)((linear_base >> 39) & 0x1FFU);
+        uint32_t new_end_pml4 = (uint32_t)(((linear_base + size - 1U) >> 39) & 0x1FFU);
+        if (new_pml4_idx != new_end_pml4) {
+            return -1;  /* Region spans PML4 boundary — not supported */
+        }
+        /* Check existing regions for PML4 consistency */
+        {
+            uint32_t k;
+            for (k = 0U; k < config->region_count; ++k) {
+                if (config->regions[k].active != 0U) {
+                    uint32_t existing_pml4 =
+                        (uint32_t)((config->regions[k].linear_base >> 39) & 0x1FFU);
+                    if (existing_pml4 != new_pml4_idx) {
+                        return -1;  /* Different PML4 index — aliasing risk */
+                    }
+                }
+            }
+        }
     }
 
     /* Check for overlap with existing regions */
@@ -385,6 +414,10 @@ static int fbvbs_hlat_populate_tables(
         }
 
         addr = region->linear_base;
+        /* Re-validate stored region to guard against corruption */
+        if (region->linear_base + region->size < region->linear_base) {
+            continue;  /* Corrupted region — skip */
+        }
         end_addr = region->linear_base + region->size;
 
         /* Walk each page in the region */

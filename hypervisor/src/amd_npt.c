@@ -28,9 +28,12 @@
  * actual NPT page table manipulation via physical page allocator
  * and SVM (Secure Virtual Machine) VMCB configuration.
  *
+ * Requirements: REQ-0302 (AMD NPT 複合経路), REQ-0303 (AMD 高保証実証),
+ *   REQ-0304 (SEV-SNP 補強のみ),
+ *   REQ-1100 (AMD 翻訳整合性実証 — PRODUCTION NOTE: Phase 9 release gate)
+ *
  * Reference: AMD APM Vol. 2, Chapter 15 (SVM)
  *            FBVBS Design Spec Section 21.3 (Translation Integrity)
- *            REQ-0302, REQ-0303, REQ-0304
  * ================================================================ */
 
 /* ================================================================
@@ -415,6 +418,16 @@ static int fbvbs_npt_protect_pte_page(
  *
  * SECURITY: This is the critical path. Any bypass here allows
  * arbitrary code execution in the guest kernel.
+ *
+ * SERIALIZATION INVARIANT: NPT fault handling for the same GPA
+ * range MUST be serialized. In single-vCPU mode this is inherent.
+ * In multi-vCPU mode, concurrent PTE modifications by different
+ * vCPUs to the same page are serialized because the page is
+ * NPT write-protected: each write causes a #VMEXIT, and the
+ * hypervisor processes these sequentially under the BHL (Big
+ * Hypervisor Lock, see fbvbs_concurrency.h). Without the BHL,
+ * a per-partition spinlock on the NPT protected page set would
+ * be required to prevent TOCTOU on the guest PTE value.
  * ================================================================ */
 
 /*@ requires \valid(config);

@@ -1,3 +1,7 @@
+/* FBVBS Policy/Security Unit Tests
+ *
+ * Requirements: REQ-1004 (継続的テスト), REQ-1005 (MC/DC カバレッジ)
+ */
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>

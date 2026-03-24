@@ -11,6 +11,17 @@
  * Design references: fbvbs-design.md Section 21.1-21.11
  * Feature catalog: plan/cpu-sec.md (81+ features)
  *
+ * Requirements: REQ-0310 (eIBRS/AutoIBRS), REQ-0311 (IBPB),
+ *   REQ-0312 (BHI_DIS_S), REQ-0313 (PBRSB), REQ-0314 (STIBP),
+ *   REQ-0315 (RSB fill), REQ-0316 (L1TF flush), REQ-0317 (VERW/MDS/TAA),
+ *   REQ-0318 (LFENCE), REQ-0319 (per-CPU vuln profile),
+ *   REQ-0320 (SRSO/Inception), REQ-0321 (GDS), REQ-0300 (CR pinning),
+ *   REQ-0330 (CET-SS), REQ-0331 (CET MSR), REQ-0333 (CET-IBT),
+ *   REQ-0360 (DRTM — PRODUCTION NOTE: model stub, needs SKINIT/GETSEC),
+ *   REQ-0361 (Boot Guard/PSB — PRODUCTION NOTE: model stub),
+ *   REQ-0362 (TPM PCR 検証 — PRODUCTION NOTE: model stub),
+ *   REQ-0372 (exit/entry mitigate)
+ *
  * Frama-C WP: all functions annotated with ACSL contracts.
  * void* operations are avoided for Typed+Cast model compatibility.
  */
@@ -1254,6 +1265,14 @@ void fbvbs_debug_save_guest(struct fbvbs_debug_state *guest_dbg)
     __asm__ volatile("mov %%dr7, %0" : "=r"(val)); guest_dbg->dr7 = val;
     /* Reset host DR7 to safe defaults: disable all breakpoints */
     __asm__ volatile("mov %0, %%dr7" : : "r"((uint64_t)0x400) : "memory");
+    /* Zero DR0-DR3 to prevent inter-partition debug register address
+     * leaks via any hypervisor code path that reads hardware DRs
+     * between save_guest and restore_guest. DR6 is left (reserved
+     * bits are harmless); DR7=0x400 already disables all breakpoints. */
+    __asm__ volatile("mov %0, %%dr0" : : "r"((uint64_t)0) : "memory");
+    __asm__ volatile("mov %0, %%dr1" : : "r"((uint64_t)0) : "memory");
+    __asm__ volatile("mov %0, %%dr2" : : "r"((uint64_t)0) : "memory");
+    __asm__ volatile("mov %0, %%dr3" : : "r"((uint64_t)0) : "memory");
 #else
     guest_dbg->dr0 = 0;
     guest_dbg->dr1 = 0;

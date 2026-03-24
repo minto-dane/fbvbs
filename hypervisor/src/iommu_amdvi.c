@@ -6,6 +6,9 @@
  * Parses the ACPI IVRS (I/O Virtualization Reporting Structure) table
  * to discover AMD IOMMU hardware units and their configurations.
  *
+ * Requirements: REQ-0003 (IOMMU 必須), REQ-0350 (DMA remapping),
+ *   REQ-0351 (Interrupt remapping)
+ *
  * Reference: AMD I/O Virtualization Technology (IOMMU) Specification
  * ================================================================ */
 
@@ -153,7 +156,12 @@ struct fbvbs_ivrs_info {
     ensures \result == 0 ==> info->valid == 1;
     ensures \result == -1 ==> info->valid == 0;
 */
-static int fbvbs_ivrs_parse(
+#ifdef FUZZ_TARGET
+int
+#else
+static int
+#endif
+fbvbs_ivrs_parse(
     const struct acpi_ivrs_table_header *table,
     uint32_t table_length,
     struct fbvbs_ivrs_info *info)

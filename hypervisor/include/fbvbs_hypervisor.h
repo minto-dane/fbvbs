@@ -396,7 +396,9 @@ static inline void fbvbs_copy_bytes(uint8_t *dest, const uint8_t *src, size_t n)
 
 int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state);
 void fbvbs_kernel_main(const void *multiboot_info);
-void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state, const void *multiboot_info);
+void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
+                                  const void *multiboot_info,
+                                  uint32_t buffer_size);
 
 uint32_t fbvbs_crc32c(const uint8_t *data, size_t length);
 int fbvbs_log_init(struct fbvbs_hypervisor_state *state);
@@ -806,6 +808,7 @@ struct fbvbs_vmx_security_controls {
     uint32_t notify_window;
     uint64_t host_s_cet;
     uint64_t host_ssp;
+    uint64_t host_isst_addr;  /* VMCS_HOST_ISST_ADDR (0x6C20) */
     uint64_t guest_s_cet;
     uint32_t msr_bitmap_valid;
     uint32_t reserved0;
@@ -814,7 +817,7 @@ struct fbvbs_vmx_security_controls {
 /*@ requires \valid(controls);
     requires \valid_read(caps);
     assigns *controls;
-    ensures \result == 0;
+    ensures \result == 0 || \result == -1;
 */
 int fbvbs_vmx_build_security_controls(
     struct fbvbs_vmx_security_controls *controls,

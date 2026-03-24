@@ -19,6 +19,9 @@
  * the privileged operations.
  *
  * Reference: Intel SDM Vol. 3, Chapter 23 (VMX)
+ *
+ * Requirements: REQ-0001 (FreeBSD より前にロード),
+ *   REQ-0002 (VMX root 取得), REQ-0006 (起動時検証)
  * ================================================================ */
 
 /* ================================================================
