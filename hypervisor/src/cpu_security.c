@@ -657,6 +657,8 @@ static void merge_worst_case_vuln(struct fbvbs_vuln_profile *wc,
     if (v->need_retbleed_mitigation != 0U) { wc->need_retbleed_mitigation = 1; }
     if (v->need_lfence_serialize != 0U)  { wc->need_lfence_serialize = 1; }
 
+    /*@ assert \valid(wc) && \valid_read(v) && \separated(wc, v); */
+
     /* Immunity: only immune if ALL CPUs are immune (AND merge) */
     if (v->immune_meltdown == 0U)   { wc->immune_meltdown = 0; }
     if (v->immune_l1tf == 0U)       { wc->immune_l1tf = 0; }
@@ -670,6 +672,8 @@ static void merge_worst_case_vuln(struct fbvbs_vuln_profile *wc,
     if (v->immune_mmio_stale == 0U) { wc->immune_mmio_stale = 0; }
     if (v->immune_srso == 0U)       { wc->immune_srso = 0; }
     if (v->immune_retbleed == 0U)   { wc->immune_retbleed = 0; }
+
+    /*@ assert \valid(wc) && \valid_read(v); */
 
     /* AND-merge arch_capabilities across all CPUs: only trust
        capabilities present on every CPU */

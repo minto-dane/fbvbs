@@ -176,6 +176,7 @@ _Static_assert(
 #define FBVBS_LEAF_EXIT_DR_VALUE(exit_ptr) \
     ((exit_ptr)->detail.word1)
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_external_interrupt(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t vector
@@ -185,6 +186,7 @@ static inline void fbvbs_leaf_exit_set_external_interrupt(
     leaf_exit->detail.word2 = 0U;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_cr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t cr_number,
@@ -196,6 +198,7 @@ static inline void fbvbs_leaf_exit_set_cr_access(
     leaf_exit->detail.word2 = 0U;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_msr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t msr_address,
@@ -207,6 +210,7 @@ static inline void fbvbs_leaf_exit_set_msr_access(
     leaf_exit->detail.word2 = 0U;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_ept_violation(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint64_t guest_physical_address,
@@ -217,6 +221,7 @@ static inline void fbvbs_leaf_exit_set_ept_violation(
     leaf_exit->detail.word2 = 0U;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_pio(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint16_t port,
@@ -231,6 +236,7 @@ static inline void fbvbs_leaf_exit_set_pio(
     leaf_exit->detail.word2 = 0U;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_mmio(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint64_t guest_physical_address,
@@ -243,6 +249,7 @@ static inline void fbvbs_leaf_exit_set_mmio(
     leaf_exit->detail.word2 = value;
 }
 
+/*@ requires \valid(leaf_exit); */
 static inline void fbvbs_leaf_exit_set_dr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t dr_number,

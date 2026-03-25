@@ -172,6 +172,12 @@ static inline void fbvbs_asm_wrmsr(uint32_t msr, uint64_t value) {
  * C. CPUID
  * ================================================================ */
 
+/*@ requires eax == \null || \valid(eax);
+    requires ebx == \null || \valid(ebx);
+    requires ecx == \null || \valid(ecx);
+    requires edx == \null || \valid(edx);
+    assigns *eax, *ebx, *ecx, *edx;
+*/
 static inline void fbvbs_asm_cpuid(
     uint32_t leaf, uint32_t subleaf,
     uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
@@ -470,11 +476,72 @@ static inline int fbvbs_asm_rdseed64_raw(uint64_t *val) {
  * In production, this is in the same asm block as VM entry.
  * ================================================================ */
 
+/*@ assigns \nothing; */
 static inline void fbvbs_asm_verw(void) {
 #if defined(__x86_64__) && !defined(__FRAMAC__)
     uint16_t ds_sel = 0;
     __asm__ volatile("verw %0" : : "m"(ds_sel) : "cc", "memory");
 #endif
 }
+
+/* ================================================================
+ * M. Descriptor table register reads (SGDT/SIDT)
+ * ================================================================ */
+
+struct fbvbs_asm_dt_reg {
+    uint64_t base;
+    uint16_t limit;
+};
+
+/*@ requires \valid(out);
+    assigns *out;
+*/
+static inline void fbvbs_asm_sgdt(struct fbvbs_asm_dt_reg *out) {
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    uint8_t buf[10];
+    __asm__ volatile("sgdt %0" : "=m"(buf));
+    out->limit = (uint16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
+    uint64_t base = 0;
+    for (int i = 0; i < 8; i++) {
+        base |= (uint64_t)buf[2 + i] << (i * 8);
+    }
+    out->base = base;
+#else
+    out->base = 0;
+    out->limit = 0;
+#endif
+}
+
+/*@ requires \valid(out);
+    assigns *out;
+*/
+static inline void fbvbs_asm_sidt(struct fbvbs_asm_dt_reg *out) {
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    uint8_t buf[10];
+    __asm__ volatile("sidt %0" : "=m"(buf));
+    out->limit = (uint16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
+    uint64_t base = 0;
+    for (int i = 0; i < 8; i++) {
+        base |= (uint64_t)buf[2 + i] << (i * 8);
+    }
+    out->base = base;
+#else
+    out->base = 0;
+    out->limit = 0;
+#endif
+}
+
+/* ================================================================
+ * N. Assembly VMX entry points (defined in boot.S)
+ *
+ * These are only available on bare-metal x86_64 builds.
+ * ================================================================ */
+
+#if defined(__x86_64__) && !defined(__FRAMAC__) && !defined(__STDC_HOSTED__)
+extern int fbvbs_vmlaunch(void);
+extern int fbvbs_vmresume(void);
+extern uint64_t fbvbs_get_vmexit_handler_rip(void);
+extern uint64_t fbvbs_get_vmx_stack_top(void);
+#endif
 
 #endif /* FBVBS_ASM_H */

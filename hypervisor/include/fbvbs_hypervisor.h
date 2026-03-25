@@ -10,12 +10,14 @@
 #include "fbvbs_cpu_security.h"
 #include "fbvbs_leaf_vmx.h"
 
-#ifndef FBVBS_VMLAUNCH_IMPLEMENTED
-#define FBVBS_VMLAUNCH_IMPLEMENTED 0
-#endif
+/* VMLAUNCH is now implemented in boot.S for bare-metal x86_64 builds.
+ * Hosted and Frama-C builds use compile-time guards instead. */
 
+/* IOMMU host policy: VT-d and AMD-Vi bring-up sequences are
+ * implemented with root/context table allocation, translation
+ * enable, interrupt remapping, and fault checking. */
 #ifndef FBVBS_HOST_IOMMU_POLICY_IMPLEMENTED
-#define FBVBS_HOST_IOMMU_POLICY_IMPLEMENTED 0
+#define FBVBS_HOST_IOMMU_POLICY_IMPLEMENTED 1
 #endif
 
 #define FBVBS_RUNTIME_HOST_DEPRIVILEGED (1U << 0)
@@ -1073,6 +1075,8 @@ struct fbvbs_vmcs_config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_vmcs_apply(const struct fbvbs_vmcs_config *config);
+void fbvbs_vmcs_release_current(void);
+void fbvbs_handle_vmexit(uint64_t *guest_gprs);
 
 /*@ requires \valid(state);
     assigns *state;

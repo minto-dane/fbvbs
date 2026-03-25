@@ -45,6 +45,7 @@ static _Alignas(PAGE_SIZE)
 uint8_t hosted_page_pool[FBVBS_HOSTED_MAX_PHYS_PAGES * PAGE_SIZE];
 #endif
 
+/*@ assigns \nothing; */
 static uint64_t hosted_phys_from_pfn(uint32_t pfn) {
     if (pfn >= FBVBS_HOSTED_MAX_PHYS_PAGES) {
         return 0U;
@@ -52,6 +53,9 @@ static uint64_t hosted_phys_from_pfn(uint32_t pfn) {
     return (uint64_t)(uintptr_t)&hosted_page_pool[(size_t)pfn * PAGE_SIZE];
 }
 
+/*@ requires pfn_out == \null || \valid(pfn_out);
+    assigns *pfn_out;
+*/
 static int hosted_pfn_from_phys(uint64_t phys_addr, uint32_t *pfn_out) {
     uintptr_t base = (uintptr_t)&hosted_page_pool[0];
     uintptr_t end = base + sizeof(hosted_page_pool);

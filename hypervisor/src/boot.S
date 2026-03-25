@@ -735,5 +735,204 @@ stack_bottom:
     .space 16384                    /* 16 KiB stack */
 stack_top:
 
+/* ================================================================
+ * VMX hypervisor stack (separate from boot stack)
+ * ================================================================ */
+.align 4096
+vmx_stack_guard:
+    .space 4096                     /* Guard page */
+vmx_stack_bottom:
+    .space 32768                    /* 32 KiB VMX handler stack */
+vmx_stack_top:
+
+/* ================================================================
+ * VMX Entry/Exit Assembly Stubs
+ *
+ * These routines implement the VMX non-root ↔ root transitions.
+ *
+ * fbvbs_vmlaunch: Execute VMLAUNCH after VMCS is fully configured.
+ *   Returns 0 on success (never returns on success — control
+ *   transfers to guest), -1 on VMLAUNCH failure.
+ *
+ * fbvbs_vmresume: Execute VMRESUME to re-enter guest after exit.
+ *   Returns 0 on success (never returns), -1 on failure.
+ *
+ * fbvbs_vmexit_handler: Entry point for VM exits (HOST_RIP).
+ *   Saves guest GPRs, calls C handler, then does VMRESUME.
+ *
+ * Register convention on VM exit (Intel SDM 27.5):
+ *   - RSP/RIP loaded from HOST_RSP/HOST_RIP in VMCS
+ *   - All other GPRs have guest values (must save)
+ *   - RFLAGS is cleared (IF=0, direction=forward)
+ *
+ * Requirements: REQ-0201 (VMCS VM deprivilege)
+ * ================================================================ */
+
+.section .text
+.code64
+
+/* ----------------------------------------------------------------
+ * fbvbs_vmlaunch — Execute VMLAUNCH
+ *
+ * Prototype: int fbvbs_vmlaunch(void);
+ * Returns: -1 on failure (CF=1 or ZF=1 after VMLAUNCH)
+ *          Does not return on success (guest starts executing)
+ *
+ * VERW mitigation (MDS/TAA/RFDS) is issued immediately before
+ * VMLAUNCH per Intel recommendation.
+ * ---------------------------------------------------------------- */
+.global fbvbs_vmlaunch
+.type fbvbs_vmlaunch, @function
+fbvbs_vmlaunch:
+    /* Issue VERW for MDS/TAA/MMIO/RFDS mitigation — must be
+     * the last data-touching instruction before VM entry */
+    sub     $2, %rsp
+    movw    $0, (%rsp)
+    verw    (%rsp)
+    add     $2, %rsp
+
+    vmlaunch
+
+    /* If we reach here, VMLAUNCH failed.
+     * CF=1 → VMfailInvalid, ZF=1 → VMfailValid */
+    mov     $-1, %eax
+    ret
+.size fbvbs_vmlaunch, . - fbvbs_vmlaunch
+
+/* ----------------------------------------------------------------
+ * fbvbs_vmresume — Execute VMRESUME
+ *
+ * Prototype: int fbvbs_vmresume(void);
+ * Returns: -1 on failure
+ *          Does not return on success (guest resumes)
+ * ---------------------------------------------------------------- */
+.global fbvbs_vmresume
+.type fbvbs_vmresume, @function
+fbvbs_vmresume:
+    /* VERW mitigation before VM entry */
+    sub     $2, %rsp
+    movw    $0, (%rsp)
+    verw    (%rsp)
+    add     $2, %rsp
+
+    vmresume
+
+    /* If we reach here, VMRESUME failed */
+    mov     $-1, %eax
+    ret
+.size fbvbs_vmresume, . - fbvbs_vmresume
+
+/* ----------------------------------------------------------------
+ * fbvbs_vmexit_handler — VM Exit Entry Point (HOST_RIP)
+ *
+ * On VM exit, the CPU loads HOST_RIP/HOST_RSP from the VMCS
+ * and jumps here. All GPRs still hold guest values.
+ *
+ * We save all guest GPRs to the stack, call the C exit handler,
+ * then VMRESUME to re-enter the guest.
+ *
+ * The C handler signature:
+ *   void fbvbs_handle_vmexit(uint64_t *guest_gprs);
+ *
+ * guest_gprs layout (16 × 8 = 128 bytes):
+ *   [0]=RAX [1]=RCX [2]=RDX [3]=RBX [4]=RSP_unused [5]=RBP
+ *   [6]=RSI [7]=RDI [8]=R8  [9]=R9  [10]=R10 [11]=R11
+ *   [12]=R12 [13]=R13 [14]=R14 [15]=R15
+ * ---------------------------------------------------------------- */
+.global fbvbs_vmexit_handler
+.type fbvbs_vmexit_handler, @function
+fbvbs_vmexit_handler:
+    /* Save all guest GPRs (caller-save + callee-save — we own the
+     * entire register file at VM exit) */
+    push    %r15
+    push    %r14
+    push    %r13
+    push    %r12
+    push    %r11
+    push    %r10
+    push    %r9
+    push    %r8
+    push    %rdi
+    push    %rsi
+    push    %rbp
+    push    $0          /* placeholder for RSP (not meaningful here) */
+    push    %rbx
+    push    %rdx
+    push    %rcx
+    push    %rax
+
+    /* First argument: pointer to saved GPR array */
+    mov     %rsp, %rdi
+
+    /* Align stack to 16 bytes (ABI requirement) */
+    mov     %rsp, %rbp
+    and     $-16, %rsp
+
+    /* Call C exit handler */
+    call    fbvbs_handle_vmexit
+
+    /* Restore stack */
+    mov     %rbp, %rsp
+
+    /* Restore all guest GPRs */
+    pop     %rax
+    pop     %rcx
+    pop     %rdx
+    pop     %rbx
+    add     $8, %rsp    /* skip RSP placeholder */
+    pop     %rbp
+    pop     %rsi
+    pop     %rdi
+    pop     %r8
+    pop     %r9
+    pop     %r10
+    pop     %r11
+    pop     %r12
+    pop     %r13
+    pop     %r14
+    pop     %r15
+
+    /* VERW mitigation before VMRESUME */
+    sub     $2, %rsp
+    movw    $0, (%rsp)
+    verw    (%rsp)
+    add     $2, %rsp
+
+    vmresume
+
+    /* VMRESUME failed — this is fatal. The hypervisor cannot
+     * safely continue. Issue HLT in a loop. */
+    cli
+.Lvmresume_fail:
+    hlt
+    jmp     .Lvmresume_fail
+.size fbvbs_vmexit_handler, . - fbvbs_vmexit_handler
+
+/* ----------------------------------------------------------------
+ * fbvbs_get_vmexit_handler_rip — Return address of vmexit handler
+ *
+ * Prototype: uint64_t fbvbs_get_vmexit_handler_rip(void);
+ * Used by C code to set HOST_RIP in the VMCS.
+ * ---------------------------------------------------------------- */
+.global fbvbs_get_vmexit_handler_rip
+.type fbvbs_get_vmexit_handler_rip, @function
+fbvbs_get_vmexit_handler_rip:
+    lea     fbvbs_vmexit_handler(%rip), %rax
+    ret
+.size fbvbs_get_vmexit_handler_rip, . - fbvbs_get_vmexit_handler_rip
+
+/* ----------------------------------------------------------------
+ * fbvbs_get_vmx_stack_top — Return VMX stack top address
+ *
+ * Prototype: uint64_t fbvbs_get_vmx_stack_top(void);
+ * Used by C code to set HOST_RSP in the VMCS.
+ * ---------------------------------------------------------------- */
+.global fbvbs_get_vmx_stack_top
+.type fbvbs_get_vmx_stack_top, @function
+fbvbs_get_vmx_stack_top:
+    lea     vmx_stack_top(%rip), %rax
+    ret
+.size fbvbs_get_vmx_stack_top, . - fbvbs_get_vmx_stack_top
+
 /* Mark stack as non-executable */
 .section .note.GNU-stack,"",@progbits

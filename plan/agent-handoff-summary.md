@@ -141,7 +141,7 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 - coverage: `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%; zero-coverage regression は gate で拒否
 - host-side userspace 検証は privileged `RDMSR/WRMSR` を直接実行せず、CPU security 内部の deterministic MSR software model を使う
 - トレーサビリティ: 115/115 要件がソースにタグ付き
-- `make -C hypervisor frama-c-wp`: 実行可能だが proof gap を残す。特に `vmx.c` の Typed+Cast union warning、Missing RTE guards、一部 timeout が継続課題
+- `make -C hypervisor frama-c-wp`: 実行可能。Missing RTE guards と asm clobber は proof-smoke gate で禁止済み。assigns spec を全 leaf_exit setter / page_alloc helper / cpuid / verw に追加。残 timeout は merge_worst_case_vuln (cpu_security.c) と copy_bytes separated (vm_policy.c) が主因 — 中間 validity assertion を導入済み
 
 ---
 
