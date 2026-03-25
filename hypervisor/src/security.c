@@ -20,6 +20,7 @@
  *   REQ-1104 (暗号 TCB 確定 — PRODUCTION NOTE: Phase 9 release gate)
  */
 #include "fbvbs_hypervisor.h"
+#include "fbvbs_asm.h"
 
 static int fbvbs_is_object_revoked(
     const struct fbvbs_hypervisor_state *state,
@@ -51,7 +52,7 @@ static int fbvbs_artifact_exists(
         found |= match;
     }
 
-    __asm__ volatile("" : "+r"(found) : : "memory");
+    found = fbvbs_asm_observe_u32(found);
     return found != 0U;
 }
 
@@ -156,7 +157,7 @@ static int fbvbs_hash_tail_zero(const uint8_t hash[64]) {
         nonzero |= (uint32_t)hash[index];
     }
 
-    __asm__ volatile("" : "+r"(nonzero) : : "memory");
+    nonzero = fbvbs_asm_observe_u32(nonzero);
     return nonzero == 0U;
 }
 
@@ -176,7 +177,7 @@ static int fbvbs_hash_prefix_nonzero(const uint8_t hash[48]) {
         nonzero |= (uint32_t)hash[index];
     }
 
-    __asm__ volatile("" : "+r"(nonzero) : : "memory");
+    nonzero = fbvbs_asm_observe_u32(nonzero);
     return nonzero != 0U;
 }
 
@@ -266,7 +267,7 @@ static int fbvbs_artifact_hash_matches_manifest(
         for (hash_index = 0U; hash_index < 48U; ++hash_index) {
             hash_diff |= (uint32_t)(artifact_hash[hash_index] ^ entry->payload_hash[hash_index]);
         }
-        __asm__ volatile("" : "+r"(hash_diff) : : "memory");
+        hash_diff = fbvbs_asm_observe_u32(hash_diff);
         /* Accumulate match without early return to prevent timing leak
          * revealing which catalog entry matched */
         found |= (hash_diff == 0U) ? 1U : 0U;
@@ -320,7 +321,7 @@ static uint64_t fbvbs_find_artifact_object_for_hash(
         for (hash_index = 0U; hash_index < 48U; ++hash_index) {
             hash_diff |= (uint32_t)(artifact_hash[hash_index] ^ entry->payload_hash[hash_index]);
         }
-        __asm__ volatile("" : "+r"(hash_diff) : : "memory");
+        hash_diff = fbvbs_asm_observe_u32(hash_diff);
         /* Branchless capture: avoid data-dependent branch on hash match to
          * prevent branch-predictor side-channel leaking which entry matched.
          * mask is 0 (no match) or ~0 (match); select entry->object_id only
@@ -433,7 +434,8 @@ int fbvbs_artifact_approval_exists(
             found |= match;
         }
     }
-    __asm__ volatile("" : "+r"(found), "+r"(revoked) : : "memory");
+    found = fbvbs_asm_observe_u32(found);
+    revoked = fbvbs_asm_observe_u32(revoked);
     return found != 0U && revoked == 0U;
 }
 
@@ -570,7 +572,7 @@ static int fbvbs_snapshot_ids_equal(const uint8_t left[32], const uint8_t right[
 
     /* Compiler barrier: prevent optimizer from transforming the accumulate
      * loop into a short-circuit comparison (cf. fbvbs_constant_time_equals). */
-    __asm__ volatile("" : "+r"(diff) : : "memory");
+    diff = fbvbs_asm_observe_u32(diff);
     return diff == 0U;
 }
 
@@ -711,7 +713,7 @@ static int fbvbs_is_object_revoked(
         uint32_t match = (uint32_t)(diff == 0U);
         found |= match;
     }
-    __asm__ volatile("" : "+r"(found) : : "memory");
+    found = fbvbs_asm_observe_u32(found);
     return found != 0U;
 }
 
@@ -1625,11 +1627,9 @@ int fbvbs_kci_verify_module(
         return INVALID_STATE;
     }
 
-    fbvbs_sha384(
-        (const void *)(uintptr_t)module_mapping->guest_physical_address,
-        module_mapping->size,
-        measured_hash
-    );
+    if (fbvbs_memory_object_hash_sha384(module_object, measured_hash) != 0) {
+        return INVALID_STATE;
+    }
     if (!fbvbs_constant_time_equals(measured_hash, module_entry->payload_hash, 48U)) {
         return SIGNATURE_INVALID;
     }
@@ -1651,14 +1651,13 @@ int fbvbs_kci_verify_module(
         loop variant state->approved_module_page_count - page_index;
     */
     for (page_index = 0U; page_index < state->approved_module_page_count; ++page_index) {
-        fbvbs_sha384(
-            (const void *)(uintptr_t)(
-                module_mapping->guest_physical_address +
-                ((uint64_t)page_index * FBVBS_PAGE_SIZE)
-            ),
-            FBVBS_PAGE_SIZE,
-            state->approved_module_page_hashes[page_index]
-        );
+        if (fbvbs_memory_object_hash_page_sha384(
+                module_object,
+                page_index,
+                state->approved_module_page_hashes[page_index]) != 0) {
+            fbvbs_kci_clear_approved_module(state);
+            return INVALID_STATE;
+        }
     }
 
     response->verdict = 1U;

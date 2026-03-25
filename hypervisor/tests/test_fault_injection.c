@@ -146,6 +146,9 @@ static void test_rollback_stale_manifest_generation_rejected(void) {
     state.memory_objects[0].owner_partition_id = 0x100U;
     state.memory_objects[0].size = FBVBS_PAGE_SIZE;
     state.memory_objects[0].map_count = 1U;
+    state.memory_objects[0].backing_kind = FBVBS_MEMORY_BACKING_EXTERNAL_CONTIGUOUS;
+    state.memory_objects[0].backing_page_count = 1U;
+    state.memory_objects[0].backing_phys_base = (uint64_t)(uintptr_t)module_page.bytes;
 
     /* Attempt with OLDER generation (rollback attempt) */
     request.module_object_id = 0xBBBBU;

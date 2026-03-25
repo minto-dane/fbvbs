@@ -310,7 +310,29 @@ static inline void fbvbs_asm_mfence(void) {
 }
 
 static inline void fbvbs_asm_compiler_barrier(void) {
+#ifdef __FRAMAC__
+    return;
+#else
     __asm__ volatile("" : : : "memory");
+#endif
+}
+
+static inline uint32_t fbvbs_asm_observe_u32(uint32_t value) {
+#ifdef __FRAMAC__
+    return value;
+#else
+    __asm__ volatile("" : "+r"(value) : : "memory");
+    return value;
+#endif
+}
+
+static inline uint64_t fbvbs_asm_observe_u64(uint64_t value) {
+#ifdef __FRAMAC__
+    return value;
+#else
+    __asm__ volatile("" : "+r"(value) : : "memory");
+    return value;
+#endif
 }
 
 /* ================================================================

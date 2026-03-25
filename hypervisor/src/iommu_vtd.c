@@ -902,6 +902,15 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
         return -1;
     }
 
+#if !FBVBS_HOST_IOMMU_POLICY_IMPLEMENTED
+    /* Detection may discover DMAR units and capabilities, but retained-C
+     * still lacks an authoritative host DMA policy: there is no populated
+     * root/context-table model for the host, no quarantine domain, and no
+     * verified per-device programming path. Refuse to touch translation
+     * enablement until those pieces exist end-to-end. */
+    return -1;
+#endif
+
 #if defined(__FRAMAC__)
     /* Model: mark all capabilities available */
     state->iommu.dma_remapping = 1;

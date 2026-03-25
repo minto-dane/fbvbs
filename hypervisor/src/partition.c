@@ -145,6 +145,69 @@ static const struct fbvbs_manifest_profile *fbvbs_find_guest_boot_profile_for_im
     return profile;
 }
 
+/*@ requires \valid_read(state);
+    requires \valid_read(partition);
+    requires \valid_read(request);
+    requires \valid(resolved_entry_ip);
+    requires \valid(resolved_initial_sp);
+    requires state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
+    assigns *resolved_entry_ip, *resolved_initial_sp;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_STATE ||
+            \result == MEASUREMENT_FAILED;
+*/
+static int fbvbs_partition_resolve_load_layout(
+    const struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *partition,
+    const struct fbvbs_partition_load_image_request *request,
+    uint64_t *resolved_entry_ip,
+    uint64_t *resolved_initial_sp
+) {
+    const struct fbvbs_manifest_profile *profile = NULL;
+    uint64_t selected_entry_ip = 0U;
+    uint64_t selected_initial_sp = 0U;
+
+    if (partition->kind == PARTITION_KIND_TRUSTED_SERVICE) {
+        profile = fbvbs_find_trusted_service_profile_for_image(state, partition->image_object_id);
+        if (profile == NULL || profile->manifest_object_id != partition->manifest_object_id) {
+            return MEASUREMENT_FAILED;
+        }
+        if (profile->entry_ip == 0U || profile->initial_sp == 0U) {
+            return MEASUREMENT_FAILED;
+        }
+        if (request->entry_ip != 0U && request->entry_ip != profile->entry_ip) {
+            return MEASUREMENT_FAILED;
+        }
+        if (request->initial_sp != 0U && request->initial_sp != profile->initial_sp) {
+            return MEASUREMENT_FAILED;
+        }
+        selected_entry_ip = (request->entry_ip != 0U) ? request->entry_ip : profile->entry_ip;
+        selected_initial_sp =
+            (request->initial_sp != 0U) ? request->initial_sp : profile->initial_sp;
+    } else if (partition->kind == PARTITION_KIND_GUEST_VM) {
+        profile = fbvbs_find_guest_boot_profile_for_image(state, partition->image_object_id);
+        if (profile == NULL || profile->manifest_object_id != partition->manifest_object_id) {
+            return MEASUREMENT_FAILED;
+        }
+        if (profile->entry_ip == 0U) {
+            return MEASUREMENT_FAILED;
+        }
+        if (request->entry_ip != 0U && request->entry_ip != profile->entry_ip) {
+            return MEASUREMENT_FAILED;
+        }
+        if (request->initial_sp == 0U) {
+            return INVALID_PARAMETER;
+        }
+        selected_entry_ip = (request->entry_ip != 0U) ? request->entry_ip : profile->entry_ip;
+        selected_initial_sp = request->initial_sp;
+    } else {
+        return INVALID_STATE;
+    }
+
+    *resolved_entry_ip = selected_entry_ip;
+    *resolved_initial_sp = selected_initial_sp;
+    return OK;
+}
+
 /*@ requires \valid(state);
     assigns \result \from state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == \null ||
@@ -563,6 +626,40 @@ static struct fbvbs_memory_mapping *fbvbs_find_mapping_exact(
     return NULL;
 }
 
+/*@ requires \valid_read(partition);
+    assigns \result \from guest_physical_address, size,
+            partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1];
+    ensures \result == \null ||
+            (\exists integer i; 0 <= i < FBVBS_MAX_MEMORY_MAPPINGS && \result == &partition->mappings[i]);
+*/
+static const struct fbvbs_memory_mapping *fbvbs_find_mapping_covering(
+    const struct fbvbs_partition *partition,
+    uint64_t guest_physical_address,
+    uint64_t size
+) {
+    uint32_t index;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_MAPPINGS;
+        loop assigns index;
+        loop variant FBVBS_MAX_MEMORY_MAPPINGS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_MEMORY_MAPPINGS; ++index) {
+        const struct fbvbs_memory_mapping *mapping = &partition->mappings[index];
+
+        if (!mapping->active) {
+            continue;
+        }
+        if (guest_physical_address >= mapping->guest_physical_address &&
+            size <= mapping->size &&
+            guest_physical_address - mapping->guest_physical_address <=
+                mapping->size - size) {
+            return mapping;
+        }
+    }
+
+    return NULL;
+}
+
 /*@ requires \valid(partition);
     assigns \nothing;
     ensures \result == 0 || \result == 1;
@@ -595,6 +692,427 @@ static int fbvbs_partition_has_overlap(
     }
 
     return 0;
+}
+
+#define FBVBS_MAX_LOADED_IMAGE_SEGMENTS 8U
+#define FBVBS_ELF_PT_NULL 0U
+#define FBVBS_ELF_PT_LOAD 1U
+#define FBVBS_ELF_ET_EXEC 2U
+#define FBVBS_ELF_EM_X86_64 62U
+#define FBVBS_ELF_PF_X 0x1U
+#define FBVBS_ELF_PF_W 0x2U
+#define FBVBS_ELF_PF_R 0x4U
+
+struct fbvbs_elf64_ehdr {
+    uint8_t e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} __attribute__((packed));
+
+struct fbvbs_elf64_phdr {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct fbvbs_elf64_ehdr) == 64U,
+               "fbvbs_elf64_ehdr size mismatch");
+_Static_assert(sizeof(struct fbvbs_elf64_phdr) == 56U,
+               "fbvbs_elf64_phdr size mismatch");
+
+/*@ assigns \result \from elf_flags;
+*/
+static uint32_t fbvbs_permissions_from_elf_flags(uint32_t elf_flags) {
+    uint32_t permissions = 0U;
+
+    if ((elf_flags & FBVBS_ELF_PF_R) != 0U) {
+        permissions |= FBVBS_MEMORY_PERMISSION_READ;
+    }
+    if ((elf_flags & FBVBS_ELF_PF_W) != 0U) {
+        permissions |= FBVBS_MEMORY_PERMISSION_WRITE;
+    }
+    if ((elf_flags & FBVBS_ELF_PF_X) != 0U) {
+        permissions |= FBVBS_MEMORY_PERMISSION_EXECUTE;
+    }
+
+    return permissions;
+}
+
+/*@ requires \valid_read(image_object);
+    requires \valid(target_object);
+    assigns *target_object;
+    ensures \result == 0 || \result == -1;
+*/
+static int fbvbs_copy_artifact_range_to_object(
+    const struct fbvbs_memory_object *image_object,
+    uint64_t artifact_offset,
+    struct fbvbs_memory_object *target_object,
+    uint64_t target_offset,
+    uint64_t size
+) {
+    uint8_t page_buffer[FBVBS_PAGE_SIZE];
+    uint64_t remaining = size;
+    uint64_t source_offset = artifact_offset;
+    uint64_t destination_offset = target_offset;
+
+    while (remaining != 0U) {
+        uint64_t chunk = remaining < FBVBS_PAGE_SIZE ? remaining : FBVBS_PAGE_SIZE;
+
+        if (fbvbs_memory_object_read(
+                image_object,
+                source_offset,
+                page_buffer,
+                chunk) != 0) {
+            return -1;
+        }
+        if (fbvbs_memory_object_write(
+                target_object,
+                destination_offset,
+                page_buffer,
+                chunk) != 0) {
+            return -1;
+        }
+
+        source_offset += chunk;
+        destination_offset += chunk;
+        remaining -= chunk;
+    }
+
+    return 0;
+}
+
+/*@ requires \valid(state);
+    requires \valid(partition);
+    assigns *state, *partition;
+*/
+static void fbvbs_partition_rollback_loaded_objects(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *partition,
+    const uint64_t *object_ids,
+    const uint64_t *gpas,
+    const uint64_t *sizes,
+    uint32_t count
+) {
+    while (count > 0U) {
+        struct fbvbs_memory_unmap_request unmap_request = {0};
+        uint32_t slot = count - 1U;
+
+        if (gpas[slot] != 0U && sizes[slot] != 0U) {
+            unmap_request.partition_id = partition->partition_id;
+            unmap_request.guest_physical_address = gpas[slot];
+            unmap_request.size = sizes[slot];
+            (void)fbvbs_memory_unmap(state, &unmap_request, partition->partition_id);
+        }
+        if (object_ids[slot] != 0U) {
+            (void)fbvbs_memory_release_object(
+                state,
+                object_ids[slot],
+                partition->partition_id
+            );
+        }
+        count -= 1U;
+    }
+}
+
+/*@ requires \valid(state);
+    requires \valid(partition);
+    requires \valid_read(image_object);
+    requires \valid(out_object_id);
+    assigns *state, *partition, *out_object_id;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_STATE ||
+            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+*/
+static int fbvbs_partition_map_loaded_object(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *partition,
+    const struct fbvbs_memory_object *image_object,
+    uint64_t artifact_offset,
+    uint64_t file_size,
+    uint64_t guest_physical_address,
+    uint64_t mapped_size,
+    uint32_t permissions,
+    uint32_t object_flags,
+    uint64_t *out_object_id
+) {
+    struct fbvbs_memory_allocate_object_request alloc_request = {0};
+    struct fbvbs_memory_allocate_object_response alloc_response = {0};
+    struct fbvbs_memory_map_request map_request = {0};
+    struct fbvbs_memory_object *target_object;
+    int status;
+
+    alloc_request.object_flags = object_flags;
+    alloc_request.size = mapped_size;
+    status = fbvbs_memory_allocate_object(
+        state,
+        &alloc_request,
+        &alloc_response,
+        partition->partition_id
+    );
+    if (status != OK) {
+        return status;
+    }
+
+    target_object = fbvbs_find_memory_object(state, alloc_response.memory_object_id);
+    if (target_object == NULL) {
+        (void)fbvbs_memory_release_object(
+            state,
+            alloc_response.memory_object_id,
+            partition->partition_id
+        );
+        return INVALID_STATE;
+    }
+
+    if (file_size != 0U &&
+        fbvbs_copy_artifact_range_to_object(
+            image_object,
+            artifact_offset,
+            target_object,
+            0U,
+            file_size) != 0) {
+        (void)fbvbs_memory_release_object(
+            state,
+            alloc_response.memory_object_id,
+            partition->partition_id
+        );
+        return INVALID_STATE;
+    }
+
+    map_request.partition_id = partition->partition_id;
+    map_request.memory_object_id = alloc_response.memory_object_id;
+    map_request.guest_physical_address = guest_physical_address;
+    map_request.size = mapped_size;
+    map_request.permissions = permissions;
+    status = fbvbs_memory_map(state, &map_request, partition->partition_id);
+    if (status != OK) {
+        (void)fbvbs_memory_release_object(
+            state,
+            alloc_response.memory_object_id,
+            partition->partition_id
+        );
+        return status;
+    }
+
+    *out_object_id = alloc_response.memory_object_id;
+    return OK;
+}
+
+/*@ requires \valid(state);
+    requires \valid(partition);
+    requires \valid_read(image_object);
+    assigns *state, *partition;
+    ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_STATE ||
+            \result == MEASUREMENT_FAILED || \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+*/
+static int fbvbs_partition_materialize_image(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *partition,
+    const struct fbvbs_memory_object *image_object,
+    uint64_t resolved_entry_ip,
+    uint64_t resolved_initial_sp
+) {
+    struct fbvbs_elf64_ehdr ehdr;
+    struct fbvbs_elf64_phdr phdr;
+    uint64_t object_ids[FBVBS_MAX_LOADED_IMAGE_SEGMENTS + 1U] = {0};
+    uint64_t gpas[FBVBS_MAX_LOADED_IMAGE_SEGMENTS + 1U] = {0};
+    uint64_t sizes[FBVBS_MAX_LOADED_IMAGE_SEGMENTS + 1U] = {0};
+    uint32_t object_flags;
+    uint32_t loaded_count = 0U;
+    uint16_t ph_index;
+    int saw_load_segment = 0;
+    int entry_covered = 0;
+    int entry_executable = 0;
+
+    if (partition->mapped_bytes != 0U || image_object->size < sizeof(ehdr)) {
+        return INVALID_STATE;
+    }
+    if (fbvbs_memory_object_read(image_object, 0U, &ehdr, sizeof(ehdr)) != 0) {
+        return INVALID_STATE;
+    }
+    if (ehdr.e_ident[0] != 0x7FU ||
+        ehdr.e_ident[1] != (uint8_t)'E' ||
+        ehdr.e_ident[2] != (uint8_t)'L' ||
+        ehdr.e_ident[3] != (uint8_t)'F' ||
+        ehdr.e_ident[4] != 2U ||
+        ehdr.e_ident[5] != 1U ||
+        ehdr.e_ident[6] != 1U ||
+        ehdr.e_ehsize != sizeof(struct fbvbs_elf64_ehdr) ||
+        ehdr.e_type != FBVBS_ELF_ET_EXEC ||
+        ehdr.e_machine != FBVBS_ELF_EM_X86_64 ||
+        ehdr.e_version != 1U ||
+        ehdr.e_entry != resolved_entry_ip ||
+        ehdr.e_phentsize != sizeof(struct fbvbs_elf64_phdr) ||
+        ehdr.e_phnum == 0U ||
+        ehdr.e_phnum > FBVBS_MAX_LOADED_IMAGE_SEGMENTS ||
+        ehdr.e_phoff > image_object->size ||
+        ((uint64_t)ehdr.e_phnum * sizeof(struct fbvbs_elf64_phdr)) >
+            (image_object->size - ehdr.e_phoff)) {
+        return MEASUREMENT_FAILED;
+    }
+
+    object_flags = (partition->kind == PARTITION_KIND_GUEST_VM) ?
+        FBVBS_MEMORY_OBJECT_FLAG_GUEST_MEMORY :
+        FBVBS_MEMORY_OBJECT_FLAG_PRIVATE;
+
+    for (ph_index = 0U; ph_index < ehdr.e_phnum; ++ph_index) {
+        uint64_t ph_offset =
+            ehdr.e_phoff + ((uint64_t)ph_index * sizeof(struct fbvbs_elf64_phdr));
+        uint64_t mapped_size;
+        uint64_t rounded;
+        uint32_t permissions;
+        int status;
+
+        if (fbvbs_memory_object_read(image_object, ph_offset, &phdr, sizeof(phdr)) != 0) {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return INVALID_STATE;
+        }
+        if (phdr.p_type == FBVBS_ELF_PT_NULL) {
+            continue;
+        }
+        if (phdr.p_type != FBVBS_ELF_PT_LOAD ||
+            phdr.p_memsz == 0U ||
+            phdr.p_filesz > phdr.p_memsz ||
+            phdr.p_vaddr == 0U ||
+            (phdr.p_vaddr % FBVBS_PAGE_SIZE) != 0U ||
+            (phdr.p_align != 0U &&
+             phdr.p_align != 1U &&
+             phdr.p_align != FBVBS_PAGE_SIZE) ||
+            phdr.p_offset > image_object->size ||
+            phdr.p_filesz > image_object->size - phdr.p_offset) {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return MEASUREMENT_FAILED;
+        }
+        if (phdr.p_memsz > UINT64_MAX - (FBVBS_PAGE_SIZE - 1U)) {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return RESOURCE_EXHAUSTED;
+        }
+
+        rounded = phdr.p_memsz + (FBVBS_PAGE_SIZE - 1U);
+        mapped_size = rounded & ~(FBVBS_PAGE_SIZE - 1U);
+        permissions = fbvbs_permissions_from_elf_flags(phdr.p_flags);
+        if (!fbvbs_range_valid(phdr.p_vaddr, mapped_size) ||
+            permissions == 0U ||
+            !fbvbs_wx_safe(permissions)) {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return MEASUREMENT_FAILED;
+        }
+
+        status = fbvbs_partition_map_loaded_object(
+            state,
+            partition,
+            image_object,
+            phdr.p_offset,
+            phdr.p_filesz,
+            phdr.p_vaddr,
+            mapped_size,
+            permissions,
+            object_flags,
+            &object_ids[loaded_count]
+        );
+        if (status != OK) {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return status;
+        }
+        gpas[loaded_count] = phdr.p_vaddr;
+        sizes[loaded_count] = mapped_size;
+        loaded_count += 1U;
+        saw_load_segment = 1;
+
+        if (resolved_entry_ip >= phdr.p_vaddr &&
+            resolved_entry_ip < phdr.p_vaddr + phdr.p_memsz) {
+            entry_covered = 1;
+            if ((permissions & FBVBS_MEMORY_PERMISSION_EXECUTE) != 0U) {
+                entry_executable = 1;
+            }
+        }
+    }
+
+    if (saw_load_segment == 0 || entry_covered == 0 || entry_executable == 0) {
+        fbvbs_partition_rollback_loaded_objects(
+            state, partition, object_ids, gpas, sizes, loaded_count);
+        return MEASUREMENT_FAILED;
+    }
+
+    if (resolved_initial_sp <= FBVBS_PAGE_SIZE) {
+        fbvbs_partition_rollback_loaded_objects(
+            state, partition, object_ids, gpas, sizes, loaded_count);
+        return INVALID_PARAMETER;
+    }
+
+    {
+        uint64_t stack_page_base =
+            (resolved_initial_sp - 1U) & ~(FBVBS_PAGE_SIZE - 1U);
+        const struct fbvbs_memory_mapping *stack_mapping =
+            fbvbs_find_mapping_covering(partition, stack_page_base, FBVBS_PAGE_SIZE);
+
+        if (stack_mapping != NULL) {
+            if ((stack_mapping->permissions & FBVBS_MEMORY_PERMISSION_WRITE) == 0U ||
+                (stack_mapping->permissions & FBVBS_MEMORY_PERMISSION_EXECUTE) != 0U) {
+                fbvbs_partition_rollback_loaded_objects(
+                    state, partition, object_ids, gpas, sizes, loaded_count);
+                return INVALID_PARAMETER;
+            }
+        } else if (!fbvbs_partition_has_overlap(partition, stack_page_base, FBVBS_PAGE_SIZE)) {
+            int status;
+
+            if (loaded_count >= FBVBS_MAX_LOADED_IMAGE_SEGMENTS + 1U) {
+                fbvbs_partition_rollback_loaded_objects(
+                    state, partition, object_ids, gpas, sizes, loaded_count);
+                return RESOURCE_EXHAUSTED;
+            }
+
+            status = fbvbs_partition_map_loaded_object(
+                state,
+                partition,
+                image_object,
+                0U,
+                0U,
+                stack_page_base,
+                FBVBS_PAGE_SIZE,
+                FBVBS_MEMORY_PERMISSION_READ | FBVBS_MEMORY_PERMISSION_WRITE,
+                object_flags,
+                &object_ids[loaded_count]
+            );
+            if (status != OK) {
+                fbvbs_partition_rollback_loaded_objects(
+                    state, partition, object_ids, gpas, sizes, loaded_count);
+                return status;
+            }
+            gpas[loaded_count] = stack_page_base;
+            sizes[loaded_count] = FBVBS_PAGE_SIZE;
+            loaded_count += 1U;
+        } else {
+            fbvbs_partition_rollback_loaded_objects(
+                state, partition, object_ids, gpas, sizes, loaded_count);
+            return INVALID_PARAMETER;
+        }
+    }
+
+    partition->entry_ip = resolved_entry_ip;
+    partition->initial_sp = resolved_initial_sp;
+    fbvbs_partition_apply_image_registers(state, partition);
+    partition->state = FBVBS_PARTITION_STATE_LOADED;
+    return OK;
 }
 
 /*@ requires \valid(partition);
@@ -1236,29 +1754,10 @@ static void fbvbs_partition_sanitize_memory(
             continue;
         }
 
-        /* Zero all pages in this memory object.
-         * PRODUCTION NOTE: This iterates over the object's page-frame list
-         * in the EPT/NPT page tables.  In the model, we use the GPA range
-         * from partition mappings which were already released — so we zero
-         * using the object's size and a per-page walk. */
-        if (obj->size > 0U) {
-            uint64_t pages = obj->size / FBVBS_PAGE_SIZE;
-            uint64_t p;
-
-            if (pages > (UINT64_MAX / FBVBS_PAGE_SIZE)) {
-                pages = UINT64_MAX / FBVBS_PAGE_SIZE;
-            }
-            for (p = 0; p < pages; ++p) {
-                /* In production, this zeroes the physical frame backing
-                 * this page of the memory object.  The model function
-                 * fbvbs_zero_page_at_gpa handles the identity-mapped case. */
-                fbvbs_zero_page_at_gpa(
-                    (uint64_t)obj->memory_object_id * FBVBS_PAGE_SIZE + p * FBVBS_PAGE_SIZE
-                );
-            }
-        }
-
-        /* Clear the memory object record */
+        /* Release concrete backing before dropping the metadata record.
+         * Owned backing pages are zeroed by the page allocator on free;
+         * borrowed/external backing is detached without claiming ownership. */
+        fbvbs_memory_object_release_backing(obj);
         *obj = (struct fbvbs_memory_object){0};
     }
 #else
@@ -1565,13 +2064,17 @@ int fbvbs_partition_measure(
     requires state == \null || state->artifact_catalog.count <= FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES;
     assigns state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == OK || \result == INVALID_PARAMETER || \result == NOT_FOUND || \result == INVALID_STATE ||
-            \result == MEASUREMENT_FAILED || \result == NOT_SUPPORTED_ON_PLATFORM;
+            \result == MEASUREMENT_FAILED || \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
 */
 int fbvbs_partition_load_image(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_load_image_request *request
 ) {
     struct fbvbs_partition *partition;
+    struct fbvbs_memory_object *image_object;
+    uint64_t resolved_entry_ip = 0U;
+    uint64_t resolved_initial_sp = 0U;
+    int status;
 
     if (state == NULL || request == NULL) {
         return INVALID_PARAMETER;
@@ -1587,11 +2090,27 @@ int fbvbs_partition_load_image(
     if (request->image_object_id != partition->image_object_id) {
         return MEASUREMENT_FAILED;
     }
-
-    /* The retained-C build does not yet include the authoritative image
-     * materializer/loader.  Refuse to claim success until bytes are copied,
-     * measured, and initial CPU state is derived from those concrete bytes. */
-    return NOT_SUPPORTED_ON_PLATFORM;
+    status = fbvbs_partition_resolve_load_layout(
+        state,
+        partition,
+        request,
+        &resolved_entry_ip,
+        &resolved_initial_sp
+    );
+    if (status != OK) {
+        return status;
+    }
+    image_object = fbvbs_find_memory_object(state, request->image_object_id);
+    if (image_object == NULL || image_object->size == 0U) {
+        return NOT_FOUND;
+    }
+    return fbvbs_partition_materialize_image(
+        state,
+        partition,
+        image_object,
+        resolved_entry_ip,
+        resolved_initial_sp
+    );
 }
 
 /*@ requires \valid(state) || state == \null;

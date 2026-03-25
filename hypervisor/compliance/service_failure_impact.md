@@ -9,7 +9,7 @@
 
 ## 1. Architecture Overview
 
-FBVBS uses a partitioned architecture with five trusted services:
+FBVBS is designed around a partitioned architecture with five trusted services:
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -21,9 +21,10 @@ FBVBS uses a partitioned architecture with five trusted services:
 └──────┴──────┴──────┴──────┴──────┴──────────────────┘
 ```
 
-Each trusted service runs in its own partition with independent failure
-domains. The microhypervisor enforces partition isolation via EPT/NPT
-and IOMMU.
+In the intended end state, each trusted service runs in its own
+partition with independent failure domains. The current retained-C
+repository does not yet materialize those service partitions because
+`PARTITION_LOAD_IMAGE` remains fail-closed.
 
 ---
 

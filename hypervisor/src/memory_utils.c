@@ -1,3 +1,4 @@
+#include "fbvbs_asm.h"
 #include "fbvbs_hypervisor.h"
 
 void fbvbs_zero_memory(void *buffer, size_t length) {
@@ -62,7 +63,7 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
     }
 
     /* Compiler barrier: prevent optimizer from short-circuiting */
-    __asm__ volatile("" : "+r"(accumulator) : : "memory");
+    accumulator = fbvbs_asm_observe_u32(accumulator);
 
     return accumulator == 0U ? 1 : 0;
 }
@@ -85,7 +86,7 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
     }
 
     /* Compiler barrier: prevent optimizer from short-circuiting */
-    __asm__ volatile("" : "+r"(accumulator) : : "memory");
+    accumulator = fbvbs_asm_observe_u32(accumulator);
 
     return accumulator == 0U ? 1 : 0;
 }
@@ -159,7 +160,7 @@ static void fbvbs_sha384_process_block(uint64_t state[8], const uint8_t block[12
         UINT64_C(0x4CC5D4BECB3E42B6), UINT64_C(0x597F299CFC657E2A),
         UINT64_C(0x5FCB6FAB3AD6FAEC), UINT64_C(0x6C44198C4A475817)
     };
-    uint64_t w[80];
+    uint64_t w[80] = {0};
     uint64_t a;
     uint64_t b;
     uint64_t c;
@@ -221,29 +222,128 @@ static void fbvbs_sha384_process_block(uint64_t state[8], const uint8_t block[12
     state[7] += h;
 }
 
-void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
-    static const uint64_t initial_state[8] = {
-        UINT64_C(0xCBBB9D5DC1059ED8), UINT64_C(0x629A292A367CD507),
-        UINT64_C(0x9159015A3070DD17), UINT64_C(0x152FECD8F70E5939),
-        UINT64_C(0x67332667FFC00B31), UINT64_C(0x8EB44A8768581511),
-        UINT64_C(0xDB0C2E0D64F98FA7), UINT64_C(0x47B5481DBEFA4FA4)
-    };
-    uint64_t state[8];
-    uint8_t final_block[256];
+static const uint64_t fbvbs_sha384_initial_state[8] = {
+    UINT64_C(0xCBBB9D5DC1059ED8), UINT64_C(0x629A292A367CD507),
+    UINT64_C(0x9159015A3070DD17), UINT64_C(0x152FECD8F70E5939),
+    UINT64_C(0x67332667FFC00B31), UINT64_C(0x8EB44A8768581511),
+    UINT64_C(0xDB0C2E0D64F98FA7), UINT64_C(0x47B5481DBEFA4FA4)
+};
+
+void fbvbs_sha384_init(struct fbvbs_sha384_context *context) {
+    uint32_t index;
+
+    if (context == NULL) {
+        return;
+    }
+
+    *context = (struct fbvbs_sha384_context){0};
+    for (index = 0U; index < 8U; ++index) {
+        context->state[index] = fbvbs_sha384_initial_state[index];
+    }
+}
+
+void fbvbs_sha384_update(
+    struct fbvbs_sha384_context *context,
+    const void *data,
+    uint64_t length
+) {
     const uint8_t *bytes;
-    uint64_t full_blocks;
+    uint64_t remaining;
+    uint32_t buffered;
+
+    if (context == NULL) {
+        return;
+    }
+    if (length == 0U) {
+        return;
+    }
+    if (data == NULL || context->total_length > UINT64_MAX - length) {
+        fbvbs_zero_memory(context, sizeof(*context));
+        return;
+    }
+
+    bytes = (const uint8_t *)data;
+    remaining = length;
+    buffered = context->buffered_length;
+
+    if (buffered != 0U) {
+        uint32_t needed = 128U - buffered;
+
+        if (remaining < needed) {
+            fbvbs_copy_memory(&context->buffer[buffered], bytes, (size_t)remaining);
+            context->buffered_length += (uint32_t)remaining;
+            context->total_length += length;
+            return;
+        }
+
+        fbvbs_copy_memory(&context->buffer[buffered], bytes, (size_t)needed);
+        fbvbs_sha384_process_block(context->state, context->buffer);
+        bytes += needed;
+        remaining -= needed;
+        context->buffered_length = 0U;
+    }
+
+    while (remaining >= 128U) {
+        fbvbs_sha384_process_block(context->state, bytes);
+        bytes += 128U;
+        remaining -= 128U;
+    }
+
+    if (remaining != 0U) {
+        fbvbs_copy_memory(context->buffer, bytes, (size_t)remaining);
+        context->buffered_length = (uint32_t)remaining;
+    }
+
+    context->total_length += length;
+}
+
+void fbvbs_sha384_final(
+    struct fbvbs_sha384_context *context,
+    uint8_t out[48]
+) {
+    uint8_t final_block[256];
     uint64_t remainder;
     uint64_t bit_len_hi;
     uint64_t bit_len_lo;
     uint32_t out_index;
-    uint64_t block_index;
 
-    if (out == NULL) {
+    if (context == NULL || out == NULL) {
         return;
     }
 
-    for (out_index = 0U; out_index < 8U; ++out_index) {
-        state[out_index] = initial_state[out_index];
+    remainder = context->buffered_length;
+
+    fbvbs_zero_memory(final_block, sizeof(final_block));
+    if (remainder != 0U) {
+        fbvbs_copy_memory(final_block, context->buffer, (size_t)remainder);
+    }
+    final_block[remainder] = 0x80U;
+
+    bit_len_hi = context->total_length >> 61U;
+    bit_len_lo = context->total_length << 3U;
+
+    if (remainder >= 112U) {
+        fbvbs_sha384_process_block(context->state, final_block);
+        fbvbs_zero_memory(final_block, 128U);
+    }
+
+    fbvbs_store_be64(&final_block[112], bit_len_hi);
+    fbvbs_store_be64(&final_block[120], bit_len_lo);
+    fbvbs_sha384_process_block(context->state, final_block);
+
+    for (out_index = 0U; out_index < 6U; ++out_index) {
+        fbvbs_store_be64(&out[out_index * 8U], context->state[out_index]);
+    }
+
+    fbvbs_zero_memory(final_block, sizeof(final_block));
+    fbvbs_zero_memory(context, sizeof(*context));
+}
+
+void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
+    struct fbvbs_sha384_context context;
+
+    if (out == NULL) {
+        return;
     }
 
     if (data == NULL && length != 0U) {
@@ -251,48 +351,19 @@ void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
         return;
     }
 
-    bytes = (const uint8_t *)data;
-    full_blocks = length / 128U;
-    remainder = length % 128U;
-
-    for (block_index = 0U; block_index < full_blocks; ++block_index) {
-        fbvbs_sha384_process_block(state, &bytes[block_index * 128U]);
-    }
-
-    fbvbs_zero_memory(final_block, sizeof(final_block));
-    if (remainder != 0U) {
-        fbvbs_copy_memory(final_block, &bytes[full_blocks * 128U], (size_t)remainder);
-    }
-    final_block[remainder] = 0x80U;
-
-    bit_len_hi = length >> 61U;
-    bit_len_lo = length << 3U;
-
-    if (remainder >= 112U) {
-        fbvbs_sha384_process_block(state, final_block);
-        fbvbs_zero_memory(final_block, 128U);
-    }
-
-    fbvbs_store_be64(&final_block[112], bit_len_hi);
-    fbvbs_store_be64(&final_block[120], bit_len_lo);
-    fbvbs_sha384_process_block(state, final_block);
-
-    for (out_index = 0U; out_index < 6U; ++out_index) {
-        fbvbs_store_be64(&out[out_index * 8U], state[out_index]);
-    }
-
-    fbvbs_zero_memory(state, sizeof(state));
-    fbvbs_zero_memory(final_block, sizeof(final_block));
+    fbvbs_sha384_init(&context);
+    fbvbs_sha384_update(&context, data, length);
+    fbvbs_sha384_final(&context, out);
 }
 
 /* Zero a 4096-byte page at the given guest physical address.
- * In bare-metal: identity-maps the GPA, zeros with volatile stores, unmaps.
- * Stub: the leaf simulation model has no physical memory backing GPAs. */
+ * Retained-C bare metal treats guest physical pages as identity-mapped. */
 void fbvbs_zero_page_at_gpa(uint64_t gpa) {
-    (void)gpa;
-    /* Bare-metal implementation:
-     *   volatile uint8_t *page = (volatile uint8_t *)(uintptr_t)gpa;
-     *   for (size_t i = 0; i < 4096; ++i) page[i] = 0;
-     *   __asm__ volatile("mfence" ::: "memory");
-     */
+    if ((gpa & (FBVBS_PAGE_SIZE - 1U)) != 0U || gpa == 0U) {
+        return;
+    }
+
+#ifndef __FRAMAC__
+    fbvbs_zero_memory((void *)(uintptr_t)gpa, FBVBS_PAGE_SIZE);
+#endif
 }

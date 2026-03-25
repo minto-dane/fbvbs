@@ -1,8 +1,8 @@
 # FBVBS v7 包括的実装ロードマップ
 
-**日付:** 2026-03-23 (retained C hardening 継続中)
+**日付:** 2026-03-24 (retained C hardening 継続中)
 **基準文書:** plan/fbvbs-design.md (FBVBS v7 仕様書)
-**現状:** retained C マイクロハイパーバイザー基盤は広く実装済みだが、production release 完了ではない。Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke は追加済みで、現在は TCG smoke とローカル KVM smoke の両方が retained-C init まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed する。`KCI_SET_WX` は retained-C 内蔵 SHA-384 と approved per-page digest table により runtime binding するようになったが、`PARTITION_LOAD_IMAGE` の authoritative loader/materializer、authoritative な IOMMU/boot integrity bring-up、safe passthrough teardown、`command.c` typed-cast 境界の proof hardening、Phase 4-7 の信頼サービス/フロントエンド実装が残っている。過去の WP 件数は履歴値として保持するが、常に再現済みの release 証拠を意味しない。
+**現状:** retained C マイクロハイパーバイザー基盤は広く実装済みだが、production release 完了ではない。Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke は追加済みで、現在は TCG smoke とローカル KVM smoke の両方が boot artifact materialization、boot catalog ingest、host partition seed を通過し、VMX を expose しない環境では `VMX unavailable` で fail-closed する。`KCI_SET_WX` は retained-C 内蔵 SHA-384 と approved per-page digest table により runtime binding する。さらに、initialized audit path を含む retained-C foundation readiness、measured-boot を伴う high-assurance foundation readiness、host deprivilege readiness をコード上で区別する helper/capability bit を追加した。`make -C hypervisor release-hypervisor` は現行ワークツリーで通る。bare-metal retained boot artifact catalog は host kernel artifact を immutable loaded image bytes に、残りの retained seed artifact を明示 Multiboot module に authoritative に束縛する。`PARTITION_LOAD_IMAGE` は retained-C fixed ELF64 `ET_EXEC` loader として実装済みで、manifest/profile、`entry_ip`、writable and non-executable stack 条件を満たす authoritative image object に対して `Loaded` へ遷移する。残る主 blocker は authoritative な IOMMU bring-up、host deprivilege handoff、Missing RTE guards と timeout を中心とする proof hardening、Phase 4-7 の信頼サービス/フロントエンド実装である。過去の WP 件数は履歴値として保持するが、常に再現済みの release 証拠を意味しない。
 
 ---
 
@@ -49,12 +49,12 @@
 1. ~~**物理ページアロケータ**~~ — ✅ Phase 0C 完了。ビットマップアロケータ + 全統合ポイント接続 (VMCS/HLAT/NPT/IOMMU VT-d/AMD-Vi/CET) (2026-03-22)
 2. ~~**IDT + 例外ハンドラ**~~ — ✅ Phase 1-1 IDT 実装済み (idt.c)
 3. ~~**並行性設計**~~ — ✅ Phase 1-6 完了。BHL + per-CPU 戦略文書化 (fbvbs_concurrency.h) (2026-03-21)
-4. **IOMMU 実機有効化** — DMAR/IVRS パース済み、ページアロケータ接続済み、MMIO 実アクセスは PRODUCTION NOTE
+4. **IOMMU 実機有効化** — DMAR/IVRS パース済み、ページアロケータ接続済み、retained-C foundation は runtime-ready IOMMU と initialized audit path まで評価可能だが、authoritative 実機 bring-up の閉鎖は未完
 5. **ブートパス** — Multiboot2 bare-metal/QEMU smoke は追加済み、UEFI handoff はなお skeleton が残る
-6. **command page proof hardening** — raw typed-cast 境界の縮小、RTE guard 追加、header contract 完備
+6. **WP proof hardening** — `vmx.c` union モデル warning の解消、RTE guard 追加、header/source contract の継続整合
 7. ~~**KCI byte binding**~~ — ✅ full-module SHA-384 verification + approved per-page digest table (2026-03-24)
-8. **Executable image materializer** — `PARTITION_LOAD_IMAGE` が `Loaded` を主張できるだけの authoritative ELF/image loader
-9. **VM exit 緩和列の実装完了** — RSB fill / PBRSB / BHB clear の実動作化
+8. **Broader executable loader profile** — retained-C fixed `ET_EXEC` loader は実装済み。残作業は `ET_DYN`/再配置/boot-time service orchestration のような release 範囲外 profile をどう扱うかの設計閉鎖
+9. ~~**VM exit 緩和列の実装完了**~~ — ✅ RSB fill / PBRSB / BHB clear の実装済み。残課題は実機 placement と proof hardening
 9. ~~**アセンブリバックエンド**~~ — ✅ Phase 1-12 完了。fbvbs_asm.h 集約 (2026-03-21)
 10. ~~**HLAT/翻訳整合性**~~ — ✅ Intel HLAT + AMD NPT + MBEC/GMET、per-partition 状態管理 + KLD 接続 (2026-03-22)
 11. ~~**xAPIC/x2APIC 仮想化**~~ — ✅ Phase 1-7 実装済み (apic.c) (2026-03-21)
@@ -950,17 +950,18 @@
 - ✅ ファジングハーネスインフラ: `fuzz/fuzz_command_page.c` (hypercall dispatch)、`fuzz/fuzz_manifest.c` (manifest/hash 検証)、`fuzz/fuzz_multiboot2.c` (ブートパーサ)
 - ✅ IOMMU パーサファジング: `fuzz/fuzz_iommu.c` (DMAR + IVRS 両パーサ、`#ifdef FUZZ_TARGET` 条件付きリンク)
 - ✅ AFL++ persistent mode + libFuzzer + standalone 3モードサポート
-- ✅ Makefile `fuzz-build` ターゲット追加 (4ハーネス: command_page, manifest, multiboot2, iommu)
+- ✅ Makefile `fuzz-build` ターゲット追加。現在は command_page, manifest, multiboot2, iommu, log_decoder, partition_loader の 6 ハーネスを構築
 - ✅ ファジングハーネスセキュリティ監査 (2026-03-22): state invariant 初期化修正、capability_mask 本番値使用、完全状態リセット、アラインドバッファコピー、size_t 切り捨て防止、_Static_assert 型サイズガード、AFL LEN 符号修正
 - ✅ Multiboot2 パーサ防御強化: `buffer_size` 引数追加 + total_size 外部境界クランプ (boot_multiboot.c)
-- ✅ WP 検証境界文書: `compliance/wp_verification_boundary.md` (24ファイルの WP/非WP 分類 + 根拠)
+- ✅ WP 検証境界文書: `compliance/wp_verification_boundary.md` (current in-scope / out-of-scope file boundary と根拠)
 - ✅ 故障注入テスト: `tests/test_fault_injection.c` — 17テスト (ログ枯渇/飽和、ロールバック拒否、IOMMU fail-closed、watchdog介入+負例、レートリミッタ+ウィンドウ回転、状態制限 (LOADED/RUNNABLE/QUIESCED正例追加)、二重障害 (return value assert)、IDアロケータ枯渇/サイクル、Multiboot パーサ頑健性)
-- ✅ cppcheck 静的解析: `make cppcheck` — 0 errors/0 warnings on 25 sources (warning/performance/portability)
-- ✅ gcov 分岐カバレッジ: `make coverage` — log.c 88%, watchdog.c 100% 分岐カバレッジ
-- ✅ トレーサビリティツール: `tools/traceability_matrix.py` — REQ-XXXX ソース参照スキャン + 孤立分析 (全110要件にソースタグ)
+- ✅ cppcheck 静的解析: `make cppcheck` — 現行 host source set で 0 errors/0 warnings (warning/performance/portability)
+- ✅ gcov 分岐カバレッジ: `make coverage` — command.c 24.44% lines / 57.62% branches executed, vm_policy.c 67.34% / 59.32%, vmx.c 95.00% / 100.00%, log.c 88%, watchdog.c 100%
+- ✅ host-side MSR safety model: userspace test/coverage/fuzz builds は CPU security 内部で deterministic MSR software model を使用し、privileged `RDMSR/WRMSR` によるクラッシュを避けつつ retained-C 挙動を検証
+- ✅ トレーサビリティツール: `tools/traceability_matrix.py` — REQ-XXXX ソース参照スキャン + 孤立分析 (全115要件にソースタグ)
 - ✅ MISRA C:2023 逸脱ログ: `compliance/misra_c_deviation_log.md` — 6逸脱 (asm, _Static_assert, void*, volatile, uintptr_t, goto) + 緩和策 + 承認根拠
 - ✅ 隠れチャネル分析: `compliance/covert_channel_analysis.md` — CC EAL5+ AVA_VAN.5 準拠、7カテゴリ (タイミング/キャッシュ/分岐予測/メモリバス/MDS/IOMMU/デバッグレジスタ)、残留リスク評価
-- ✅ ログデコーダファジング: `fuzz/fuzz_log_decoder.c` (CRC32C、リングバッファ、レートリミッタ、シーケンス枯渇) — 5ハーネス合計
+- ✅ ログデコーダファジング: `fuzz/fuzz_log_decoder.c` (CRC32C、リングバッファ、レートリミッタ、シーケンス枯渇) と `fuzz/fuzz_partition_loader.c` (retained-C ELF64 loader) を追加し、合計 6 ハーネス
 - ✅ VMCS ページリーク修正: vmcs_setup.c `fbvbs_vmcs_apply` VMWRITE失敗時の goto cleanup パターン (CWE-401)
 - ✅ VPID 直列化文書化: vmcs_setup.c BSP-only 実行保証の明文化 (CWE-362)
 - ✅ セキュリティレビュー #6 (2026-03-23): 全変更ファイルの横断監査完了 (14ファイル、3アクション修正)
@@ -1094,7 +1095,7 @@
 - ✅ Gate 3: 5ファジングハーネスビルド
 - ✅ Gate 4: gcov 分岐カバレッジ
 - ✅ Gate 5: 再現可能ビルド検証 + SBOM アーティファクト生成
-- ✅ Gate 6: 110要件トレーサビリティ検証 (孤立要件 = CI 失敗)
+- ✅ Gate 6: 115要件トレーサビリティ検証 (孤立要件 = CI 失敗)
 - ✅ Frama-C WP: 週次スケジュール or `[run-wp]` コミットメッセージトリガー
 - ✅ Makefile `ci` ターゲット: ローカルで全ゲート順次実行
 
@@ -1265,8 +1266,8 @@
 | REQ-1001 TCB 変更独立レビュー | Phase 9-4 | 未実装 |
 | REQ-1002 SPARK 例外不在証明 | Phase 4 | 未実装 |
 | REQ-1003 Rust TCB 制約 | Phase 6 | 未実装 |
-| REQ-1004 継続的ファジング | Phase 9-1 | **部分実装** — 4ハーネス構築済み (command_page, manifest, multiboot2, iommu) + セキュリティ監査完了。CI 統合・IPC/update/sig/log パーサ未着手 |
-| REQ-1005 MC/DC カバレッジ | Phase 9-1 | **部分実装** — `make coverage` gcov ターゲット + 分岐カバレッジレポート。log.c 88%, watchdog.c 100% 分岐。残: lcov HTML レポート、全ファイル目標値設定 |
+| REQ-1004 継続的ファジング | Phase 9-1 | **部分実装** — 6ハーネス構築済み (command_page, manifest, multiboot2, iommu, log_decoder, partition_loader) + セキュリティ監査完了。CI 統合・seed corpus・継続実行基盤は未完 |
+| REQ-1005 MC/DC カバレッジ | Phase 9-1 | **部分実装** — `make coverage` gcov ターゲット + 分岐カバレッジレポート。`command.c` / `vm_policy.c` / `vmx.c` の 0% regression を gate 化済み。残: lcov HTML レポート、全ファイル目標値設定 |
 | REQ-1006 再現可能ビルド | Phase 9-3 | **実装済み** — `make reproducible` (決定性ビルド + 二重ビルド検証) + `make sbom` (SBOM 自動生成) |
 
 ### G.12 Production Readiness (REQ-1100–1105)
@@ -1524,11 +1525,12 @@ Phase 4-6 (UVS) に追加必要:
 
 #### C.6 Fixed Executable Loader 検証（Appendix L.1.E）
 
-Phase 4-2 (KCI) に追加必要:
-- ET_EXEC / ET_DYN のみ許可（他の ELF type は拒否）
-- PT_LOAD セグメントの検証
+retained-C では fixed `ET_EXEC` subset を実装済み:
+- `ET_EXEC` ELF64 のみ許可（`ET_DYN` と他の ELF type は拒否）
+- `PT_LOAD` セグメント検証
 - 動的リンク禁止、圧縮禁止、self-unpack 禁止
-- セグメントオーバーラップ拒否
+- executable entry segment 必須
+- stack page は writable かつ non-executable でなければならない
 - 非 canonical アドレス拒否
 
 #### C.7 VM Exit Payload Layout 適合（Appendix L.1.F）

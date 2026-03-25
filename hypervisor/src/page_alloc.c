@@ -36,6 +36,39 @@ _Static_assert(FBVBS_MAX_PHYS_PAGES <= (1U << 20U),
 _Static_assert(BITMAP_WORDS * sizeof(uint64_t) <= 131072U,
                "page bitmap exceeds 128 KiB");
 
+#if __STDC_HOSTED__ == 1
+#define FBVBS_HOSTED_MAX_PHYS_PAGES 8192U
+#if defined(__FRAMAC__)
+static uint8_t hosted_page_pool[FBVBS_HOSTED_MAX_PHYS_PAGES * PAGE_SIZE];
+#else
+static _Alignas(PAGE_SIZE)
+uint8_t hosted_page_pool[FBVBS_HOSTED_MAX_PHYS_PAGES * PAGE_SIZE];
+#endif
+
+static uint64_t hosted_phys_from_pfn(uint32_t pfn) {
+    if (pfn >= FBVBS_HOSTED_MAX_PHYS_PAGES) {
+        return 0U;
+    }
+    return (uint64_t)(uintptr_t)&hosted_page_pool[(size_t)pfn * PAGE_SIZE];
+}
+
+static int hosted_pfn_from_phys(uint64_t phys_addr, uint32_t *pfn_out) {
+    uintptr_t base = (uintptr_t)&hosted_page_pool[0];
+    uintptr_t end = base + sizeof(hosted_page_pool);
+    uintptr_t addr = (uintptr_t)phys_addr;
+
+    if (pfn_out == NULL ||
+        addr < base ||
+        addr >= end ||
+        ((addr - base) & (PAGE_SIZE - 1U)) != 0U) {
+        return -1;
+    }
+
+    *pfn_out = (uint32_t)((addr - base) / PAGE_SIZE);
+    return 0;
+}
+#endif
+
 /* Allocator state — file-scope static.
  * bitmap: bit=1 means page is FREE (available for allocation).
  * total_pages: number of pages managed.
@@ -172,6 +205,11 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
         if (end_pfn_64 > FBVBS_MAX_PHYS_PAGES) {
             end_pfn_64 = FBVBS_MAX_PHYS_PAGES;
         }
+#if __STDC_HOSTED__ == 1
+        if (end_pfn_64 > FBVBS_HOSTED_MAX_PHYS_PAGES) {
+            end_pfn_64 = FBVBS_HOSTED_MAX_PHYS_PAGES;
+        }
+#endif
 
         /* Now safe to narrow — both values < FBVBS_MAX_PHYS_PAGES */
         start_pfn = (uint32_t)start_pfn_64;
@@ -314,7 +352,12 @@ uint64_t fbvbs_page_alloc(void) {
         alloc_hint = 0U;
     }
 
-    phys_addr = (uint64_t)pfn << PAGE_SHIFT;
+    phys_addr =
+#if __STDC_HOSTED__ == 1
+        hosted_phys_from_pfn(pfn);
+#else
+        (uint64_t)pfn << PAGE_SHIFT;
+#endif
 
     /* Zero the page before returning (REQ-0203).
      * PRODUCTION NOTE: In production, this dereferences the physical address
@@ -344,6 +387,11 @@ int fbvbs_page_free(uint64_t phys_addr) {
         return -1;
     }
 
+#if __STDC_HOSTED__ == 1
+    if (hosted_pfn_from_phys(phys_addr, &pfn) != 0) {
+        return -1;
+    }
+#else
     /* Reject addresses above supported range — prevents uint64_t→uint32_t
      * PFN truncation from aliasing high addresses onto low pages,
      * which would free the wrong page (potential use-after-free). */
@@ -352,6 +400,7 @@ int fbvbs_page_free(uint64_t phys_addr) {
     }
 
     pfn = (uint32_t)(phys_addr >> PAGE_SHIFT);
+#endif
 
     if (pfn >= FBVBS_MAX_PHYS_PAGES || pfn >= total_pages) {
         return -1;

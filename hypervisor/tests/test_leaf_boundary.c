@@ -52,15 +52,15 @@ static void test_leaf_run_models_expected_exit_reasons(void) {
     vcpu.pending_interrupt_vector = 48U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT);
-    assert(leaf_exit.detail.external_interrupt.vector == 48U);
+    assert(FBVBS_LEAF_EXIT_EXTERNAL_INTERRUPT_VECTOR(&leaf_exit) == 48U);
 
     vcpu.pending_interrupt_delivery = 0U;
     vcpu.cr0 = 0U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0x1U, 0x1U, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_CR_ACCESS);
-    assert(leaf_exit.detail.cr_access.cr_number == 0U);
-    assert(leaf_exit.detail.cr_access.access_type == FBVBS_VM_CR_ACCESS_WRITE);
-    assert(leaf_exit.detail.cr_access.value == 0U);
+    assert(FBVBS_LEAF_EXIT_CR_NUMBER(&leaf_exit) == 0U);
+    assert(FBVBS_LEAF_EXIT_CR_ACCESS_TYPE(&leaf_exit) == FBVBS_VM_CR_ACCESS_WRITE);
+    assert(FBVBS_LEAF_EXIT_CR_VALUE(&leaf_exit) == 0U);
 
     vcpu.cr0 = 0x1U;
     vcpu.cr4 = CR4_PCE;
@@ -77,8 +77,8 @@ static void test_leaf_run_models_expected_exit_reasons(void) {
         &leaf_exit
     ) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_CR_ACCESS);
-    assert(leaf_exit.detail.cr_access.cr_number == 4U);
-    assert(leaf_exit.detail.cr_access.value == CR4_PCE);
+    assert(FBVBS_LEAF_EXIT_CR_NUMBER(&leaf_exit) == 4U);
+    assert(FBVBS_LEAF_EXIT_CR_VALUE(&leaf_exit) == CR4_PCE);
 
     vcpu.cr0 = 0x1U;
     vcpu.cr4 = 0U;
@@ -86,31 +86,31 @@ static void test_leaf_run_models_expected_exit_reasons(void) {
     vcpu.rflags = 0x1U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, &intercepted_msr, 1U, 4096U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_MSR_ACCESS);
-    assert(leaf_exit.detail.msr_access.msr_address == 0xC0000080U);
-    assert(leaf_exit.detail.msr_access.is_write == 1U);
-    assert(leaf_exit.detail.msr_access.value == 0x1122334455667788ULL);
+    assert(FBVBS_LEAF_EXIT_MSR_ADDRESS(&leaf_exit) == 0xC0000080U);
+    assert(FBVBS_LEAF_EXIT_MSR_IS_WRITE(&leaf_exit) == 1U);
+    assert(FBVBS_LEAF_EXIT_MSR_VALUE(&leaf_exit) == 0x1122334455667788ULL);
 
     vcpu.rsp = 0x2000U;
     vcpu.rflags = (uint64_t)FBVBS_VM_EPT_ACCESS_WRITE << FBVBS_SYNTHETIC_EPT_ACCESS_SHIFT;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, NULL, 0U, 0U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_EPT_VIOLATION);
-    assert(leaf_exit.detail.ept_violation.guest_physical_address == 0x2000U);
-    assert(leaf_exit.detail.ept_violation.access_bits == FBVBS_VM_EPT_ACCESS_WRITE);
+    assert(FBVBS_LEAF_EXIT_EPT_GPA(&leaf_exit) == 0x2000U);
+    assert(FBVBS_LEAF_EXIT_EPT_ACCESS_BITS(&leaf_exit) == FBVBS_VM_EPT_ACCESS_WRITE);
 
     vcpu.rip = FBVBS_SYNTHETIC_EXIT_RIP_PIO;
     vcpu.rsp = 0x3F8U;
     vcpu.rflags = 1U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_PIO);
-    assert(leaf_exit.detail.pio.port == 0x03F8U);
-    assert(leaf_exit.detail.pio.is_write == 1U);
+    assert(FBVBS_LEAF_EXIT_PIO_PORT(&leaf_exit) == 0x03F8U);
+    assert(FBVBS_LEAF_EXIT_PIO_IS_WRITE(&leaf_exit) == 1U);
 
     vcpu.rip = FBVBS_SYNTHETIC_EXIT_RIP_MMIO;
     vcpu.rsp = 0x2000U;
     vcpu.rflags = 0U;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == OK);
     assert(leaf_exit.exit_reason == FBVBS_VM_EXIT_REASON_MMIO);
-    assert(leaf_exit.detail.mmio.guest_physical_address == 0x2000U);
+    assert(FBVBS_LEAF_EXIT_MMIO_GPA(&leaf_exit) == 0x2000U);
 
     vcpu.rip = FBVBS_SYNTHETIC_EXIT_RIP_SHUTDOWN;
     assert(fbvbs_vmx_leaf_run_vcpu(&caps, &vcpu, 0U, 0U, 0U, 0U, NULL, 0U, 4096U, &leaf_exit) == OK);

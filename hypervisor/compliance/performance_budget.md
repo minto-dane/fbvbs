@@ -13,18 +13,19 @@
 
 **Budget:** Zero additional cost (no VMCALL insertion)
 
-**Design Guarantee:**
-- FreeBSD syscalls execute entirely within the guest (Ring 0 in VMX
-  non-root). No hypercall is issued for normal syscalls.
+**Design Guarantee (target end state):**
+- Once host deprivilege / `VMLAUNCH` is completed, FreeBSD syscalls
+  execute entirely within the guest (Ring 0 in VMX non-root). No
+  hypercall is issued for normal syscalls.
 - EPT maps guest kernel pages with full read/write/execute as appropriate.
 - HLAT/NPT protections operate at page-table level only — they do not
   intercept individual memory accesses, only PTE modifications.
 - The only overhead is EPT address translation (hardware-accelerated,
   typically <1% overhead on modern CPUs with extended page table support).
 
-**Verification:** No VMCALL instruction exists in the FreeBSD kernel
-syscall path. Syscall entry (MSR_LSTAR → syscall handler) runs entirely
-in VMX non-root mode.
+**Current boundary note:** The retained-C repository has not yet
+completed the end-to-end host deprivilege handoff, so this section is a
+performance target, not a claim about the current runtime.
 
 ### 1.2 Tier B Read (KSI Shadow Copy Read)
 

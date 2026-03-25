@@ -403,6 +403,20 @@ static void fbvbs_vmcs_build_host_config(
 /* Track the allocated VMCS page physical address for cleanup */
 static uint64_t g_vmcs_page_phys;
 
+/*@ assigns g_vmcs_page_phys;
+    ensures g_vmcs_page_phys == 0U;
+*/
+static void fbvbs_vmcs_release_current(void)
+{
+    if (g_vmcs_page_phys == 0U) {
+        return;
+    }
+
+    (void)fbvbs_asm_vmclear(g_vmcs_page_phys);
+    (void)fbvbs_page_free(g_vmcs_page_phys);
+    g_vmcs_page_phys = 0U;
+}
+
 /*@ requires \valid_read(config);
     assigns g_vmcs_page_phys;
     ensures \result == 0 || \result == -1;
@@ -557,6 +571,14 @@ int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state)
     if (state == NULL) {
         return -1;
     }
+    state->runtime_state_flags &= ~FBVBS_RUNTIME_HOST_DEPRIVILEGED;
+
+#if !FBVBS_VMLAUNCH_IMPLEMENTED
+    /* Do not program VMCS state if the final handoff cannot complete.
+     * Leaving a live VMCS behind after a guaranteed failure would widen the
+     * partial-initialization surface without any security benefit. */
+    return -1;
+#endif
 
     /* Build VMCS configuration */
     fbvbs_vmcs_build_host_config(
@@ -597,6 +619,7 @@ int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state)
     }
 
     /* VMLAUNCH would be here (assembly) */
+    fbvbs_vmcs_release_current();
 
     return -1;  /* Fail-closed: VMLAUNCH not implemented */
 }

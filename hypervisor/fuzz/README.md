@@ -14,7 +14,11 @@ This directory contains repository-local fuzz entry points for the retained C mi
 - `fuzz_iommu.c`
   - stresses DMAR/IVRS table parsing and bounded IOMMU discovery logic
 - `fuzz_log_decoder.c`
-  - stresses audit-log decoding and structural validation
+  - stresses audit-log ring initialization, append paths, CRC handling,
+    and mirror-info queries
+- `fuzz_partition_loader.c`
+  - stresses the retained-C fixed ELF64 `ET_EXEC` partition loader,
+    including manifest/profile binding, segment validation, and cleanup
 
 ## Current status
 

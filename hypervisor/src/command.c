@@ -770,6 +770,15 @@ static void fbvbs_write_output_bytes(
     }
 }
 
+/*@ requires \valid_read(page);
+    requires request_size == 0U ||
+             \valid(((uint8_t *)destination) + (0 .. request_size - 1));
+    requires request_size <= sizeof(page->body);
+    requires request_size == 0U ||
+             \separated(((uint8_t *)destination) + (0 .. request_size - 1),
+                        page->body + (0 .. request_size - 1));
+    assigns ((uint8_t *)destination)[0 .. request_size - 1];
+*/
 static void fbvbs_read_request_bytes(
     const struct fbvbs_command_page_v1 *page,
     void *destination,
@@ -2139,49 +2148,18 @@ int fbvbs_dispatch_hypercall(
         return INVALID_PARAMETER;
     }
 
-#ifdef __FRAMAC__
-    /* WP model: resolve GPA to a typed pointer via partition lookup.
-       At runtime, the GPA is directly cast to a pointer (identity-mapped).
-       WP's Typed model cannot reason about GPA-derived pointers, so we
-       find the command page through the partition array instead. */
-    {
-        uint32_t _p, _v;
-        page = NULL;
-        /*@ loop invariant 0 <= _p <= FBVBS_MAX_PARTITIONS;
-            loop invariant page == \null || \valid(page);
-            loop assigns _p, _v, page;
-            loop variant FBVBS_MAX_PARTITIONS - _p;
-        */
-        for (_p = 0U; _p < FBVBS_MAX_PARTITIONS; ++_p) {
-            if (!state->partitions[_p].occupied) continue;
-            /*@ loop invariant 0 <= _v <= FBVBS_MAX_VCPUS;
-                loop invariant page == \null || \valid(page);
-                loop assigns _v, page;
-                loop variant FBVBS_MAX_VCPUS - _v;
-            */
-            for (_v = 0U; _v < state->partitions[_p].vcpu_count && _v < FBVBS_MAX_VCPUS; ++_v) {
-                if ((uint64_t)(uintptr_t)&state->partitions[_p].command_pages[_v].page == page_gpa) {
-                    page = &state->partitions[_p].command_pages[_v].page;
-                    break;
-                }
-            }
-            if (page != NULL) break;
-        }
+    owner = fbvbs_find_command_page_owner(state, page_gpa, &owner_vcpu_id);
+    if (owner == NULL || owner_vcpu_id >= owner->vcpu_count ||
+        owner_vcpu_id >= FBVBS_MAX_VCPUS) {
+        return PERMISSION_DENIED;
     }
-#else
-    page = (struct fbvbs_command_page_v1 *)(uintptr_t)page_gpa;
-#endif
-    if (page == NULL) {
-        return INVALID_PARAMETER;
-    }
+    /* Resolve the page through the authenticated partition slot rather than
+       by casting the guest-provided GPA. This prevents any dereference of an
+       unowned GPA and keeps the runtime path aligned with the WP model. */
+    page = &owner->command_pages[owner_vcpu_id].page;
     /*@ assert \valid(page); */
     /*@ assert \valid(registers); */
     /*@ assert fbvbs_state_invariant(state); */
-
-    /* Authenticate page ownership BEFORE reading/writing page contents.
-       This prevents writing error status to an attacker-controlled GPA
-       that doesn't belong to any partition's command page slots. */
-    owner = fbvbs_find_command_page_owner(state, page_gpa, &owner_vcpu_id);
 
     /* TOCTOU hardening: snapshot call_id and input_length once from
        guest-accessible memory.  A concurrent vCPU could modify these

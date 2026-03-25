@@ -91,20 +91,16 @@ struct fbvbs_vmx_leaf_dr_access {
     uint64_t value;         /* value being written (for MOV to DR) */
 };
 
-union fbvbs_vmx_leaf_exit_detail {
-    struct fbvbs_vmx_leaf_external_interrupt external_interrupt;
-    struct fbvbs_vmx_leaf_cr_access cr_access;
-    struct fbvbs_vmx_leaf_msr_access msr_access;
-    struct fbvbs_vmx_leaf_pio pio;
-    struct fbvbs_vmx_leaf_mmio mmio;
-    struct fbvbs_vmx_leaf_ept_violation ept_violation;
-    struct fbvbs_vmx_leaf_dr_access dr_access;
+struct fbvbs_vmx_leaf_exit_detail {
+    uint64_t word0;
+    uint64_t word1;
+    uint64_t word2;
 };
 
 struct fbvbs_vmx_leaf_exit {
     uint32_t exit_reason;
     uint32_t reserved0;
-    union fbvbs_vmx_leaf_exit_detail detail;
+    struct fbvbs_vmx_leaf_exit_detail detail;
 };
 
 _Static_assert(sizeof(struct fbvbs_vcpu) == 112U, "fbvbs_vcpu ABI drift");
@@ -113,14 +109,153 @@ _Static_assert(offsetof(struct fbvbs_vcpu, cr4) == 48U, "fbvbs_vcpu.cr4 offset d
 _Static_assert(offsetof(struct fbvbs_vcpu, dr0) == 64U, "fbvbs_vcpu.dr0 offset drift");
 _Static_assert(sizeof(struct fbvbs_vmx_capabilities) == 32U, "fbvbs_vmx_capabilities ABI drift");
 _Static_assert(sizeof(struct fbvbs_vmx_leaf_exit) == 32U, "fbvbs_vmx_leaf_exit ABI drift");
-_Static_assert(sizeof(union fbvbs_vmx_leaf_exit_detail) == 24U, "fbvbs_vmx_leaf_exit_detail ABI drift");
+_Static_assert(sizeof(struct fbvbs_vmx_leaf_exit_detail) == 24U, "fbvbs_vmx_leaf_exit_detail ABI drift");
 _Static_assert(offsetof(struct fbvbs_vmx_leaf_exit, detail) == 8U, "fbvbs_vmx_leaf_exit.detail offset drift");
 _Static_assert(
-    offsetof(struct fbvbs_vmx_leaf_exit, detail.mmio.value) == 24U,
-    "fbvbs_vmx_leaf_exit.detail.mmio.value offset drift"
+    offsetof(struct fbvbs_vmx_leaf_exit, detail.word2) == 24U,
+    "fbvbs_vmx_leaf_exit.detail.word2 offset drift"
 );
 
+#define FBVBS_LEAF_EXIT_EXTERNAL_INTERRUPT_VECTOR(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word0 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_CR_NUMBER(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word0 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_CR_ACCESS_TYPE(exit_ptr) \
+    ((uint32_t)(((exit_ptr)->detail.word0 >> 32) & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_CR_VALUE(exit_ptr) \
+    ((exit_ptr)->detail.word1)
+
+#define FBVBS_LEAF_EXIT_MSR_ADDRESS(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word0 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_MSR_IS_WRITE(exit_ptr) \
+    ((uint32_t)(((exit_ptr)->detail.word0 >> 32) & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_MSR_VALUE(exit_ptr) \
+    ((exit_ptr)->detail.word1)
+
+#define FBVBS_LEAF_EXIT_PIO_PORT(exit_ptr) \
+    ((uint16_t)((exit_ptr)->detail.word0 & 0xFFFFULL))
+
+#define FBVBS_LEAF_EXIT_PIO_ACCESS_SIZE(exit_ptr) \
+    ((uint8_t)(((exit_ptr)->detail.word0 >> 16) & 0xFFULL))
+
+#define FBVBS_LEAF_EXIT_PIO_IS_WRITE(exit_ptr) \
+    ((uint8_t)(((exit_ptr)->detail.word0 >> 24) & 0xFFULL))
+
+#define FBVBS_LEAF_EXIT_PIO_VALUE(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word1 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_MMIO_GPA(exit_ptr) \
+    ((exit_ptr)->detail.word0)
+
+#define FBVBS_LEAF_EXIT_MMIO_ACCESS_SIZE(exit_ptr) \
+    ((uint8_t)((exit_ptr)->detail.word1 & 0xFFULL))
+
+#define FBVBS_LEAF_EXIT_MMIO_IS_WRITE(exit_ptr) \
+    ((uint8_t)(((exit_ptr)->detail.word1 >> 8) & 0xFFULL))
+
+#define FBVBS_LEAF_EXIT_MMIO_VALUE(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word2 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_EPT_GPA(exit_ptr) \
+    ((exit_ptr)->detail.word0)
+
+#define FBVBS_LEAF_EXIT_EPT_ACCESS_BITS(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word1 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_DR_NUMBER(exit_ptr) \
+    ((uint32_t)((exit_ptr)->detail.word0 & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(exit_ptr) \
+    ((uint32_t)(((exit_ptr)->detail.word0 >> 32) & 0xFFFFFFFFULL))
+
+#define FBVBS_LEAF_EXIT_DR_VALUE(exit_ptr) \
+    ((exit_ptr)->detail.word1)
+
+static inline void fbvbs_leaf_exit_set_external_interrupt(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint32_t vector
+) {
+    leaf_exit->detail.word0 = (uint64_t)vector;
+    leaf_exit->detail.word1 = 0U;
+    leaf_exit->detail.word2 = 0U;
+}
+
+static inline void fbvbs_leaf_exit_set_cr_access(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint32_t cr_number,
+    uint32_t access_type,
+    uint64_t value
+) {
+    leaf_exit->detail.word0 = (uint64_t)cr_number | ((uint64_t)access_type << 32);
+    leaf_exit->detail.word1 = value;
+    leaf_exit->detail.word2 = 0U;
+}
+
+static inline void fbvbs_leaf_exit_set_msr_access(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint32_t msr_address,
+    uint32_t is_write,
+    uint64_t value
+) {
+    leaf_exit->detail.word0 = (uint64_t)msr_address | ((uint64_t)is_write << 32);
+    leaf_exit->detail.word1 = value;
+    leaf_exit->detail.word2 = 0U;
+}
+
+static inline void fbvbs_leaf_exit_set_ept_violation(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint64_t guest_physical_address,
+    uint32_t access_bits
+) {
+    leaf_exit->detail.word0 = guest_physical_address;
+    leaf_exit->detail.word1 = (uint64_t)access_bits;
+    leaf_exit->detail.word2 = 0U;
+}
+
+static inline void fbvbs_leaf_exit_set_pio(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint16_t port,
+    uint8_t access_size,
+    uint8_t is_write,
+    uint32_t value
+) {
+    leaf_exit->detail.word0 = (uint64_t)port |
+        ((uint64_t)access_size << 16) |
+        ((uint64_t)is_write << 24);
+    leaf_exit->detail.word1 = (uint64_t)value;
+    leaf_exit->detail.word2 = 0U;
+}
+
+static inline void fbvbs_leaf_exit_set_mmio(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint64_t guest_physical_address,
+    uint8_t access_size,
+    uint8_t is_write,
+    uint64_t value
+) {
+    leaf_exit->detail.word0 = guest_physical_address;
+    leaf_exit->detail.word1 = (uint64_t)access_size | ((uint64_t)is_write << 8);
+    leaf_exit->detail.word2 = value;
+}
+
+static inline void fbvbs_leaf_exit_set_dr_access(
+    struct fbvbs_vmx_leaf_exit *leaf_exit,
+    uint32_t dr_number,
+    uint32_t access_type,
+    uint64_t value
+) {
+    leaf_exit->detail.word0 = (uint64_t)dr_number | ((uint64_t)access_type << 32);
+    leaf_exit->detail.word1 = value;
+    leaf_exit->detail.word2 = 0U;
+}
+
 /*@ requires \valid(caps) || caps == \null;
+    assigns *caps;
     behavior null_ptr:
       assumes caps == \null;
       assigns \nothing;

@@ -551,6 +551,14 @@ int fbvbs_amdvi_init(struct fbvbs_global_security_state *state)
         return -1;
     }
 
+#if !FBVBS_HOST_IOMMU_POLICY_IMPLEMENTED
+    /* Detection may discover IVRS units and capabilities, but retained-C
+     * does not yet build an authoritative host device-table/domain policy.
+     * Do not program command/event buffers or enable translation until the
+     * host DMA isolation model exists end-to-end. */
+    return -1;
+#endif
+
 #if defined(__FRAMAC__)
     state->iommu.dma_remapping = 1;
     state->iommu.interrupt_remapping = 1;

@@ -33,23 +33,25 @@ host operating system and its guest virtual machines.
 |-----------|-------|
 | TOE Type | Separation kernel / microhypervisor |
 | Implementation Language | C11 with ACSL formal annotations |
-| Source Size | ~21K SLOC (24 source files, 4 header files) |
+| Source Size | ~25K SLOC (26 source files, 7 header files) |
 | WP-Verification Scope | 9 files targeted; current proof status is tracked separately in `wp_verification_boundary.md` |
 | Target Architecture | x86-64 (Intel VT-x + EPT, AMD-V + NPT) |
 | Required Hardware | CPU with VMX/SVM, EPT/NPT, IOMMU (VT-d/AMD-Vi), optional TPM 2.0 |
 | Operating Mode | VMX root (ring 0) / SVM host mode |
-| Hosted OS | FreeBSD (deprivileged in VMX non-root) |
+| Hosted OS | FreeBSD (target end state: deprivileged in VMX non-root; current retained-C boundary has not completed the handoff) |
 
 ### 1.3 TOE Overview
 
 FBVBS operates as a firmware-loaded separation kernel between the
-hardware platform and all software partitions. The repository currently
-contains both a Multiboot2 bare-metal path and an in-progress UEFI path,
-and the QEMU smoke path uses Multiboot2/GRUB. In the intended end state it boots via firmware,
-establishes VMX/SVM root mode, deprivileges the FreeBSD host into a
+hardware platform and all software partitions. The current reproducible
+repository evidence path is Multiboot2/GRUB under QEMU smoke; an
+additional UEFI path exists in-progress but is not the primary evidence
+path today. In the intended end state it boots via firmware, establishes VMX/SVM root mode, deprivileges the FreeBSD host into a
 guest partition, and manages additional guest VMs and trusted service
-partitions. All inter-partition communication is mediated through a
-hypercall interface with capability-based access control.
+partitions. The current retained-C repository does not yet complete that
+host handoff and keeps the runtime fail-closed instead. All inter-partition
+communication is mediated through a hypercall interface with capability-based
+access control.
 
 The TOE provides:
 
@@ -57,8 +59,10 @@ The TOE provides:
    translation (EPT on Intel, NPT on AMD) and IOMMU DMA remapping
 2. **Code integrity** via kernel code integrity (KCI) measurement with
    W^X enforcement through EPT/HLAT/NPT page permissions
-3. **Audit logging** via a dual-ring primary + mirror log with CRC32C
-   integrity protection
+3. **Audit logging** via a target dual-path primary + mirror design;
+   the current retained-C repository implements the in-memory mirror
+   ring and boot-console output, but not a full authoritative primary
+   OOB sink
 4. **CPU vulnerability mitigations** via per-VM-exit IBPB, VERW, RSB
    fill, L1D flush, and CR/DR pinning
 5. **Device isolation** via per-partition IOMMU domains with interrupt
@@ -80,7 +84,7 @@ The TOE consists of the following subsystems:
 | IOMMU | iommu_vtd.c, iommu_amdvi.c | DMAR/IVRS parsing, domain management |
 | Translation Integrity | hlat.c, amd_npt.c | HLAT (Intel), NPT write-protect (AMD) |
 | Audit Log | log.c | Ring buffer with CRC32C, spinlock synchronization |
-| Boot | uefi_entry.c, early_init.c, boot_multiboot.c | UEFI entry, post-ExitBootServices init |
+| Boot | boot_multiboot.c, early_init.c, uefi_entry.c | Current evidence path: Multiboot2 parse + QEMU bare-metal smoke; UEFI handoff remains in progress |
 | Multi-Processor | mp_init.c | MADT/SRAT parsing, AP init, IPI, TLB shootdown |
 | Platform Services | idt.c, apic.c, watchdog.c | IDT, APIC virtualization, preemption timer |
 | Kernel Integration | kernel.c | Hypervisor init, model code |

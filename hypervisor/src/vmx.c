@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "fbvbs_asm.h"
 #include "fbvbs_leaf_vmx.h"
 
 /*@ requires \valid(caps);
@@ -52,6 +53,7 @@ static uint32_t fbvbs_leaf_synthetic_ept_access_bits(const struct fbvbs_vcpu *vc
 }
 
 /*@ requires \valid(caps) || caps == \null;
+    assigns *caps;
     behavior null_ptr:
       assumes caps == \null;
       assigns \nothing;
@@ -74,12 +76,7 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
 
 #if defined(__x86_64__) || defined(_M_X64)
     /* CPUID leaf 1: basic feature flags */
-    eax = 1U;
-    ecx = 0U;
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "0"(eax), "2"(ecx)
-                     : "memory");
+    fbvbs_asm_cpuid(1U, 0U, &eax, &ebx, &ecx, &edx);
 
     /* Check for VMX support (CPUID.01H:ECX.VMX[bit 5]) */
     if (ecx & (1U << 5)) {
@@ -92,12 +89,7 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     }
 
     /* Check for extended features (CPUID.07H) */
-    eax = 7U;
-    ecx = 0U;
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "0"(eax), "2"(ecx)
-                     : "memory");
+    fbvbs_asm_cpuid(7U, 0U, &eax, &ebx, &ecx, &edx);
 
     /* Check for MBEC support (CPUID.07H:ECX.MBEC[bit 6]) */
     if (ecx & (1U << 6)) {
@@ -110,12 +102,7 @@ int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps) {
     }
 
     /* Check for HLAT support (CPUID.(EAX=7,ECX=2):EAX[bit 5]) */
-    eax = 7U;
-    ecx = 2U;
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "0"(eax), "2"(ecx)
-                     : "memory");
+    fbvbs_asm_cpuid(7U, 2U, &eax, &ebx, &ecx, &edx);
     if (eax & (1U << 5)) {
         caps->hlat_available = 1U;
     }
@@ -194,55 +181,75 @@ int fbvbs_vmx_leaf_run_vcpu(
 
     if (vcpu->pending_interrupt_delivery != 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
-        leaf_exit->detail.external_interrupt.vector = vcpu->pending_interrupt_vector;
+        fbvbs_leaf_exit_set_external_interrupt(
+            leaf_exit,
+            vcpu->pending_interrupt_vector
+        );
         return OK;
     }
     if (pinned_cr0_mask != 0U && (vcpu->cr0 & pinned_cr0_mask) != pinned_cr0_value) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
-        leaf_exit->detail.cr_access.cr_number = 0U;
-        leaf_exit->detail.cr_access.access_type = FBVBS_VM_CR_ACCESS_WRITE;
-        leaf_exit->detail.cr_access.value = vcpu->cr0;
+        fbvbs_leaf_exit_set_cr_access(
+            leaf_exit,
+            0U,
+            FBVBS_VM_CR_ACCESS_WRITE,
+            vcpu->cr0
+        );
         return OK;
     }
     if (pinned_cr4_mask != 0U && (vcpu->cr4 & pinned_cr4_mask) != pinned_cr4_value) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
-        leaf_exit->detail.cr_access.cr_number = 4U;
-        leaf_exit->detail.cr_access.access_type = FBVBS_VM_CR_ACCESS_WRITE;
-        leaf_exit->detail.cr_access.value = vcpu->cr4;
+        fbvbs_leaf_exit_set_cr_access(
+            leaf_exit,
+            4U,
+            FBVBS_VM_CR_ACCESS_WRITE,
+            vcpu->cr4
+        );
         return OK;
     }
     if (intercepted_msr_count != 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
-        leaf_exit->detail.msr_access.msr_address = intercepted_msrs[0];
         /* Synthetic convention: RFLAGS bit 0 selects RDMSR/WRMSR and RSP
          * carries the 64-bit value used by the policy layer tests. */
-        leaf_exit->detail.msr_access.is_write = (uint32_t)(vcpu->rflags & 0x1U);
-        leaf_exit->detail.msr_access.value = vcpu->rsp;
+        fbvbs_leaf_exit_set_msr_access(
+            leaf_exit,
+            intercepted_msrs[0],
+            (uint32_t)(vcpu->rflags & 0x1U),
+            vcpu->rsp
+        );
         return OK;
     }
     if (mapped_bytes == 0U) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
         /* Synthetic convention: RSP is the faulting GPA and RFLAGS bits
          * 10:8 encode the read/write/execute access bitmap. */
-        leaf_exit->detail.ept_violation.guest_physical_address = vcpu->rsp;
-        leaf_exit->detail.ept_violation.access_bits =
-            fbvbs_leaf_synthetic_ept_access_bits(vcpu);
+        fbvbs_leaf_exit_set_ept_violation(
+            leaf_exit,
+            vcpu->rsp,
+            fbvbs_leaf_synthetic_ept_access_bits(vcpu)
+        );
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_PIO) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
-        leaf_exit->detail.pio.port = (uint16_t)(vcpu->rsp & 0xFFFFU);
-        leaf_exit->detail.pio.access_size = 4U;
-        leaf_exit->detail.pio.is_write = (uint8_t)(vcpu->rflags & 0x1U);
-        leaf_exit->detail.pio.value = (uint32_t)vcpu->rflags;
+        fbvbs_leaf_exit_set_pio(
+            leaf_exit,
+            (uint16_t)(vcpu->rsp & 0xFFFFU),
+            4U,
+            (uint8_t)(vcpu->rflags & 0x1U),
+            (uint32_t)vcpu->rflags
+        );
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_MMIO) {
         leaf_exit->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
-        leaf_exit->detail.mmio.guest_physical_address = vcpu->rsp;
-        leaf_exit->detail.mmio.access_size = 8U;
-        leaf_exit->detail.mmio.is_write = (uint8_t)(vcpu->rflags & 0x1U);
-        leaf_exit->detail.mmio.value = (uint32_t)vcpu->rflags;
+        fbvbs_leaf_exit_set_mmio(
+            leaf_exit,
+            vcpu->rsp,
+            8U,
+            (uint8_t)(vcpu->rflags & 0x1U),
+            (uint64_t)(uint32_t)vcpu->rflags
+        );
         return OK;
     }
     if (vcpu->rip == FBVBS_SYNTHETIC_EXIT_RIP_SHUTDOWN) {

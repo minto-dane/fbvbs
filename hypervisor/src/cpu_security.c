@@ -28,6 +28,7 @@
 
 #include <stddef.h>
 
+#include "fbvbs_asm.h"
 #include "fbvbs_cpu_security.h"
 
 #define ACPI_SIG_TPM2 0x324D5054U
@@ -73,8 +74,19 @@ static void cpuid_query(uint32_t leaf, uint32_t subleaf,
 }
 
 /* ================================================================
- * Internal MSR read helper (model-level stub)
+ * Internal MSR read helper
+ *
+ * Bare-metal builds use real RDMSR/WRMSR. Host-side unit tests,
+ * coverage, fuzzing, and static-analysis builds run in userspace and
+ * must never execute privileged MSR instructions; they use a minimal
+ * deterministic software model instead.
  * ================================================================ */
+
+#if !defined(__FRAMAC__) && !defined(FBVBS_BAREMETAL_BUILD)
+static uint64_t g_model_ia32_spec_ctrl;
+static uint64_t g_model_ia32_pred_cmd;
+static uint64_t g_model_ia32_flush_cmd;
+#endif
 
 /*@ assigns \nothing;
     ensures 0 <= \result;
@@ -84,7 +96,7 @@ static uint64_t msr_read(uint32_t msr_addr)
 #if defined(__FRAMAC__)
     (void)msr_addr;
     return 0;
-#elif defined(__x86_64__) || defined(__i386__)
+#elif defined(FBVBS_BAREMETAL_BUILD) && (defined(__x86_64__) || defined(__i386__))
     uint32_t lo;
     uint32_t hi;
 
@@ -94,8 +106,16 @@ static uint64_t msr_read(uint32_t msr_addr)
                      : "memory");
     return ((uint64_t)hi << 32) | (uint64_t)lo;
 #else
-    (void)msr_addr;
-    return 0;
+    switch (msr_addr) {
+        case MSR_IA32_SPEC_CTRL:
+            return g_model_ia32_spec_ctrl;
+        case MSR_IA32_PRED_CMD:
+            return g_model_ia32_pred_cmd;
+        case MSR_IA32_FLUSH_CMD:
+            return g_model_ia32_flush_cmd;
+        default:
+            return 0;
+    }
 #endif
 }
 
@@ -109,7 +129,7 @@ static void msr_write(uint32_t msr_addr, uint64_t value)
 #if defined(__FRAMAC__)
     (void)msr_addr;
     (void)value;
-#elif defined(__x86_64__) || defined(__i386__)
+#elif defined(FBVBS_BAREMETAL_BUILD) && (defined(__x86_64__) || defined(__i386__))
     uint32_t lo = (uint32_t)(value & 0xFFFFFFFFU);
     uint32_t hi = (uint32_t)(value >> 32);
 
@@ -118,8 +138,19 @@ static void msr_write(uint32_t msr_addr, uint64_t value)
                      : "c"(msr_addr), "a"(lo), "d"(hi)
                      : "memory");
 #else
-    (void)msr_addr;
-    (void)value;
+    switch (msr_addr) {
+        case MSR_IA32_SPEC_CTRL:
+            g_model_ia32_spec_ctrl = value;
+            break;
+        case MSR_IA32_PRED_CMD:
+            g_model_ia32_pred_cmd = value;
+            break;
+        case MSR_IA32_FLUSH_CMD:
+            g_model_ia32_flush_cmd = value;
+            break;
+        default:
+            break;
+    }
 #endif
 }
 
@@ -1180,10 +1211,7 @@ void fbvbs_vmexit_mitigate(const struct fbvbs_vuln_profile *vuln,
        buffer entries that VERW does not clear. This model-level placement
        is correct for verification but insufficient for hardware MDS. */
     if (vuln->need_verw != 0U) {
-#if defined(__x86_64__) && !defined(__FRAMAC__)
-        uint16_t ds_sel = 0;
-        __asm__ volatile("verw %0" : : "m"(ds_sel) : "cc", "memory");
-#endif
+        fbvbs_asm_verw();
     }
 }
 
@@ -1218,8 +1246,7 @@ void fbvbs_vmentry_mitigate(const struct fbvbs_vuln_profile *vuln,
        Must be as close to VM entry as possible — any subsequent
        instruction can create new fill buffer entries. */
     if (vuln->need_verw != 0U) {
-        uint16_t ds_sel = 0;
-        __asm__ volatile("verw %0" : : "m"(ds_sel) : "cc", "memory");
+        fbvbs_asm_verw();
     }
 }
 

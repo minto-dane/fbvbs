@@ -1,21 +1,23 @@
 # FBVBS エージェント引き継ぎサマリー
 
-**日付:** 2026-03-23
+**日付:** 2026-03-24
 **目的:** FBVBS を全く知らないエージェントセッション向けの完全なプロジェクトコンテキスト。現時点の bare-metal/QEMU 状態と release blocker も含む。
 
 ---
 
 ## 1. FBVBS とは
 
-FBVBS (Formally-verified Bare-metal Virtual Boot Security) は x86-64 向けの**政府グレードセキュリティハイパーバイザー**。FreeBSD の下で動作し、OS カーネルを VMX non-root に降格させ、OS 自身が回避できないセキュリティ不変条件を強制する。
+FBVBS (Formally-verified Bare-metal Virtual Boot Security) は x86-64 向けの**政府グレードセキュリティハイパーバイザー**。設計の最終状態では FreeBSD ホストを VMX non-root へ降格させ、OS 自身が回避できないセキュリティ不変条件を強制する。現在の retained-C リポジトリはその host handoff をまだ完了しておらず、必要箇所では fail-closed を返す。
 
 **主要特性:**
 - C11 + ACSL (ANSI/ISO C Specification Language) アノテーション付き
 - Frama-C WP は継続運用中。履歴上の高い証明率はあるが、release 判定では現行ワークツリー上での再現と proof gap 確認が必要
 - Intel VT-x + EPT + HLAT / AMD-V + NPT 両プラットフォーム対応
 - IOMMU (VT-d / AMD-Vi) 必須 (DMA 分離)
-- Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke 経路あり。現在は TCG smoke とローカル KVM smoke の両方で retained-C init まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed
-- ソース 24 ファイル、ヘッダ 6 ファイル、約 25K SLOC
+- Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke 経路あり。現在は TCG smoke とローカル KVM smoke の両方で boot artifact materialization、boot catalog ingest、host partition seed まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed
+- bare-metal host kernel artifact (`0x1700`) は immutable loaded image bytes に束縛され、追加 boot module は `artifact:0x...` / `fbvbs.object_id=0x...` cmdline で artifact object に束縛できる
+- retained-C foundation readiness は VMX + runtime-ready IOMMU + initialized audit path を要件とし、high-assurance readiness はそれに measured boot を追加する
+- ソース 26 ファイル、ヘッダ 7 ファイル、ファズハーネス 6 本、約 25K SLOC
 
 **アーキテクチャ:**
 ```
@@ -24,7 +26,7 @@ FBVBS (Formally-verified Bare-metal Virtual Boot Security) は x86-64 向けの*
 |  EPT/NPT | IOMMU | VMCS | 監査ログ | スケジューラ   |
 +-----+------+------+------+------+-----------------+
 | KCI | KSI  | IKS  | SKS  | UVS  | FreeBSD ホスト  |
-|(P4) |(P4)  |(P4)  |(P4)  |(P4)  | (降格済み)       |
+|(P4) |(P4)  |(P4)  |(P4)  |(P4)  | (target: 降格済み) |
 +-----+------+------+------+------+-----------------+
 ```
 
@@ -53,7 +55,7 @@ KCI=カーネルコード完全性, KSI=カーネル状態完全性, IKS=アイ�
       fbvbs_asm.h              -- アセンブリ関数スタブ (MSR, VMWRITE 等)
       fbvbs_concurrency.h      -- 並行性プリミティブ
       fbvbs_efi.h              -- UEFI 型定義
-    src/  (24 ファイル)
+    src/  (26 ファイル)
       cpu_security.c           -- CPU 機能検出、脆弱性プロファイリング、緩和策
       vmx.c                    -- VMX プローブ/セットアップ/実行コア
       vmcs_setup.c             -- VMCS フィールド設定 + ホスト降格
@@ -82,12 +84,13 @@ KCI=カーネルコード完全性, KSI=カーネル状態完全性, IKS=アイ�
       test_leaf_boundary.c     -- VMX リーフ関数契約テスト
       test_policy_security.c   -- ポリシー/capability テスト
       test_fault_injection.c   -- 17 フォルトインジェクションテスト
-    fuzz/  (5 ハーネス)
+    fuzz/  (6 ハーネス)
       fuzz_command_page.c      -- Hypercall ディスパッチファザー
       fuzz_manifest.c          -- マニフェスト/ハッシュファザー
       fuzz_multiboot2.c        -- Multiboot2 パーサーファザー
       fuzz_iommu.c             -- IOMMU DMAR/IVRS パーサーファザー
       fuzz_log_decoder.c       -- 監査ログサブシステムファザー
+      fuzz_partition_loader.c  -- retained-C ELF64 partition loader ファザー
     compliance/  (11 文書)
       wp_verification_boundary.md        -- Frama-C WP 証明境界
       retained_c_leaf_boundary.md        -- C サブセット保証
@@ -116,10 +119,10 @@ KCI=カーネルコード完全性, KSI=カーネル状態完全性, IKS=アイ�
 make -C hypervisor ci
 
 # 個別ゲート:
-make -C hypervisor analyze      # GCC -fanalyzer (24 ソース, -Werror)
+make -C hypervisor analyze      # GCC -fanalyzer (retained host-analyzed source set, -Werror)
 make -C hypervisor test         # 3 テストスイート
-make -C hypervisor cppcheck     # cppcheck 静的解析 (24 ソース)
-make -C hypervisor fuzz-build   # 5 ファズハーネスビルド
+make -C hypervisor cppcheck     # cppcheck 静的解析
+make -C hypervisor fuzz-build   # 6 ファズハーネスビルド
 make -C hypervisor coverage     # gcov ブランチカバレッジ
 make -C hypervisor reproducible # 決定論的ビルド検証
 make -C hypervisor sbom         # SBOM 生成
@@ -131,12 +134,14 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 ```
 
 **現在の検証状態 (コミット前にすべて通過必須):**
-- GCC -fanalyzer: 24/24 ソース、警告 0
+- GCC -fanalyzer: 現行 retained host-analyzed source setで警告 0
 - テスト: 3/3 スイート (leaf boundary, policy security, fault injection=17 テスト)
-- cppcheck: 24 ソース、エラー 0
-- ファズハーネス: 5/5 ビルド成功
+- cppcheck: 現行 source setでエラー 0
+- ファズハーネス: 6/6 ビルド成功
+- coverage: `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%; zero-coverage regression は gate で拒否
+- host-side userspace 検証は privileged `RDMSR/WRMSR` を直接実行せず、CPU security 内部の deterministic MSR software model を使う
 - トレーサビリティ: 115/115 要件がソースにタグ付き
-- `make -C hypervisor frama-c-wp`: 実行可能だが proof gap を残す。特に `command.c` typed-cast 境界、RTE guards、public API contract が継続課題
+- `make -C hypervisor frama-c-wp`: 実行可能だが proof gap を残す。特に `vmx.c` の Typed+Cast union warning、Missing RTE guards、一部 timeout が継続課題
 
 ---
 
@@ -152,7 +157,7 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 | 6 | Rust no_std FreeBSD フロントエンド | **ブロック** | Rust ツールチェーン未導入 |
 | 7 | bhyve/vmm 統合 | **ブロック** | Phase 6 依存 |
 | 8 | マルチソケット (MADT/SRAT/AP/IPI/TLB/NUMA) | 完了 | |
-| 9 | 品質保証・リリース準備 | 進行中 | release-hypervisor と QEMU smoke は通るが、proof gap と release blocker の是正が継続中 |
+| 9 | 品質保証・リリース準備 | 進行中 | release-hypervisor は retained-C foundation 境界として通る。proof gap と host deprivilege blocker の是正が継続中。`PARTITION_LOAD_IMAGE` は authoritative image object を fixed ELF64 `ET_EXEC` subset として materialize し、boot artifact registry は bare-metal retained seed setを authoritative に束縛する |
 
 **ブロック中のフェーズは外部ツールチェーン/アーキテクチャ決定が必要。** retained C マイクロハイパーバイザー基盤はかなり進んでいるが、production release 完了とはみなさないこと。
 
@@ -167,7 +172,7 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 - `-wp-model Typed+Cast` 使用 (クロスタイプキャスト対応)
 - `memory_utils.c` と `boot_multiboot.c` は除外 (void* が Typed モデルと非互換)
 - 13 プラットフォーム/ハードウェアファイルは除外 (MMIO, MSR, VMCS, CPUID)
-- 現在の主な proof gap は `command.c` typed-cast 境界、Missing RTE guards、一部 timeout
+- 現在の主な proof gap は Missing RTE guards、一部 timeout、asm/low-level path の proof hardening
 - `#ifdef __FRAMAC__` モデルコードが asm スピンロックと GPA 解決を置換
 
 ### 5.2 セキュリティアーキテクチャ
@@ -180,6 +185,7 @@ make -C hypervisor frama-c-wp   # 注意: 全ファイル実行には 8GB+ RAM �
 - **監査ログ**: デュアルパス (一次 UART + ミラー EPT 読取専用)、CRC32C、レート制限
 - **トゥームストーンパーティション**: 破棄スロットは再利用しない (単調増加 ID)
 - **TOCTOU 防止**: コマンドページフィールドを1回キャッシュ (call_id, input_length, flags, output_gpa, caller_sequence, caller_nonce)
+- **command page trust boundary**: ownerless GPA は拒否し、dispatcher は guest 提供 GPA を raw pointer 化せず partition-owned command-page slot からのみ page を解決する
 - **Fail-closed**: すべてのエラーパスは許可ではなく拒否/fault
 
 ### 5.3 要件

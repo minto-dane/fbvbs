@@ -228,8 +228,10 @@ start64:
     lea boot_msg_64(%rip), %rdi
     call fbvbs_boot_console_puts
 
-    /* Zero-extend EDI→RDI (Multiboot info pointer) */
-    mov %edi, %edi
+    /* Reload the original 32-bit Multiboot info pointer after the
+     * runtime/console calls above. RDI is caller-saved and those
+     * helpers are free to clobber it. */
+    mov saved_multiboot_ptr(%rip), %edi
     call fbvbs_kernel_main
 
     /* Should never return */

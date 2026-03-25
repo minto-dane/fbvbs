@@ -87,25 +87,25 @@ FBVBS key material isolation guarantees:
 
 ## 3. Audit Trail Protection Under Compromise (P1/P2)
 
-### 3.1 Log Architecture Independence
+### 3.1 Log Architecture Independence (target design vs current retained-C boundary)
 
 FBVBS uses dual-path logging (REQ-0100, REQ-0103):
 
 ```
 Microhypervisor
     |
-    +---> Primary Log (UART/OOB) -- write-only, not guest-accessible
-    |         Serial output, no guest memory dependency
+    +---> Primary Log (UART/OOB) -- target end state
+    |         authoritative external observation path
     |
-    +---> Mirror Log (EPT read-only) -- guest can read, cannot write
-              Ring buffer in hypervisor state, CRC32C integrity
+    +---> Mirror Log -- current retained-C implementation
+              in-memory ring buffer in hypervisor state, CRC32C integrity
 ```
 
 ### 3.2 Integrity Guarantees
 
 | Property | Mechanism | Status |
 |----------|-----------|--------|
-| Primary log independence | UART serial output, no guest memory | Implemented (log.c) |
+| Primary log independence | authoritative UART/OOB sink outside guest memory | Target design; not fully implemented in retained-C runtime |
 | Mirror log immutability | EPT read-only mapping (REQ-0105) | Design (Phase 2) |
 | Record integrity | CRC32C per record | Implemented (log.c) |
 | Cryptographic integrity | HMAC-SHA-256 per record (REQ-0104) | Phase 5 (crypto) |
@@ -126,9 +126,9 @@ Microhypervisor
 
 ## 4. Recovery Sequences
 
-### 4.1 Single Service Restart (P2)
+### 4.1 Single Service Restart (P2, future Phase 4+ runtime)
 
-When a trusted service partition faults:
+When a trusted service partition faults in the full service-enabled design:
 
 1. **Detection**: `FBVBS_EVENT_PARTITION_FAULT` in audit log.
    vCPUs transition to `VCPU_STATE_FAULTED` -- no scheduling.
@@ -143,6 +143,11 @@ When a trusted service partition faults:
    ```
    VM_DESTROY(partition_id)    -- zeroes memory, releases resources
    VM_CREATE(new_config)       -- fresh partition with new ID
+
+**Current boundary note:** The retained-C repository cannot yet execute
+this sequence end-to-end because `PARTITION_LOAD_IMAGE` is still
+fail-closed, so trusted-service partitions do not reach the runnable
+state in the current build.
    MEMORY_MANAGE + MAP         -- re-map service code/data
    LOAD_MANIFEST               -- re-measure service code
    VM_RUN                      -- restart service

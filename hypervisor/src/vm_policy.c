@@ -30,7 +30,7 @@ static void fbvbs_vmx_external_interrupt_exit(
     struct fbvbs_vm_exit_external_interrupt payload;
 
     payload = (struct fbvbs_vm_exit_external_interrupt){0};
-    payload.vector = leaf_exit->detail.external_interrupt.vector;
+    payload.vector = FBVBS_LEAF_EXIT_EXTERNAL_INTERRUPT_VECTOR(leaf_exit);
     payload.reserved0 = 0U;
     fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
@@ -59,8 +59,8 @@ static void fbvbs_vmx_cr_access_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
     struct fbvbs_vm_exit_cr_access payload;
-    uint64_t requested = leaf_exit->detail.cr_access.value;
-    uint32_t cr_num = leaf_exit->detail.cr_access.cr_number;
+    uint64_t requested = FBVBS_LEAF_EXIT_CR_VALUE(leaf_exit);
+    uint32_t cr_num = FBVBS_LEAF_EXIT_CR_NUMBER(leaf_exit);
 
     /* Update shadow CR state and enforce pinning.  The shadow must
      * always reflect the guest's requested value (or enforced value
@@ -99,7 +99,7 @@ static void fbvbs_vmx_cr_access_exit(
 
     payload = (struct fbvbs_vm_exit_cr_access){0};
     payload.cr_number = cr_num;
-    payload.access_type = leaf_exit->detail.cr_access.access_type;
+    payload.access_type = FBVBS_LEAF_EXIT_CR_ACCESS_TYPE(leaf_exit);
     /* Report the enforced value (after pin enforcement), not the
      * raw requested value, so the VMM observes the actual CR state. */
     if (cr_num == 0U) {
@@ -131,12 +131,12 @@ static void fbvbs_vmx_pio_exit(
     struct fbvbs_vm_exit_pio payload;
 
     payload = (struct fbvbs_vm_exit_pio){0};
-    payload.port = leaf_exit->detail.pio.port;
-    payload.width = leaf_exit->detail.pio.access_size;
-    payload.is_write = leaf_exit->detail.pio.is_write;
+    payload.port = FBVBS_LEAF_EXIT_PIO_PORT(leaf_exit);
+    payload.width = FBVBS_LEAF_EXIT_PIO_ACCESS_SIZE(leaf_exit);
+    payload.is_write = FBVBS_LEAF_EXIT_PIO_IS_WRITE(leaf_exit);
     /* Leaf simulation: single-rep only; bare-metal uses ECX for REP count */
     payload.count = 1U;
-    payload.value = leaf_exit->detail.pio.value;
+    payload.value = FBVBS_LEAF_EXIT_PIO_VALUE(leaf_exit);
     fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
     response->exit_length = (uint32_t)sizeof(payload);
@@ -159,12 +159,12 @@ static void fbvbs_vmx_mmio_exit(
     struct fbvbs_vm_exit_mmio payload;
 
     payload = (struct fbvbs_vm_exit_mmio){0};
-    payload.guest_physical_address = leaf_exit->detail.mmio.guest_physical_address;
-    payload.width = leaf_exit->detail.mmio.access_size;
-    payload.is_write = leaf_exit->detail.mmio.is_write;
+    payload.guest_physical_address = FBVBS_LEAF_EXIT_MMIO_GPA(leaf_exit);
+    payload.width = FBVBS_LEAF_EXIT_MMIO_ACCESS_SIZE(leaf_exit);
+    payload.is_write = FBVBS_LEAF_EXIT_MMIO_IS_WRITE(leaf_exit);
     payload.reserved0 = 0U;
     payload.reserved1 = 0U;
-    payload.value = leaf_exit->detail.mmio.value;
+    payload.value = FBVBS_LEAF_EXIT_MMIO_VALUE(leaf_exit);
     fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
     response->exit_length = (uint32_t)sizeof(payload);
@@ -187,9 +187,9 @@ static void fbvbs_vmx_msr_access_exit(
     struct fbvbs_vm_exit_msr_access payload;
 
     payload = (struct fbvbs_vm_exit_msr_access){0};
-    payload.msr = leaf_exit->detail.msr_access.msr_address;
-    payload.is_write = leaf_exit->detail.msr_access.is_write;
-    payload.value = leaf_exit->detail.msr_access.value;
+    payload.msr = FBVBS_LEAF_EXIT_MSR_ADDRESS(leaf_exit);
+    payload.is_write = FBVBS_LEAF_EXIT_MSR_IS_WRITE(leaf_exit);
+    payload.value = FBVBS_LEAF_EXIT_MSR_VALUE(leaf_exit);
     fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
     response->exit_length = (uint32_t)sizeof(payload);
@@ -248,8 +248,8 @@ static void fbvbs_vmx_ept_violation_exit(
     struct fbvbs_vm_exit_ept_violation payload;
 
     payload = (struct fbvbs_vm_exit_ept_violation){0};
-    payload.guest_physical_address = leaf_exit->detail.ept_violation.guest_physical_address;
-    payload.access_bits = leaf_exit->detail.ept_violation.access_bits;
+    payload.guest_physical_address = FBVBS_LEAF_EXIT_EPT_GPA(leaf_exit);
+    payload.access_bits = FBVBS_LEAF_EXIT_EPT_ACCESS_BITS(leaf_exit);
     payload.reserved0 = 0U;
     fbvbs_copy_bytes(response->exit_payload, (const uint8_t *)&payload, sizeof(payload));
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
@@ -295,7 +295,7 @@ static void fbvbs_vmx_ept_violation_exit(
             state->log_rate_window_sequence;
 
     behavior invalid_access:
-      assumes leaf_exit->detail.dr_access.access_type > 1U;
+      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) > 1U;
       assigns vcpu->state,
               response->exit_reason, response->exit_length,
               state->mirror_log, state->log_lock,
@@ -305,7 +305,7 @@ static void fbvbs_vmx_ept_violation_exit(
       ensures vcpu->state == FBVBS_VCPU_STATE_FAULTED;
 
     behavior write_dr:
-      assumes leaf_exit->detail.dr_access.access_type == 0U;
+      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) == 0U;
       assigns vcpu->state, vcpu->dr0, vcpu->dr1, vcpu->dr2, vcpu->dr3,
               vcpu->dr6, vcpu->dr7,
               response->exit_reason, response->exit_length,
@@ -317,7 +317,7 @@ static void fbvbs_vmx_ept_violation_exit(
       ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
 
     behavior read_dr:
-      assumes leaf_exit->detail.dr_access.access_type == 1U;
+      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) == 1U;
       assigns vcpu->state,
               response->exit_reason, response->exit_length,
               response->exit_payload[0 .. 15],
@@ -337,9 +337,9 @@ static void fbvbs_vmx_dr_access_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
     struct fbvbs_vm_exit_dr_access payload;
-    uint32_t dr_num = leaf_exit->detail.dr_access.dr_number;
-    uint32_t is_read = leaf_exit->detail.dr_access.access_type; /* 0=write, 1=read */
-    uint64_t value = leaf_exit->detail.dr_access.value;
+    uint32_t dr_num = FBVBS_LEAF_EXIT_DR_NUMBER(leaf_exit);
+    uint32_t is_read = FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit); /* 0=write, 1=read */
+    uint64_t value = FBVBS_LEAF_EXIT_DR_VALUE(leaf_exit);
 
     /* Validate access_type is 0 (write) or 1 (read).
      * Invalid values indicate hardware/firmware anomaly — fault the vCPU

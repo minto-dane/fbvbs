@@ -219,6 +219,10 @@ struct fbvbs_log_record_v1 {
 #define CAP_BITMAP0_CET (1ULL << 2)
 #define CAP_BITMAP0_AESNI (1ULL << 3)
 #define CAP_BITMAP1_IOMMU (1ULL << 0)
+#define CAP_BITMAP1_MEASURED_BOOT (1ULL << 1)
+#define CAP_BITMAP1_HOST_DEPRIVILEGE (1ULL << 2)
+#define CAP_BITMAP1_FOUNDATION_READY (1ULL << 3)
+#define CAP_BITMAP1_HIGH_ASSURANCE_FOUNDATION (1ULL << 4)
 
 /* Capability mask bits — L.1.B */
 #define FBVBS_CAP_PARTITION_MANAGE (1ULL << 0)

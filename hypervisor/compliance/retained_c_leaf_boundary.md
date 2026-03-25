@@ -32,6 +32,7 @@ The repository-enforced subset is MISRA C-oriented and CERT C-oriented:
 - fixed-width integer types for exported ABI structures
 - `_Static_assert` layout checks on public ABI structures
 - no dynamic allocation in the retained VMX leaf path
+- host-side verification builds must not execute privileged MSR instructions; retained-C userspace test/coverage/fuzz paths use a bounded software MSR model while bare-metal keeps architectural MSR access
 
 ## Current machine-checkable evidence
 
@@ -43,9 +44,19 @@ The repository currently exposes these executable checks:
   - runs `fbvbs_leaf_boundary_tests`
   - runs `fbvbs_policy_security_tests`
   - runs `fbvbs_fault_injection_tests`
+- `make -C hypervisor coverage`
+  - rebuilds and runs the leaf-boundary, policy-security, and fault-injection suites with gcov instrumentation
+  - emits branch/line summaries for `partition.c`, `security.c`, `command.c`, `log.c`, `vm_policy.c`, `vmx.c`, `watchdog.c`, and `memory.c`
+  - rejects `0.00%` line/branch coverage regressions for the retained trust-boundary trio `command.c`, `vm_policy.c`, and `vmx.c`
+  - current repository-local run: `command.c` 24.44% lines / 57.62% branches executed, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%
+  - current local snapshot: `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%
 - `make -C hypervisor frama-c-wp`
   - prefers the `opam` Frama-C installation when available
-  - in the current environment WP starts successfully, but proof gaps, warnings, and timeouts remain
+  - in the current environment WP starts successfully, but proof gaps, `vmx.c` union-model warnings, Missing RTE guards, and timeouts remain
+- `make -C hypervisor proof-smoke`
+  - bounded proof gate used by `release-hypervisor`
+  - confirms that WP launches and reaches proof scheduling without fatal annotation or user errors
+  - rejects regression of previously removed `No default assigns clause`, missing-spec, and incompatible-pointer-cast warning classes
 - `make -C hypervisor baremetal-iso`
   - builds a Multiboot2 bare-metal ELF and GRUB ISO
 - `make -C hypervisor run-qemu-smoke`
@@ -68,14 +79,16 @@ Annotation presence does not by itself imply full proof discharge in the current
 
 ## Fail-Closed boundaries
 
-The current retained C implementation intentionally refuses success in several areas until the required security evidence exists:
+The current retained C implementation either refuses success outright or narrows itself to a fixed subset until the required security evidence exists:
 
 - `PARTITION_LOAD_IMAGE`
-  - image identity and register intent are validated, but the retained-C build still lacks an authoritative ELF/image materializer and therefore refuses to claim a `Loaded` state
+  - retained-C の fixed ELF64 `ET_EXEC` loader を実装しており、authoritative `image_object_id` を materialize して `Loaded` を主張できる
+  - 非 executable entry segment、writable でない stack page、executable stack page、manifest/profile 不整合、non-authoritative/missing image object は fail-closed で拒否する
 - `VM_ASSIGN_DEVICE` and `VM_RELEASE_DEVICE`
   - passthrough is disabled because authoritative ACS validation, interrupt remapping control, and safe reset/FLR are not implemented
 - `fbvbs_hypervisor_init`
-  - platform initialization fails closed until IOMMU and boot-integrity bring-up provide authoritative evidence instead of model-only detection
+  - platform initialization fails closed until IOMMU bring-up provides authoritative evidence instead of model-only detection
+  - measured boot is tracked as a high-assurance condition and is surfaced through capability/state bits instead of being silently ignored
 - `fbvbs_deprivilege_host`
   - VMCS preparation exists, but the final host deprivilege / `VMLAUNCH` handoff still fails closed instead of claiming a runnable VM entry path
 
@@ -94,13 +107,18 @@ These gates are deliberate. They reduce the chance that the retained C model acc
 The retained C repository currently demonstrates:
 
 - analyzer-clean builds under GCC `-fanalyzer`
-- unit-test coverage for leaf ABI, policy boundaries, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
+- unit-test and gcov coverage for leaf ABI, hypercall trust-boundary checks, VM policy exits, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
+- machine-readable separation between audit-path readiness, retained-C foundation readiness, measured-boot-backed high-assurance readiness, and host deprivilege readiness
+- host-deprivilege readiness derived from explicit runtime state, not merely compile-time feature intent
+- authoritative bare-metal retained boot-artifact binding: the host kernel is bound to immutable loaded hypervisor image bytes and the remaining seeded artifacts are bound to explicit Multiboot modules that are checked during ISO verification
+- a retained-C fixed executable loader for authoritative memory-object-backed ELF64 `ET_EXEC` partition-loadable artifacts, including executable-entry and NX-stack validation
 - explicit fail-closed behavior where the model cannot yet uphold the design-level guarantee
+- ownerless command-page GPAs are rejected before any command-page mutation; the dispatcher resolves command pages only through authenticated partition-owned command-page slots
 
 The retained C repository does not currently demonstrate:
 
 - a complete Frama-C WP proof run in this environment
-- production-ready executable image loader/materializer for `PARTITION_LOAD_IMAGE`
+- a broader executable loader profile beyond the retained-C fixed `ET_EXEC` subset (for example `ET_DYN`, runtime relocation, or service autostart orchestration)
 - production-ready device passthrough qualification and teardown
 - authoritative boot-integrity and IOMMU bring-up
 - production-ready host deprivilege / `VMLAUNCH` handoff

@@ -1,5 +1,43 @@
 #include "fbvbs_hypervisor.h"
 
+/*@ assigns \nothing;
+*/
+static void fbvbs_multiboot_status(const char *message) {
+#ifdef FBVBS_BAREMETAL_BUILD
+    fbvbs_boot_console_puts(message);
+#else
+    (void)message;
+#endif
+}
+
+/*@ requires \valid(destination + (0 .. FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1));
+    requires source_length == 0 || \valid_read(source + (0 .. source_length - 1));
+    assigns destination[0 .. FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1];
+*/
+static void fbvbs_multiboot_copy_cmdline(
+    char destination[FBVBS_BOOT_MODULE_CMDLINE_BYTES],
+    const uint8_t *source,
+    uint32_t source_length
+) {
+    uint32_t index = 0U;
+
+    if (destination == NULL) {
+        return;
+    }
+
+    while (index + 1U < FBVBS_BOOT_MODULE_CMDLINE_BYTES &&
+           index < source_length &&
+           source[index] != 0U) {
+        destination[index] = (char)source[index];
+        ++index;
+    }
+    destination[index] = '\0';
+    while (index + 1U < FBVBS_BOOT_MODULE_CMDLINE_BYTES) {
+        ++index;
+        destination[index] = '\0';
+    }
+}
+
 /* Process Multiboot information structure.
  *
  * This function is excluded from Frama-C WP analysis because it
@@ -18,6 +56,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
         return;
     }
     if (buffer_size < 8U) {
+        fbvbs_multiboot_status("FBVBS: mb2 buffer too small\n");
         return;
     }
 
@@ -36,6 +75,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
        A Multiboot2 information structure should never be this large;
        an attacker-controlled bootloader could otherwise cause unbounded reads. */
     if (total_size < 8U || total_size > (64U * 1024U * 1024U)) {
+        fbvbs_multiboot_status("FBVBS: mb2 total size invalid\n");
         return;
     }
 
@@ -48,6 +88,14 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
     /* Initialize parsed boot metadata */
     state->acpi_rsdp = NULL;
     state->memory_map_count = 0U;
+    state->boot_device = 0U;
+    state->boot_partition = 0U;
+    state->boot_sub_partition = 0U;
+    state->boot_module_count = 0U;
+    for (offset = 0U; offset < FBVBS_MAX_BOOT_MODULES; ++offset) {
+        state->boot_modules[offset] = (struct fbvbs_boot_module){0};
+    }
+    offset = 8U;
 
     /* Iterate through tags */
     while (offset < total_size) {
@@ -58,6 +106,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
 
         /* Hardening: ensure at least 8 bytes remain for tag header */
         if (offset > total_size - 8U) {
+            fbvbs_multiboot_status("FBVBS: mb2 truncated tag header\n");
             return;
         }
 
@@ -67,10 +116,12 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
 
         /* Guard against zero-size tags causing infinite loop */
         if (size < 8U) {
+            fbvbs_multiboot_status("FBVBS: mb2 zero/short tag\n");
             return;
         }
         /* Guard against size exceeding remaining space */
         if (size > total_size - offset) {
+            fbvbs_multiboot_status("FBVBS: mb2 oversize tag\n");
             return;
         }
         /* Align to 8-byte boundary.
@@ -107,6 +158,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                        Multiboot2 mmap entries are min 24 bytes (base:8 + length:8 + type:4 + reserved:4).
                        A malicious bootloader could set entry_size < 24 to cause OOB reads. */
                     if (entry_size < 24U || entry_size > size) {
+                        fbvbs_multiboot_status("FBVBS: mb2 bad mmap entry size\n");
                         break;
                     }
                     while (entry_offset + entry_size <= offset + size && state->memory_map_count < 32U) {
@@ -146,9 +198,25 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                     fbvbs_copy_memory(&mod_start, tag_ptr + 8U, sizeof(mod_start));
                     fbvbs_copy_memory(&mod_end, tag_ptr + 12U, sizeof(mod_end));
                     const char *cmdline = (const char *)(info_bytes + offset + 16U);
-                    (void)mod_start;
-                    (void)mod_end;
                     (void)cmdline;
+
+                    if (mod_end > mod_start &&
+                        state->boot_module_count < FBVBS_MAX_BOOT_MODULES) {
+                        struct fbvbs_boot_module *module =
+                            &state->boot_modules[state->boot_module_count];
+                        uint32_t cmdline_length = size - 16U;
+
+                        *module = (struct fbvbs_boot_module){0};
+                        module->active = true;
+                        module->start_phys = (uint64_t)mod_start;
+                        module->size = (uint64_t)(mod_end - mod_start);
+                        fbvbs_multiboot_copy_cmdline(
+                            module->cmdline,
+                            tag_ptr + 16U,
+                            cmdline_length
+                        );
+                        state->boot_module_count += 1U;
+                    }
                 }
                 break;
 
@@ -185,6 +253,7 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
 
         /* Hardening: prevent offset wraparound */
         if (aligned_size > total_size - offset) {
+            fbvbs_multiboot_status("FBVBS: mb2 aligned size overflow\n");
             return;
         }
         offset += aligned_size;
