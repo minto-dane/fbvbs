@@ -43,7 +43,35 @@ struct fbvbs_early_mmap_entry {
 static struct fbvbs_early_mmap_entry g_early_mmap[FBVBS_MAX_EARLY_MMAP_ENTRIES];
 static uint32_t g_early_mmap_count;
 
-static void process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
+static void serial_print(const char *msg);
+
+static void serial_print_u32(uint32_t value)
+{
+    char buffer[11];
+    uint32_t index = 0U;
+
+    if (value == 0U) {
+        serial_print("0");
+        return;
+    }
+
+    while (value > 0U && index < (uint32_t)sizeof(buffer)) {
+        buffer[index++] = (char)('0' + (value % 10U));
+        value /= 10U;
+    }
+
+    while (index > 0U) {
+        --index;
+        {
+            char ch[2];
+            ch[0] = buffer[index];
+            ch[1] = '\0';
+            serial_print(ch);
+        }
+    }
+}
+
+static int process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
 {
     const uint8_t *map_ptr;
     uint32_t i;
@@ -54,12 +82,17 @@ static void process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
     if (boot_info->memory_map_addr == 0 ||
         boot_info->descriptor_size == 0 ||
         boot_info->mmap_entry_count == 0) {
-        return;
+        return -1;
     }
 
     map_ptr = (const uint8_t *)(uintptr_t)boot_info->memory_map_addr;
     count = boot_info->mmap_entry_count;
     if (count > FBVBS_MAX_EARLY_MMAP_ENTRIES) {
+        serial_print("FBVBS: WARNING: EFI memory map truncated from ");
+        serial_print_u32(count);
+        serial_print(" to ");
+        serial_print_u32(FBVBS_MAX_EARLY_MMAP_ENTRIES);
+        serial_print(" entries\n");
         count = FBVBS_MAX_EARLY_MMAP_ENTRIES;
     }
 
@@ -93,6 +126,7 @@ static void process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
     }
 
     g_early_mmap_count = count;
+    return 0;
 }
 
 /* ================================================================
@@ -145,14 +179,27 @@ static uint32_t detect_virtualization_support(void)
  * ================================================================ */
 
 #define SERIAL_PORT_COM1  0x3F8U
+#define UART_LSR_OFFSET   5U
+#define UART_LSR_THRE     0x20U  /* Transmit Holding Register Empty */
 
 static void serial_putchar(char c)
 {
-    /* PRODUCTION NOTE: Must check LSR transmit-empty bit before write.
-     * outb(SERIAL_PORT_COM1, c) via inline asm:
-     *   asm volatile ("outb %0, %1" : : "a"(c), "Nd"(SERIAL_PORT_COM1));
-     */
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    /* Poll LSR until transmit holding register is empty */
+    uint8_t lsr;
+    uint32_t timeout = 100000U;
+    do {
+        __asm__ volatile("inb %1, %0"
+                         : "=a"(lsr)
+                         : "Nd"((uint16_t)(SERIAL_PORT_COM1 + UART_LSR_OFFSET)));
+        if (--timeout == 0U) break;
+    } while ((lsr & UART_LSR_THRE) == 0U);
+
+    __asm__ volatile("outb %0, %1"
+                     : : "a"((uint8_t)c), "Nd"((uint16_t)SERIAL_PORT_COM1));
+#else
     (void)c;
+#endif
 }
 
 static void serial_print(const char *msg)
@@ -218,7 +265,10 @@ void fbvbs_efi_to_hypervisor(struct fbvbs_efi_boot_info *boot_info)
     serial_print("FBVBS: Post-ExitBootServices initialization\n");
 
     /* Process EFI memory map */
-    process_efi_memory_map(boot_info);
+    if (process_efi_memory_map(boot_info) != 0) {
+        serial_print("FBVBS: ERROR: Failed to process memory map\n");
+        return;
+    }
     serial_print("FBVBS: Memory map processed\n");
 
     {
@@ -257,9 +307,11 @@ void fbvbs_efi_to_hypervisor(struct fbvbs_efi_boot_info *boot_info)
      * 6. Call fbvbs_hypervisor_init()
      * 7. Launch host OS as a deprivileged guest
      *
-     * Each step requires assembly support code. The C-level
-     * hypervisor init (fbvbs_hypervisor_init) is already
-     * implemented and tested — only the platform glue is missing.
+     * The repository now has assembly support for VMLAUNCH/VMRESUME,
+     * but the end-to-end host handoff is still not architecturally
+     * complete. The C-level hypervisor init
+     * (fbvbs_hypervisor_init) is already implemented and tested;
+     * the runnable deprivilege path still needs platform glue.
      */
 
     serial_print("FBVBS: Hypervisor initialization sequence pending\n");

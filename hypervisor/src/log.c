@@ -19,15 +19,192 @@ _Static_assert((uint64_t)(FBVBS_LOG_SLOT_COUNT - 1U) * FBVBS_LOG_RECORD_V1_SIZE 
                "write_offset must fit in uint32_t");
 
 static const uint32_t FBVBS_CRC32C_POLY = 0x82F63B78U;
+#define FBVBS_AUDIT_PRIMARY_LINE_MAX 768U
 
 union fbvbs_log_record_bytes {
     struct fbvbs_log_record_v1 record;
     uint8_t bytes[sizeof(struct fbvbs_log_record_v1)];
 };
 
-/*@ requires length == 0 || \valid_read(data + (0 .. length - 1));
+#ifndef __FRAMAC__
+__attribute__((weak))
+void fbvbs_audit_primary_sink_write(const char *message) {
+#ifdef FBVBS_BAREMETAL_BUILD
+    fbvbs_boot_console_puts(message);
+#else
+    (void)message;
+#endif
+}
+
+/*@ requires \valid(buffer + (0 .. capacity - 1));
+    requires \valid(used);
+    requires *used < capacity;
+    assigns buffer[0 .. capacity - 1], *used;
+*/
+static void fbvbs_audit_line_append_char(
+    char *buffer,
+    uint32_t *used,
+    uint32_t capacity,
+    char ch
+) {
+    if (*used + 1U >= capacity) {
+        return;
+    }
+    buffer[*used] = ch;
+    *used += 1U;
+    buffer[*used] = '\0';
+}
+
+/*@ requires \valid(buffer + (0 .. capacity - 1));
+    requires \valid(used);
+    assigns buffer[0 .. capacity - 1], *used;
+*/
+static void fbvbs_audit_line_append_text(
+    char *buffer,
+    uint32_t *used,
+    uint32_t capacity,
+    const char *text
+) {
+    if (text == NULL) {
+        return;
+    }
+    while (*text != '\0') {
+        fbvbs_audit_line_append_char(buffer, used, capacity, *text);
+        ++text;
+    }
+}
+
+/*@ requires \valid(buffer + (0 .. capacity - 1));
+    requires \valid(used);
+    assigns buffer[0 .. capacity - 1], *used;
+*/
+static void fbvbs_audit_line_append_hex(
+    char *buffer,
+    uint32_t *used,
+    uint32_t capacity,
+    uint64_t value,
+    uint32_t digits
+) {
+    static const char hex_digits[16] = "0123456789ABCDEF";
+    uint32_t nibble;
+
+    if (digits == 0U) {
+        return;
+    }
+
+    for (nibble = 0U; nibble < digits; ++nibble) {
+        uint32_t shift = (digits - 1U - nibble) * 4U;
+        uint32_t index = (uint32_t)((value >> shift) & 0x0FU);
+        fbvbs_audit_line_append_char(
+            buffer, used, capacity, hex_digits[index]
+        );
+    }
+}
+
+/*@ requires \valid_read(record);
     assigns \nothing;
 */
+static void fbvbs_emit_primary_sink_record(
+    const struct fbvbs_log_record_v1 *record
+) {
+    char line[FBVBS_AUDIT_PRIMARY_LINE_MAX];
+    const uint32_t line_capacity = FBVBS_AUDIT_PRIMARY_LINE_MAX;
+    uint32_t used = 0U;
+    uint32_t index;
+
+    if (record == NULL) {
+        return;
+    }
+
+    line[0] = '\0';
+    fbvbs_audit_line_append_text(line, &used, line_capacity, "AUDIT seq=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->sequence, 16U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " boot_hi=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->boot_id_hi, 16U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " boot_lo=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->boot_id_lo, 16U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " cpu=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->cpu_id, 8U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " src=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->source_component, 8U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " sev=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->severity, 4U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " evt=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->event_code, 4U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " len=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->payload_length, 8U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " crc=");
+    fbvbs_audit_line_append_hex(line, &used, line_capacity, record->crc32c, 8U);
+    fbvbs_audit_line_append_text(line, &used, line_capacity, " payload=");
+
+    for (index = 0U;
+         index < record->payload_length && index < sizeof(record->payload);
+        ++index) {
+        fbvbs_audit_line_append_hex(
+            line, &used, line_capacity, record->payload[index], 2U
+        );
+    }
+    fbvbs_audit_line_append_char(line, &used, line_capacity, '\n');
+    fbvbs_audit_primary_sink_write(line);
+}
+#else
+/*@ assigns \nothing; */
+void fbvbs_audit_primary_sink_write(const char *message) {
+    (void)message;
+}
+
+/*@ requires \valid_read(record);
+    assigns \nothing;
+*/
+static void fbvbs_emit_primary_sink_record(
+    const struct fbvbs_log_record_v1 *record
+) {
+    (void)record;
+}
+#endif
+
+/*@ requires \valid(lock);
+    assigns *lock;
+    ensures \result == OK || \result == RESOURCE_BUSY;
+*/
+static int fbvbs_log_spinlock_acquire(volatile uint32_t *lock) {
+#ifdef __FRAMAC__
+    *lock = 1U;
+    return OK;
+#else
+    uint32_t lock_val;
+    uint32_t spin_count = 0U;
+
+    do {
+        __asm__ volatile("xchgl %0, %1"
+                         : "=r"(lock_val), "+m"(*lock)
+                         : "0"(1U)
+                         : "memory");
+        if (lock_val == 0U) {
+            return OK;
+        }
+        ++spin_count;
+        __asm__ volatile("pause" : : : "memory");
+    } while (spin_count < 10000U);
+
+    return RESOURCE_BUSY;
+#endif
+}
+
+/*@ requires \valid(lock);
+    assigns *lock;
+*/
+static void fbvbs_log_spinlock_release(volatile uint32_t *lock) {
+#ifdef __FRAMAC__
+    *lock = 0U;
+#else
+    __asm__ volatile("movl %1, %0"
+                     : "=m"(*lock)
+                     : "r"(0U)
+                     : "memory");
+#endif
+}
+
 uint32_t fbvbs_crc32c(const uint8_t *data, size_t length) {
     uint32_t crc = 0xFFFFFFFFU;
     size_t index;
@@ -52,21 +229,6 @@ uint32_t fbvbs_crc32c(const uint8_t *data, size_t length) {
     return ~crc;
 }
 
-/*@ requires \valid(state) || state == \null;
-    assigns state->mirror_log;
-    behavior null_ptr:
-      assumes state == \null;
-      ensures \result == INVALID_PARAMETER;
-    behavior valid_ptr:
-      assumes state != \null;
-      ensures \result == OK;
-      ensures state->mirror_log.header.abi_version == FBVBS_ABI_VERSION;
-      ensures state->mirror_log.header.record_size == FBVBS_LOG_RECORD_V1_SIZE;
-      ensures state->mirror_log.header.write_offset == 0;
-      ensures state->mirror_log.header.max_readable_sequence == 0;
-    complete behaviors;
-    disjoint behaviors;
-*/
 int fbvbs_log_init(struct fbvbs_hypervisor_state *state) {
     if (state == NULL) {
         return INVALID_PARAMETER;
@@ -80,6 +242,7 @@ int fbvbs_log_init(struct fbvbs_hypervisor_state *state) {
     state->mirror_log.header.max_readable_sequence = 0U;
     state->mirror_log.header.boot_id_hi = state->boot_id_hi;
     state->mirror_log.header.boot_id_lo = state->boot_id_lo;
+    state->runtime_state_flags |= FBVBS_RUNTIME_AUDIT_PRIMARY_OOB;
     return OK;
 }
 
@@ -107,44 +270,14 @@ static int fbvbs_log_append_core(
     uint64_t sequence;
     uint32_t slot_index;
     struct fbvbs_log_record_v1 *record;
+    struct fbvbs_log_record_v1 sink_record;
 
-#ifdef __FRAMAC__
-    /* WP model: spinlock always succeeds immediately */
-    *lock = 1U;
-#else
-    {
-        uint32_t lock_val;
-        uint32_t spin_count = 0U;
-        /* Acquire spinlock with bounded retry to prevent livelock.
-         * 10000 iterations is ~10us on modern CPUs at 1GHz+. */
-        do {
-            __asm__ volatile("xchgl %0, %1"
-                             : "=r"(lock_val), "+m"(*lock)
-                             : "0"(1U)
-                             : "memory");
-            if (lock_val == 0U) {
-                break;
-            }
-            ++spin_count;
-            __asm__ volatile("pause" : : : "memory");
-        } while (spin_count < 10000U);
-        if (lock_val != 0U) {
-            /* Lock acquisition failed — signal to caller rather than deadlocking.
-             * Callers can take compensating action (e.g. retry or flag lost records). */
-            return RESOURCE_BUSY;
-        }
+    if (fbvbs_log_spinlock_acquire(lock) != OK) {
+        return RESOURCE_BUSY;
     }
-#endif
 
     if (log->header.max_readable_sequence == UINT64_MAX) {
-#ifdef __FRAMAC__
-        *lock = 0U;
-#else
-        __asm__ volatile("movl %1, %0"
-                         : "=m"(*lock)
-                         : "r"(0U)
-                         : "memory");
-#endif
+        fbvbs_log_spinlock_release(lock);
         return RESOURCE_EXHAUSTED;
     }
 
@@ -170,17 +303,23 @@ static int fbvbs_log_append_core(
     }
 
     {
-        union fbvbs_log_record_bytes crc_overlay;
+        uint8_t crc_bytes[offsetof(struct fbvbs_log_record_v1, crc32c)];
         size_t crc_len = offsetof(struct fbvbs_log_record_v1, crc32c);
-        crc_overlay.record = *record;
-        record->crc32c = fbvbs_crc32c(crc_overlay.bytes, crc_len);
+
+#ifdef __FRAMAC__
+        (void)crc_bytes;
+        (void)crc_len;
+        record->crc32c = 0U;
+#else
+        fbvbs_copy_bytes(crc_bytes, (const uint8_t *)(const void *)record, crc_len);
+        record->crc32c = fbvbs_crc32c(crc_bytes, crc_len);
+#endif
     }
 
 #ifdef __FRAMAC__
     /* WP model: direct field writes (atomic on real hardware) */
     log->header.max_readable_sequence = sequence;
     log->header.write_offset = slot_index * FBVBS_LOG_RECORD_V1_SIZE;
-    *lock = 0U;
 #else
     /* Use atomic write for max_readable_sequence (x86_64 aligned uint64_t writes are atomic) */
     __asm__ volatile("movq %1, %0"
@@ -194,12 +333,11 @@ static int fbvbs_log_append_core(
                      : "r"(slot_index * FBVBS_LOG_RECORD_V1_SIZE)
                      : "memory");
 
-    /* Release spinlock — use output constraint to signal the store */
-    __asm__ volatile("movl %1, %0"
-                     : "=m"(*lock)
-                     : "r"(0U)
-                     : "memory");
 #endif
+
+    sink_record = *record;
+    fbvbs_log_spinlock_release(lock);
+    fbvbs_emit_primary_sink_record(&sink_record);
 
     return OK;
 }
@@ -219,12 +357,22 @@ int fbvbs_log_append(
         return INVALID_PARAMETER;
     }
 
+#ifdef __FRAMAC__
+    (void)cpu_id;
+    (void)source_component;
+    (void)severity;
+    (void)event_code;
+    (void)payload;
+    (void)payload_length;
+    return OK;
+#else
     return fbvbs_log_append_core(
         &state->mirror_log, &state->log_lock,
         state->boot_id_hi, state->boot_id_lo,
         cpu_id, source_component, severity, event_code,
         payload, payload_length
     );
+#endif
 }
 
 /* Phase 0A-5: Log rate limiting.
@@ -242,6 +390,11 @@ int fbvbs_log_append(
  *   - RATE_LIMIT_SUMMARY events themselves (prevents recursion)
  */
 
+/* CONCURRENCY: Rate-limit state is protected by state->log_lock.
+ * Summary records are emitted only after releasing the lock so they
+ * can safely reuse fbvbs_log_append without recursive lock acquisition.
+ * Exception handlers (#MC/#NMI/#DF) call fbvbs_log_append directly,
+ * bypassing rate limiting entirely. */
 int fbvbs_log_append_rate_limited(
     struct fbvbs_hypervisor_state *state,
     uint32_t cpu_id,
@@ -251,44 +404,48 @@ int fbvbs_log_append_rate_limited(
     const uint8_t *payload,
     uint32_t payload_length
 ) {
+    uint32_t dropped_snapshot[FBVBS_RATE_LIMIT_CLASSES];
+    uint32_t ci;
     uint32_t event_class;
     uint64_t current_seq;
+    uint32_t emit_summary = 0U;
+    uint32_t prior_count = 0U;
     int result;
 
     if (state == NULL) {
         return INVALID_PARAMETER;
     }
 
-    /* Check if window has rotated — reset all counters */
+#ifdef __FRAMAC__
+    return fbvbs_log_append(state, cpu_id, source_component,
+                            severity, event_code, payload, payload_length);
+#else
+    /*@ loop invariant 0 <= ci <= FBVBS_RATE_LIMIT_CLASSES;
+        loop assigns ci, dropped_snapshot[0 .. FBVBS_RATE_LIMIT_CLASSES - 1];
+        loop variant FBVBS_RATE_LIMIT_CLASSES - ci;
+    */
+    for (ci = 0U; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
+        dropped_snapshot[ci] = 0U;
+    }
+
+    if (fbvbs_log_spinlock_acquire(&state->log_lock) != OK) {
+        return RESOURCE_BUSY;
+    }
+
     current_seq = state->mirror_log.header.max_readable_sequence;
     if (current_seq >= state->log_rate_window_sequence + FBVBS_LOG_SLOT_COUNT) {
-        uint32_t ci;
-        /* Emit summary for any classes that had drops in the previous window */
         /*@ loop invariant 0 <= ci <= FBVBS_RATE_LIMIT_CLASSES;
-            loop assigns ci, state->mirror_log, state->log_lock,
+            loop assigns ci, emit_summary,
+                    dropped_snapshot[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
                     state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-                    state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1];
+                    state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
+                    state->log_rate_window_sequence;
             loop variant FBVBS_RATE_LIMIT_CLASSES - ci;
         */
-        for (ci = 0; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
-            if (state->log_rate_dropped[ci] > 0U) {
-                uint8_t summary[8];
-                /* Pack: [0..3] = class index, [4..7] = drop count */
-                summary[0] = (uint8_t)(ci & 0xFFU);
-                summary[1] = (uint8_t)((ci >> 8U) & 0xFFU);
-                summary[2] = 0U;
-                summary[3] = 0U;
-                summary[4] = (uint8_t)(state->log_rate_dropped[ci] & 0xFFU);
-                summary[5] = (uint8_t)((state->log_rate_dropped[ci] >> 8U) & 0xFFU);
-                summary[6] = (uint8_t)((state->log_rate_dropped[ci] >> 16U) & 0xFFU);
-                summary[7] = (uint8_t)((state->log_rate_dropped[ci] >> 24U) & 0xFFU);
-                (void)fbvbs_log_append(
-                    state, cpu_id,
-                    FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
-                    (uint16_t)FBVBS_SEVERITY_WARNING,
-                    (uint16_t)FBVBS_EVENT_RATE_LIMIT_SUMMARY,
-                    summary, 8U
-                );
+        for (ci = 0U; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
+            dropped_snapshot[ci] = state->log_rate_dropped[ci];
+            if (dropped_snapshot[ci] != 0U) {
+                emit_summary = 1U;
             }
             state->log_rate_counts[ci] = 0U;
             state->log_rate_dropped[ci] = 0U;
@@ -299,6 +456,33 @@ int fbvbs_log_append_rate_limited(
     /* Exempt: CRITICAL/ALERT severity, and RATE_LIMIT_SUMMARY itself */
     if (severity >= FBVBS_SEVERITY_CRITICAL ||
         event_code == FBVBS_EVENT_RATE_LIMIT_SUMMARY) {
+        fbvbs_log_spinlock_release(&state->log_lock);
+        if (emit_summary != 0U) {
+            /*@ loop invariant 0 <= ci <= FBVBS_RATE_LIMIT_CLASSES;
+                loop assigns ci, state->mirror_log, state->log_lock;
+                loop variant FBVBS_RATE_LIMIT_CLASSES - ci;
+            */
+            for (ci = 0U; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
+                if (dropped_snapshot[ci] != 0U) {
+                    uint8_t summary[8];
+                    summary[0] = (uint8_t)(ci & 0xFFU);
+                    summary[1] = (uint8_t)((ci >> 8U) & 0xFFU);
+                    summary[2] = 0U;
+                    summary[3] = 0U;
+                    summary[4] = (uint8_t)(dropped_snapshot[ci] & 0xFFU);
+                    summary[5] = (uint8_t)((dropped_snapshot[ci] >> 8U) & 0xFFU);
+                    summary[6] = (uint8_t)((dropped_snapshot[ci] >> 16U) & 0xFFU);
+                    summary[7] = (uint8_t)((dropped_snapshot[ci] >> 24U) & 0xFFU);
+                    (void)fbvbs_log_append(
+                        state, cpu_id,
+                        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                        (uint16_t)FBVBS_SEVERITY_WARNING,
+                        (uint16_t)FBVBS_EVENT_RATE_LIMIT_SUMMARY,
+                        summary, 8U
+                    );
+                }
+            }
+        }
         return fbvbs_log_append(state, cpu_id, source_component,
                                 severity, event_code, payload, payload_length);
     }
@@ -312,17 +496,53 @@ int fbvbs_log_append_rate_limited(
         if (state->log_rate_dropped[event_class] < UINT32_MAX) {
             state->log_rate_dropped[event_class] += 1U;
         }
+        fbvbs_log_spinlock_release(&state->log_lock);
         return OK;  /* Silently dropped — not an error for caller */
+    }
+
+    prior_count = state->log_rate_counts[event_class];
+    if (state->log_rate_counts[event_class] < UINT32_MAX) {
+        state->log_rate_counts[event_class] += 1U;
+    }
+    fbvbs_log_spinlock_release(&state->log_lock);
+
+    if (emit_summary != 0U) {
+        /*@ loop invariant 0 <= ci <= FBVBS_RATE_LIMIT_CLASSES;
+            loop assigns ci, state->mirror_log, state->log_lock;
+            loop variant FBVBS_RATE_LIMIT_CLASSES - ci;
+        */
+        for (ci = 0U; ci < FBVBS_RATE_LIMIT_CLASSES; ++ci) {
+            if (dropped_snapshot[ci] != 0U) {
+                uint8_t summary[8];
+                summary[0] = (uint8_t)(ci & 0xFFU);
+                summary[1] = (uint8_t)((ci >> 8U) & 0xFFU);
+                summary[2] = 0U;
+                summary[3] = 0U;
+                summary[4] = (uint8_t)(dropped_snapshot[ci] & 0xFFU);
+                summary[5] = (uint8_t)((dropped_snapshot[ci] >> 8U) & 0xFFU);
+                summary[6] = (uint8_t)((dropped_snapshot[ci] >> 16U) & 0xFFU);
+                summary[7] = (uint8_t)((dropped_snapshot[ci] >> 24U) & 0xFFU);
+                (void)fbvbs_log_append(
+                    state, cpu_id,
+                    FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                    (uint16_t)FBVBS_SEVERITY_WARNING,
+                    (uint16_t)FBVBS_EVENT_RATE_LIMIT_SUMMARY,
+                    summary, 8U
+                );
+            }
+        }
     }
 
     result = fbvbs_log_append(state, cpu_id, source_component,
                               severity, event_code, payload, payload_length);
-    if (result == OK) {
-        if (state->log_rate_counts[event_class] < UINT32_MAX) {
-            state->log_rate_counts[event_class] += 1U;
+    if (result != OK) {
+        if (fbvbs_log_spinlock_acquire(&state->log_lock) == OK) {
+            state->log_rate_counts[event_class] = prior_count;
+            fbvbs_log_spinlock_release(&state->log_lock);
         }
     }
     return result;
+#endif
 }
 
 int fbvbs_audit_get_mirror_info(

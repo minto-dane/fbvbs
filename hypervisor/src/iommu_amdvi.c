@@ -89,7 +89,7 @@
  * ACPI / IVRS table structures (packed wire format)
  * ================================================================ */
 
-struct acpi_ivrs_table_header {
+struct __attribute__((packed)) acpi_ivrs_table_header {
     uint32_t signature;
     uint32_t length;
     uint8_t  revision;
@@ -104,7 +104,7 @@ struct acpi_ivrs_table_header {
     /* Variable-length IVHD/IVMD blocks follow */
 };
 
-struct ivrs_block_header {
+struct __attribute__((packed)) ivrs_block_header {
     uint8_t  type;
     uint8_t  flags;
     uint16_t length;
@@ -124,6 +124,16 @@ struct fbvbs_amdvi_unit {
     uint16_t iommu_info;
     uint32_t ef_features;     /* Extended feature register snapshot */
 };
+
+#ifndef AMDVI_TRUSTED_MMIO_BASE_MIN
+#define AMDVI_TRUSTED_MMIO_BASE_MIN  0xFE000000ULL
+#endif
+
+static int amdvi_mmio_base_valid(uint64_t base)
+{
+    return base >= AMDVI_TRUSTED_MMIO_BASE_MIN &&
+           (base & 0xFFFULL) == 0ULL;
+}
 
 struct fbvbs_ivmd_region {
     uint32_t active;
@@ -260,6 +270,9 @@ fbvbs_ivrs_parse(
                 ((uint64_t)raw[offset + 13U] << 40) |
                 ((uint64_t)raw[offset + 14U] << 48) |
                 ((uint64_t)raw[offset + 15U] << 56);
+            if (!amdvi_mmio_base_valid(unit->mmio_base)) {
+                return -1;
+            }
             /* PCI segment at offset 16-17 */
             unit->pci_segment = (uint16_t)(
                 (uint16_t)raw[offset + 16U] |
@@ -357,6 +370,9 @@ static uint64_t amdvi_mmio_read64(uint64_t base, uint32_t offset)
     (void)offset;
     return 0ULL;
 #elif defined(FBVBS_BAREMETAL_BUILD)
+    if (!amdvi_mmio_base_valid(base) || (uint64_t)offset > UINT64_MAX - base) {
+        return 0ULL;
+    }
     volatile const uint64_t *reg =
         (volatile const uint64_t *)(uintptr_t)(base + (uint64_t)offset);
     fbvbs_asm_compiler_barrier();
@@ -422,6 +438,7 @@ static int amdvi_probe_capabilities(
 /*@ assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
+__attribute__((unused))
 static int amdvi_enable(uint64_t mmio_base)
 {
     uint64_t ctrl = amdvi_mmio_read64(mmio_base, AMDVI_REG_CONTROL);
@@ -468,6 +485,7 @@ struct amdvi_dte {
 /*@ requires \valid(dte);
     assigns *dte;
 */
+__attribute__((unused))
 static void amdvi_build_dte(
     struct amdvi_dte *dte,
     uint16_t domain_id,
@@ -494,6 +512,7 @@ struct amdvi_irte {
 /*@ requires \valid(irte);
     assigns *irte;
 */
+__attribute__((unused))
 static void amdvi_build_irte(
     struct amdvi_irte *irte,
     uint8_t vector,
@@ -585,87 +604,9 @@ int fbvbs_amdvi_init(struct fbvbs_global_security_state *state)
         return -1;
     }
 
-    /* Initialize each IOMMU unit.
-     * Track allocated pages for cleanup on failure. */
-    {
-        uint32_t i;
-        uint64_t alloc_cmd[FBVBS_MAX_AMDVI_UNITS];
-        uint64_t alloc_evt[FBVBS_MAX_AMDVI_UNITS];
-        uint32_t alloc_count = 0U;
-
-        for (i = 0U; i < FBVBS_MAX_AMDVI_UNITS; ++i) {
-            alloc_cmd[i] = 0ULL;
-            alloc_evt[i] = 0ULL;
-        }
-
-        for (i = 0U; i < info.ivhd_count; ++i) {
-            uint64_t mmio_base = info.ivhd_units[i].mmio_base;
-            uint64_t cmd_buf_phys;
-            uint64_t evt_log_phys;
-
-            /* Allocate Command Buffer and Event Log pages.
-             * PRODUCTION NOTE: Device Table needs 512KB for full 64K
-             * entries (allocated separately per-device domain).
-             * Here we allocate the minimum buffers for IOMMU operation. */
-            cmd_buf_phys = fbvbs_page_alloc();
-            if (cmd_buf_phys == 0ULL) {
-                goto amdvi_init_fail;
-            }
-            alloc_cmd[alloc_count] = cmd_buf_phys;
-
-            evt_log_phys = fbvbs_page_alloc();
-            if (evt_log_phys == 0ULL) {
-                goto amdvi_init_fail;
-            }
-            alloc_evt[alloc_count] = evt_log_phys;
-
-            /* Set Command Buffer Base: phys addr + size encoding
-             * (bits [59:12] = base, bits [3:0] = size = 0 for 4KB) */
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_BASE,
-                               cmd_buf_phys & 0x000FFFFFFFFFF000ULL);
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_HEAD, 0ULL);
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_CMD_BUF_TAIL, 0ULL);
-
-            /* Set Event Log Base: same encoding */
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_BASE,
-                               evt_log_phys & 0x000FFFFFFFFFF000ULL);
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_HEAD, 0ULL);
-            amdvi_mmio_write64(mmio_base, AMDVI_REG_EVT_LOG_TAIL, 0ULL);
-
-            if (amdvi_enable(mmio_base) != 0) {
-                goto amdvi_init_fail;
-            }
-            alloc_count += 1U;
-        }
-        goto amdvi_init_ok;
-
-amdvi_init_fail:
-        {
-            uint32_t j;
-            for (j = 0U; j <= alloc_count && j < FBVBS_MAX_AMDVI_UNITS; ++j) {
-                if (alloc_cmd[j] != 0ULL) {
-                    (void)fbvbs_page_free(alloc_cmd[j]);
-                }
-                if (alloc_evt[j] != 0ULL) {
-                    (void)fbvbs_page_free(alloc_evt[j]);
-                }
-            }
-            return -1;
-        }
-amdvi_init_ok: ;
-    }
-
-    /* Validate DTE and IRTE construction (struct layout verification) */
-    {
-        struct amdvi_dte dte;
-        struct amdvi_irte irte;
-        amdvi_build_dte(&dte, 1U, 0ULL);
-        amdvi_build_irte(&irte, 0U, 0U);
-        (void)dte;
-        (void)irte;
-    }
-
-    state->iommu.kernel_dma_protection = 1;
-    return 0;
+    /* Fail closed until the retained-C runtime installs an authoritative
+     * device-table base and default-deny host policy. Command/event buffers
+     * alone do not establish DMA isolation. */
+    return -1;
 #endif
 }

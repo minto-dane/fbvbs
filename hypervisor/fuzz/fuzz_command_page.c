@@ -104,7 +104,9 @@ static int fuzz_one_input(const uint8_t *data, size_t size)
     if (size > sizeof(*page)) {
         size = sizeof(*page);
     }
-    memcpy(page, data, size);
+    if (size > 0U && data != NULL) {
+        memcpy(page, data, size);
+    }
 
     /* Force ABI version to valid (otherwise dispatch rejects immediately,
      * reducing coverage of interesting code paths) */

@@ -80,8 +80,8 @@ struct fbvbs_idtr {
 /* IST stack sizes (4 KiB each with guard page) */
 #define IST_STACK_SIZE 4096U
 
-/* Code segment selector (must match GDT entry for 64-bit kernel code) */
-#define KERNEL_CS 0x08U
+/* Code segment selector (must match boot.S runtime GDT 64-bit code entry) */
+#define KERNEL_CS 0x18U
 
 /* Exception vector numbers */
 #define VECTOR_DE  0U   /* Divide Error */

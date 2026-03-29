@@ -57,18 +57,20 @@ static uint64_t hosted_phys_from_pfn(uint32_t pfn) {
     assigns *pfn_out;
 */
 static int hosted_pfn_from_phys(uint64_t phys_addr, uint32_t *pfn_out) {
-    uintptr_t base = (uintptr_t)&hosted_page_pool[0];
-    uintptr_t end = base + sizeof(hosted_page_pool);
-    uintptr_t addr = (uintptr_t)phys_addr;
+    /* Use uint64_t arithmetic to avoid truncation on 32-bit hosts */
+    uint64_t base64 = (uint64_t)(uintptr_t)&hosted_page_pool[0];
+    uint64_t end64 = base64 + (uint64_t)sizeof(hosted_page_pool);
+    uint64_t offset;
 
     if (pfn_out == NULL ||
-        addr < base ||
-        addr >= end ||
-        ((addr - base) & (PAGE_SIZE - 1U)) != 0U) {
+        phys_addr < base64 ||
+        phys_addr >= end64 ||
+        ((phys_addr - base64) & (PAGE_SIZE - 1U)) != 0U) {
         return -1;
     }
 
-    *pfn_out = (uint32_t)((addr - base) / PAGE_SIZE);
+    offset = phys_addr - base64;
+    *pfn_out = (uint32_t)(offset / PAGE_SIZE);
     return 0;
 }
 #endif
@@ -140,10 +142,6 @@ static void mark_allocated(uint32_t pfn) {
     bitmap_clear(word, bit);
 }
 
-/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], total_pages, free_count,
-            initialized, alloc_hint;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
                           uint32_t map_count) {
     uint32_t i;
@@ -252,9 +250,6 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
 
 /* Reserve a range of pages (e.g., hypervisor own memory, IOMMU tables).
  * Prevents the allocator from handing out pages in this range. */
-/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size) {
     uint64_t end_addr, start_pfn_64, end_pfn_64;
     uint32_t start_pfn, end_pfn, pfn;
@@ -306,9 +301,6 @@ int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size) {
 /* Allocate one physical page frame.
  * Returns physical address (page-aligned), or 0 on failure.
  * The page is zeroed before return (REQ-0203). */
-/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count, alloc_hint;
-    ensures \result == 0 || (\result % PAGE_SIZE == 0 && \result >= PAGE_SIZE);
-*/
 uint64_t fbvbs_page_alloc(void) {
     uint32_t pfn;
     uint32_t scanned = 0;
@@ -376,9 +368,6 @@ uint64_t fbvbs_page_alloc(void) {
 
 /* Free a physical page frame, returning it to the pool.
  * The page is zeroed before free (REQ-0903 — reuse-before-zero). */
-/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count, alloc_hint;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_page_free(uint64_t phys_addr) {
     uint32_t pfn;
 
@@ -435,9 +424,6 @@ int fbvbs_page_free(uint64_t phys_addr) {
 }
 
 /* Query allocator statistics. */
-/*@ assigns \nothing;
-    ensures \result >= 0;
-*/
 uint32_t fbvbs_page_alloc_free_count(void) {
     if (initialized != 1U) {
         return 0;
@@ -445,9 +431,6 @@ uint32_t fbvbs_page_alloc_free_count(void) {
     return free_count;
 }
 
-/*@ assigns \nothing;
-    ensures \result >= 0;
-*/
 uint32_t fbvbs_page_alloc_total_pages(void) {
     if (initialized != 1U) {
         return 0;

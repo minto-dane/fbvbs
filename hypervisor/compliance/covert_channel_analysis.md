@@ -30,7 +30,7 @@ of other partitions.
 |---------|-----------|------------------|---------------|
 | VMX preemption timer | Timer reload value leaks scheduling quantum | Fixed preemption tick value (FBVBS_DEFAULT_PREEMPTION_TICKS); reload is constant regardless of exit reason | **Low**: Constant reload eliminates scheduling-dependent timing variation |
 | VM exit processing time | Exit handler duration varies by exit type | IBPB on every VM exit (unconditional); exit handler timing varies but is not guest-observable during exit | **Medium**: Architectural — the guest observes RDTSC delta across exit/entry |
-| VERW/MDS flush timing | VERW duration depends on buffer state | Unconditional VERW on VM exit (when needed per vuln profile); no conditional skip | **Low**: Always executed, no timing variation |
+| VERW/MDS flush timing | VERW duration depends on buffer state | VERW on VM exit when `need_verw` is set in the vuln profile; skipped only on CPUs whose profile marks the mitigation unnecessary | **Low (conditional)**: Low when `need_verw` is set; higher residual risk if the profile omits VERW on a vulnerable CPU |
 | RSB fill timing | RSB fill loop count is constant | Fixed 32-entry RSB fill (PRODUCTION NOTE); not conditional | **Low**: Constant iteration count |
 | Memory access timing | Cache state leaks across partitions | L1D flush on cross-partition exit (Intel MDS mitigation); IBPB clears branch predictor state | **Medium**: LLC (L3) sharing remains |
 
@@ -38,7 +38,7 @@ of other partitions.
 
 | Channel | Mechanism | FBVBS Mitigation | Residual Risk |
 |---------|-----------|------------------|---------------|
-| L1 data cache | L1D contents survive context switch | L1D_FLUSH on cross-partition VM exit (when `need_l1d_flush` set in vuln profile, cpu_security.c) | **Low**: Hardware L1D flush eliminates L1 leakage |
+| L1 data cache | L1D contents survive context switch | L1D_FLUSH on cross-partition VM exit (when `need_l1d_flush` is set in vuln profile, cpu_security.c) | **Low (conditional)**: Low when `need_l1d_flush` is set; High if a vulnerable CPU is mis-profiled and the flush is skipped |
 | L1 instruction cache | L1I contents leak code layout | IBPB clears BTB/RSB; L1I flush not available in hardware | **Medium**: L1I sharing is architectural |
 | L2 unified cache | Shared between logical processors | No hardware flush mechanism; SMT scheduling mitigation | **High**: Requires SMT-aware scheduling (not yet implemented) |
 | LLC (L3) | Shared across all cores | Cache Allocation Technology (CAT) partitioning (not yet implemented) | **High**: LLC sharing is the primary residual channel |
@@ -66,12 +66,12 @@ of other partitions.
 
 | Channel | Mechanism | FBVBS Mitigation | Residual Risk |
 |---------|-----------|------------------|---------------|
-| MFBDS (Fallout) | Store buffer leakage | VERW on VM exit when need_verw set (cpu_security.c) | **Low**: Hardware mitigation applied |
-| MLPDS | Load port leakage | VERW on VM exit | **Low**: Hardware mitigation applied |
-| MSBDS | Microarchitectural store buffer | VERW on VM exit | **Low**: Hardware mitigation applied |
-| TAA (TSX Async Abort) | TSX-based MDS variant | VERW on VM exit; TSX disabled via IA32_TSX_CTRL MSR intercept (REQ-0340) | **Low**: VERW + TSX disable |
-| MMIO stale data | MMIO read of stale data | VERW on VM exit (covers MMIO stale data on affected SKUs) | **Low**: VERW mitigation |
-| RFDS (Register File Data Sampling) | Register file leakage | VERW on VM exit when need_verw set (includes RFDS via immune_rfds check, cpu_security.c:309) | **Low**: VERW covers RFDS |
+| MFBDS (Fallout) | Store buffer leakage | VERW on VM exit when `need_verw` set (cpu_security.c) | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
+| MLPDS | Load port leakage | VERW on VM exit when `need_verw` set | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
+| MSBDS | Microarchitectural store buffer | VERW on VM exit when `need_verw` set | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
+| TAA (TSX Async Abort) | TSX-based MDS variant | VERW on VM exit when `need_verw` set; TSX disabled via IA32_TSX_CTRL MSR intercept (REQ-0340) | **Low (conditional)**: Low when `need_verw` is set; TSX disable is an additional mitigation, but not a substitute for the conditional VERW path |
+| MMIO stale data | MMIO read of stale data | VERW on VM exit when `need_verw` set (covers MMIO stale data on affected SKUs) | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
+| RFDS (Register File Data Sampling) | Register file leakage | VERW on VM exit when `need_verw` set (includes RFDS via immune_rfds check, cpu_security.c:309) | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
 
 ### 2.6 IOMMU / DMA Channels
 
@@ -93,11 +93,13 @@ of other partitions.
 
 ## 3. Residual Risk Summary
 
-### Low Residual Risk (hardware mitigations in place)
-- L1D cache (L1D_FLUSH)
+### Conditional Low Residual Risk (hardware mitigations conditional on vulnerability profile)
+- L1D cache (L1D_FLUSH when `need_l1d_flush` set; skipped on L1TF-immune CPUs)
+- MDS/TAA/MMIO/RFDS (VERW when `need_verw` set; skipped on fully immune CPUs)
+
+### Low Residual Risk (hardware mitigations unconditionally in place)
 - TLB (VPID)
 - Branch predictors (IBPB + eIBRS/AutoIBRS + RSB fill)
-- MDS/TAA/RFDS (VERW)
 - DMA (IOMMU isolation)
 - Debug registers (zeroed + sanitized + shadow)
 - Preemption timer (constant reload)

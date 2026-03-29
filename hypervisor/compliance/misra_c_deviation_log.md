@@ -60,21 +60,12 @@ hardware register access.
 4. Asm constraints are reviewed: output (=), input, clobber lists are
    explicit. Read-modify-write uses +m constraint (spinlock fix 2026-03-20).
 
-### DEV-002: `_Static_assert` (Rule 1.2)
+### DEV-002: (Removed — see Section 4.1 Conformance Notes)
 
-**Rule:** Rule 1.2 — Language extensions shall not be used.
-
-**Deviation:** `_Static_assert` is a C11 feature (not an extension) used
-for compile-time safety guards.
-
-**Scope:** 21+ occurrences across 9 files (partition.c, memory.c, log.c,
-page_alloc.c, idt.c, kernel.c, mp_init.c, apic.c, fuzz harnesses).
-
-**Justification:** `_Static_assert` is ISO C11 §6.7.10, not an extension.
-MISRA C:2023 targets C11/C18 and permits this. Used to guard ABI struct
-sizes, buffer bounds, and cross-file type consistency.
-
-**Mitigation:** N/A — this is a standard C11 feature, not a deviation.
+`_Static_assert` was originally listed here as a Rule 1.2 deviation. It is
+in fact ISO C11 §6.7.10, a standard language feature, not an extension.
+MISRA C:2023 targets C11/C18 and permits `_Static_assert`. This entry is
+retained as a cross-reference; see Section 4.1 for the conformance record.
 
 ### DEV-003: `void *` Pointer Casts (Rule 11.5, Rule 11.1)
 
@@ -105,25 +96,28 @@ data. Physical page management requires address ↔ pointer conversion.
    firmware-aligned, IDT entries are 16-byte aligned, pages are 4K-aligned).
 4. GCC -fanalyzer + cppcheck validate these files.
 
-### DEV-004: `volatile` Qualifier Usage (Rule 2.2 advisory, Dir 4.9)
+### DEV-004: `volatile` Qualifier Usage (Rule 11.8)
 
-**Rule:** Dir 4.9 — A function should be used in preference to a
-function-like macro.
+**Rule:** Rule 11.8 — A conversion shall not remove any const, volatile,
+or _Atomic qualification from the type pointed to by a pointer.
 
-**Deviation:** `volatile` is used for:
+**Deviation:** `volatile`-qualified accesses are required for:
 1. Memory-mapped I/O register access (IOMMU, APIC)
-2. Constant-time security operations (prevent compiler optimization)
-3. Spinlock implementation (memory ordering)
+2. Constant-time security operations where the compiler must not elide
+   observable loads/stores
+3. Spinlock implementation and memory ordering primitives
 
-**Scope:** Part of the 88 asm/volatile occurrences above.
+**Scope:** Part of the 88 asm/volatile occurrences above (overlaps DEV-001).
 
-**Justification:** `volatile` is the standard C mechanism for:
-- Preventing compiler reordering of security-critical memory operations
-- Ensuring MMIO writes are not optimized away
-- Implementing constant-time comparisons (REQ: no timing side channels)
+**Justification:** The hypervisor must preserve hardware-visible side
+effects and ordering. `volatile` is used only where the code needs the
+compiler to observe MMIO, barrier, or lock state transitions. No code
+path strips `volatile` qualification from a pointer target, which is the
+specific MISRA concern addressed by Rule 11.8.
 
 **Mitigation:** Each use is documented. Compiler barriers (`asm volatile
-("" ::: "memory")`) are paired with volatile accesses where needed.
+("" ::: "memory")`) are paired with volatile accesses where needed, and
+the surrounding code avoids casts that would remove `volatile`.
 
 ### DEV-005: `uintptr_t` ↔ Pointer Conversion (Rule 11.4, Rule 11.6)
 
@@ -168,20 +162,11 @@ jumps forward only, to a single well-defined halt point.
 **Mitigation:** Forward-only goto to a single label. No complex control
 flow. Function is excluded from WP analysis.
 
-### DEV-007: Recursive Include Guard Macros (Dir 4.10)
+### DEV-007 and DEV-008: (Removed — see Section 4.1 Conformance Notes)
 
-**Rule:** Dir 4.10 — Precautions shall be taken in order to prevent the
-contents of a header file being included more than once.
-
-**Status:** COMPLIANT — All headers use `#ifndef`/`#define`/`#endif` guards.
-
-### DEV-008: Identifier Reuse Across Translation Units
-
-**Rule:** Rule 5.3 — An identifier declared in an inner scope shall not
-hide an identifier declared in an outer scope.
-
-**Status:** COMPLIANT — `-Wshadow` is enabled with `-Werror`. Any
-shadowing is a compile error.
+DEV-007 (Dir 4.10 include guards) and DEV-008 (Rule 5.3 identifier
+shadowing) were originally listed here but are **compliant**, not
+deviations. They have been relocated to Section 4.1 (Conformance Notes).
 
 ---
 
@@ -200,9 +185,36 @@ shadowing is a compile error.
 
 ---
 
+## 4.1 Conformance Notes
+
+The following features were reviewed and found to be **conformant** with
+MISRA C:2023. They are not deviations.
+
+### `_Static_assert` (formerly DEV-002)
+
+`_Static_assert` is ISO C11 §6.7.10, a standard language feature.
+MISRA C:2023 targets C11/C18 and permits `_Static_assert`. It is used in
+21+ occurrences across 9 files (partition.c, memory.c, log.c, page_alloc.c,
+idt.c, kernel.c, mp_init.c, apic.c, fuzz harnesses) to guard ABI struct
+sizes, buffer bounds, and cross-file type consistency. No deviation required.
+
+### Include Guards (formerly DEV-007)
+
+All headers use `#ifndef`/`#define`/`#endif` include guards per Dir 4.10.
+This is standard conformant practice, not a deviation.
+
+### No Identifier Shadowing (formerly DEV-008)
+
+`-Wshadow` is enabled with `-Werror`. Any shadowing is a compile error.
+This enforces Rule 5.3 compliance, not a deviation.
+
+---
+
 ## 5. Approval
 
-Deviations DEV-001 through DEV-006 are approved as project-wide deviations
-for the FBVBS hypervisor. They are inherent to bare-metal x86-64 hypervisor
+Deviations DEV-001, DEV-003, DEV-004, DEV-005, and DEV-006 are approved as
+project-wide deviations for the FBVBS hypervisor. DEV-002, DEV-007, and
+DEV-008 were found to be conformant and have been relocated to Section 4.1.
+The remaining deviations are inherent to bare-metal x86-64 hypervisor
 development and are mitigated by the static analysis, testing, and
 in-progress formal verification infrastructure documented above.

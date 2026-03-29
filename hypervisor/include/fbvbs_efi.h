@@ -28,7 +28,7 @@ typedef int64_t  INTN;
 typedef uint16_t CHAR16;
 typedef uint8_t  BOOLEAN;
 
-/* Use cdecl on x86_64 (MS ABI: rcx, rdx, r8, r9 for first 4 args) */
+/* EFIAPI uses the Microsoft x64 ABI for UEFI x64 via __attribute__((ms_abi)). */
 #define EFIAPI __attribute__((ms_abi))
 
 /* ================================================================

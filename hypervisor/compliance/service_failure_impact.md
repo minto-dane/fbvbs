@@ -23,8 +23,13 @@ FBVBS is designed around a partitioned architecture with five trusted services:
 
 In the intended end state, each trusted service runs in its own
 partition with independent failure domains. The current retained-C
-repository does not yet materialize those service partitions because
-`PARTITION_LOAD_IMAGE` remains fail-closed.
+repository already implements `PARTITION_LOAD_IMAGE` for the fixed
+ELF64 `ET_EXEC` profile: it reads a measured service image, validates
+`image_object_id`/`entry_ip`/`initial_sp`, maps it into partition
+memory, and reaches `Loaded` only on success. The path remains
+fail-closed on any measurement, loader, or mapping error, and the
+SPARK trusted-service payloads plus full orchestration remain future
+phase work.
 
 ---
 
@@ -73,11 +78,20 @@ repository does not yet materialize those service partitions because
 | **Guest Impact** | None |
 | **Recovery** | Partition restart; shadow copy re-initialization from live kernel state |
 
+**KSI Protection Tier Definitions:**
+- **Tier A (immutable):** Kernel structures that must never change after
+  boot (e.g., sysent, IDT, GDT, vop_vector). Protected by EPT read-only
+  mappings enforced by the microhypervisor — no KSI service dependency.
+- **Tier B (controlled-update):** Kernel structures that may be
+  legitimately modified but only within hypervisor-supervised write-enable
+  windows (e.g., ucred, prison, securelevel). KSI maintains shadow copies
+  and grants/revokes write access.
+
 **Fail-Closed Behavior:**
-- Tier A (immutable structures: sysent, IDT, GDT, vop_vector) remain
-  EPT read-only protected — no service dependency
-- Tier B (controlled-update: ucred, prison, securelevel) shadow copies
-  become stale but remain read-only — no new modifications permitted
+- Tier A structures remain EPT read-only protected regardless of KSI
+  availability — the microhypervisor enforces this independently
+- Tier B shadow copies become stale if KSI fails but remain read-only —
+  no new modifications permitted without KSI to grant write-enable windows
 - Setuid DB lookup fails closed: all setuid transitions denied
 
 ### 2.4 IKS (Identity Key Service) Failure
@@ -140,10 +154,37 @@ SKS ──→ IKS (for key derivation primitives)
 UVS ──→ IKS (for manifest signature verification)
 ```
 
+**Bootstrap sequence and the KCI/KSI dependency:** KSI depends on KCI for
+verifying KSI's own code integrity, which appears circular if KCI also
+depends on KSI. In practice, this is resolved by the bootstrap order:
+1. The microhypervisor creates and measures KCI first (using its own
+   built-in measurement, not KSI).
+2. KCI reaches RUNNING state before KSI is created.
+3. The microhypervisor creates KSI; KCI verifies KSI's module integrity
+   during KSI's load phase.
+4. Once both are running, KSI uses KCI for ongoing code integrity checks
+   of its own updates (not its initial load).
+
+If KCI fails after bootstrap, KSI continues running with its existing
+verified code but cannot apply updates to itself. Recovery requires
+restarting KCI first (via microhypervisor VM_DESTROY + VM_CREATE), then
+optionally restarting KSI to re-establish full verification.
+
+If KCI is unavailable during KSI startup, KSI must enter a
+verification-suspended initialization mode. In that mode KSI may use
+cached integrity metadata or an operator-approved offline verification
+token to complete a bounded self-check, but it must not transition to
+RUNNING or participate in service election until KCI health checks
+succeed or the operator explicitly authorizes the offline path. If both
+KCI and KSI are down, the operator recovery order is: bring KCI up first,
+confirm its health and audit continuity, then restart KSI in normal mode
+or verification-suspended mode, and finally re-enable dependent services
+only after both services pass health checks.
+
 | Service Down | Cascade Effect |
 |-------------|----------------|
-| KCI down | KSI cannot verify its own updates; existing KSI continues |
-| KSI down | No cascade (KCI, IKS, SKS, UVS independent) |
+| KCI down | Existing KSI continues with last-verified code; KSI startup must enter verification-suspended mode using cached metadata or an operator-approved offline token until KCI health checks pass |
+| KSI down | No cascade (KCI, IKS, SKS, UVS independent); do not rejoin election until KSI health checks pass |
 | IKS down | SKS key derivation fails; UVS signature verification fails |
 | SKS down | No cascade (mount operations fail, but I/O continues) |
 | UVS down | No cascade (updates blocked, system runs at current state) |
@@ -179,11 +220,27 @@ When a trusted service partition faults:
 | Test | Method | Status |
 |------|--------|--------|
 | Microhypervisor fault = total halt | Injected triple fault | Design analysis only |
-| KCI fault → KLD load denied | Kill KCI partition, attempt kldload | Requires Phase 4 |
-| KSI fault → setuid denied | Kill KSI partition, attempt setuid exec | Requires Phase 4 |
-| IKS fault → SKS/UVS cascade | Kill IKS partition, verify SKS+UVS fail | Requires Phase 4 |
+| KCI fault → KLD load denied | Kill KCI partition, attempt kldload | Phase 4 target: mock KCI module with retained-measurement replay and a denied-load assertion |
+| KSI fault → setuid denied | Kill KSI partition, attempt setuid exec | Phase 4 target: KSI mock + setuid database fixture + expected deny result |
+| IKS fault → SKS/UVS cascade | Kill IKS partition, verify SKS+UVS fail | Phase 4 target: subsystem simulation with mock key handles and cascade assertions |
 | Partition fault → FAULTED state | test_fault_injection.c test 7 | ✅ Verified |
 | Watchdog → hung partition faulted | test_fault_injection.c test 5 | ✅ Verified |
 | Double fault → idempotent | test_fault_injection.c test 8 | ✅ Verified |
 | IOMMU domain cleanup on destroy | fbvbs_partition_destroy_common | ✅ Verified (WP + test) |
 | Memory zeroed on destroy | fbvbs_partition_sanitize_memory | ✅ Verified (design) |
+
+### 5.1 Phase 4 Timeline and Interim Verification
+
+- M1 (Owner: KCI/KSI service lead): complete the KCI/KSI mock interfaces and
+  replayable fixtures for the partition lifecycle and health-check path.
+- M2 (Owner: Trusted-service verification lead): validate KCI denial and KSI
+  verification-suspended startup using unit tests with offline tokens and
+  cached metadata.
+- M3 (Owner: IKS/SKS/UVS service lead): validate cascade behavior with
+  subsystem simulations and audit-log assertions.
+- Success criteria: each mock-based test must demonstrate fail-closed
+  behavior, explicit operator actions, and reproducible logs before the
+  hardware-backed Phase 4 run.
+- Target window: Phase 4 execution is aligned to the next roadmap hardware
+  validation milestone; until then, the mock and static-analysis evidence
+  above is the official verification proxy.

@@ -7,8 +7,8 @@ producer-facing な standalone コンポーネントとしては `hypervisor/` �
 ## 現在の実装状態
 
 - **マイクロハイパーバイザー本体**: C11 + ACSL。現時点の機械的検証は GCC `-fanalyzer` と unit test が中心です。
-- **bare-metal boot path**: Multiboot2 + GRUB ISO + QEMU smoke を追加しました。現在は TCG smoke とローカル KVM smoke の両方で `boot64`、boot artifact materialization、boot catalog ingest、host partition seed まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed します。bare-metal retained-C release profile では host kernel artifact `0x1700` をロード済みハイパーバイザーの immutable image bytes に束縛し、残りの retained boot artifact は `artifact:0x...` / `fbvbs.object_id=0x...` を持つ明示 Multiboot module からのみ受理します。ISO build はその module 群の封入有無も検証します。
-- **retained-C foundation 判定**: `fbvbs_audit_runtime_ready()`、`fbvbs_platform_foundation_ready()`、`fbvbs_platform_high_assurance_foundation_ready()` により、一次監査ログ経路を初期化済みか、VMX + runtime-ready IOMMU + audit path まで到達した foundation か、さらに measured boot を伴う高保証 foundation かをコード上で区別するようにしました。host deprivilege は別に `fbvbs_host_deprivilege_runtime_ready()` で可視化されます。
+- **bare-metal boot path**: Multiboot2 + GRUB ISO + staged QEMU smoke を追加しました。repository-local では Stage 1 の QEMU/TCG boot-to-gate (`make -C hypervisor run-qemu-smoke`)、Stage 2 のローカル QEMU/KVM boot-to-gate (`make -C hypervisor run-qemu-kvm-smoke`)、Stage 3 の q35 `intel-iommu` / `amd-iommu` emulation matrix (`make -C hypervisor run-qemu-iommu-smoke`, `make -C hypervisor run-qemu-matrix`) を回せます。現在は `boot64`、boot artifact materialization、boot catalog ingest、host partition seed まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed します。bare-metal retained-C release profile では host kernel artifact `0x1700` をロード済みハイパーバイザーの immutable image bytes に束縛し、残りの retained boot artifact は `artifact:0x...` / `fbvbs.object_id=0x...` を持つ明示 Multiboot module からのみ受理します。ISO build はその module 群の封入有無も検証します。
+- **retained-C foundation 判定**: `fbvbs_audit_runtime_ready()`、`fbvbs_platform_foundation_ready()`、`fbvbs_platform_high_assurance_foundation_ready()` により、一次監査ログ経路を初期化済みか、VMX + runtime-ready IOMMU + audit path まで到達した foundation か、さらに measured boot を伴う高保証 foundation かをコード上で区別するようにしました。監査 ready は mirror ring に加えて retained-C primary UART/OOB sink flag も要求します。host deprivilege は別に `fbvbs_host_deprivilege_runtime_ready()` で可視化されます。
 - **host-side 検証安全化**: unit test / coverage / fuzz などの userspace build では CPU security 内部の MSR access を最小ソフトウェアモデルに落とし、privileged `RDMSR/WRMSR` を直接実行しないようにしています。bare-metal build は引き続き実 MSR 命令を使います。
 - **VM 実行ハンドオフ**: VMCS 構成ロジックはありますが、host deprivilege / `VMLAUNCH` の end-to-end handoff はまだ release 完了ではありません。
 - **Frama-C WP**: `make proof` / `make frama-c-wp` は `opam` 側の Frama-C を優先して起動します。現時点では proof gap が残っており、主な残課題は `vmx.c` の union モデル warning、Missing RTE guards、一部 timeout です。`make proof-smoke` は fatal annotation/user error なしで安定起動するようになりました。
@@ -47,9 +47,14 @@ make test     # unit test
 make coverage # gcov line/branch coverage (command.c/vm_policy.c/vmx.c の 0% regression を拒否)
 make proof    # Frama-C WP（WP plugin がある環境のみ）
 make proof-smoke
+make fuzz-smoke
 make baremetal-iso
 make run-qemu-smoke
+make provenance
+FBVBS_RELEASE_SIGNING_KEY=/path/to/release-key.pem make sign-release
+make release-readiness
 make release-manifest
+make release-evidence
 make release-hypervisor
 ```
 
@@ -60,6 +65,10 @@ make release-hypervisor
 - [エージェント引き継ぎサマリー](plan/agent-handoff-summary.md)
 - [Standalone Hypervisor Boundary](hypervisor/README.md)
 - [retained C 境界保証](hypervisor/compliance/retained_c_leaf_boundary.md)
+- [Hardware Validation Campaign](hypervisor/compliance/hardware_validation_campaign.md)
+- [Deployment Profile](hypervisor/compliance/deployment_profile.md)
+- [Audit OOB Collection](hypervisor/compliance/audit_oob_collection.md)
+- [Release Promotion Model](hypervisor/compliance/release_promotion_model.md)
 - [Contribution Guide](CONTRIBUTING.md)
 - [Release Guide](RELEASE.md)
 - [Security Policy](SECURITY.md)

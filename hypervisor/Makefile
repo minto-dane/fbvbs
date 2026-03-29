@@ -121,11 +121,12 @@ FRAMAC_WP_FLAGS := \
     -wp-rte \
     -kernel-warn-key annot-error=abort \
     -cpp-extra-args="-D__FRAMAC__ -Iinclude"
-PROOF_SHARD_TIMEOUT ?= 120
+PROOF_SHARD_TIMEOUT ?= 360
+QEMU_MATRIX_SCRIPT := tools/qemu_smoke_matrix.py
 
 # ---------- targets ----------
 
-.PHONY: all clean analyze test proof frama-c-wp proof-smoke proof-shards fuzz-build coverage coverage-clean cppcheck traceability ci baremetal-elf baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-kvm-smoke release-manifest release-hypervisor
+.PHONY: all clean analyze test proof frama-c-wp proof-smoke proof-shards fuzz-build fuzz-smoke coverage coverage-clean cppcheck traceability ci baremetal-elf baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-kvm-smoke run-qemu-iommu-smoke run-qemu-matrix provenance sign-release release-readiness release-manifest release-evidence release-hypervisor
 
 all: analyze
 
@@ -177,6 +178,7 @@ proof-shards: | $(BUILD_DIR)
 		timeout $(PROOF_SHARD_TIMEOUT)s $(FRAMAC) $(FRAMAC_WP_FLAGS) "$$src" > "$$log" 2>&1; \
 		status=$$?; \
 		set -e; \
+		test -f "$$log" || { echo "proof-shard log was not created: $$log"; exit 1; }; \
 		grep -q "\\[wp\\].*Running WP plugin" "$$log" || exit 1; \
 		! grep -q "annot-error" "$$log" || exit 1; \
 		! grep -q "User Error" "$$log" || exit 1; \
@@ -185,7 +187,7 @@ proof-shards: | $(BUILD_DIR)
 		! grep -q "Missing specification" "$$log" || exit 1; \
 		! grep -q "Missing RTE guards" "$$log" || exit 1; \
 		! grep -q "\\[kernel:asm:clobber\\]" "$$log" || exit 1; \
-		goals=$$(grep -oP 'Computing \[\K[0-9]+(?= goals)' "$$log" | tail -n 1); \
+		goals=$$(awk '/Computing \[/{gsub(/.*Computing \[/,""); gsub(/ goals.*/,""); print}' "$$log" | tail -n 1); \
 		if [ -z "$$goals" ]; then goals=0; fi; \
 		printf "%s status=%s goals=%s log=%s\n" "$$base" "$$status" "$$goals" "$$log" >> $(BUILD_DIR)/proof-shards-summary.txt; \
 		if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
@@ -274,48 +276,60 @@ verify-baremetal-iso: $(BUILD_DIR)/fbvbs-baremetal.iso
 	grep -q "/boot/fbvbs-artifact-3700.bin" $(BUILD_DIR)/iso-file-list.txt
 
 run-qemu-smoke: $(BUILD_DIR)/fbvbs-baremetal.iso
-	rm -f $(BUILD_DIR)/qemu-smoke.log
-	timeout 20s $(QEMU) \
-		-machine q35,accel=tcg \
-		-m 256 \
-		-no-reboot -no-shutdown \
-		-display none -monitor none \
-		-serial stdio \
-			-cpu qemu64,+vmx,+nx,+rdrand,+rdseed \
-		-device intel-iommu,intremap=on,device-iotlb=on,caching-mode=on \
-		-cdrom $(BUILD_DIR)/fbvbs-baremetal.iso \
-		-boot d \
-		> $(BUILD_DIR)/qemu-smoke.log 2>&1; \
-	status=$$?; \
-	cat $(BUILD_DIR)/qemu-smoke.log; \
-	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
-		exit $$status; \
-	fi; \
-		grep -q "FBVBS: boot64 reached" $(BUILD_DIR)/qemu-smoke.log; \
-			grep -Eq "FBVBS: hypervisor init complete|FBVBS: VMX unavailable|FBVBS: IOMMU detection failed|FBVBS: IOMMU initialization failed|FBVBS: measured boot unavailable" $(BUILD_DIR)/qemu-smoke.log
+	python3 $(QEMU_MATRIX_SCRIPT) \
+		--build-dir $(BUILD_DIR) \
+		--iso $(BUILD_DIR)/fbvbs-baremetal.iso \
+		--logs-dir $(BUILD_DIR)/qemu-smoke-logs \
+		--output $(BUILD_DIR)/qemu-smoke-summary.txt \
+		--case tcg-intel-iommu \
+		--require-pass tcg-intel-iommu \
+		--alias-log $(BUILD_DIR)/qemu-smoke.log
 
 run-qemu-kvm-smoke: $(BUILD_DIR)/fbvbs-baremetal.iso
-	rm -f $(BUILD_DIR)/qemu-kvm-smoke.log
-	timeout 20s sudo -n $(QEMU) \
-		-machine q35,accel=kvm,kernel-irqchip=split \
-		-m 256 \
-		-no-reboot -no-shutdown \
-		-display none -monitor none \
-		-serial stdio \
-		-cpu host \
-		-device intel-iommu,intremap=on,device-iotlb=on,caching-mode=on \
-		-cdrom $(BUILD_DIR)/fbvbs-baremetal.iso \
-		-boot d \
-		> $(BUILD_DIR)/qemu-kvm-smoke.log 2>&1; \
-	status=$$?; \
-	cat $(BUILD_DIR)/qemu-kvm-smoke.log; \
-	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
-		exit $$status; \
-	fi; \
-			grep -q "FBVBS: boot64 reached" $(BUILD_DIR)/qemu-kvm-smoke.log; \
-				grep -Eq "FBVBS: hypervisor init complete|FBVBS: VMX unavailable|FBVBS: IOMMU detection failed|FBVBS: IOMMU initialization failed|FBVBS: measured boot unavailable" $(BUILD_DIR)/qemu-kvm-smoke.log
+	python3 $(QEMU_MATRIX_SCRIPT) \
+		--build-dir $(BUILD_DIR) \
+		--iso $(BUILD_DIR)/fbvbs-baremetal.iso \
+		--logs-dir $(BUILD_DIR)/qemu-smoke-logs \
+		--output $(BUILD_DIR)/qemu-kvm-smoke-summary.txt \
+		--case kvm-intel-iommu \
+		--require-pass kvm-intel-iommu \
+		--require-available kvm-intel-iommu \
+		--alias-log $(BUILD_DIR)/qemu-kvm-smoke.log
 
-release-manifest: reproducible sbom proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke | $(BUILD_DIR)
+run-qemu-iommu-smoke: $(BUILD_DIR)/fbvbs-baremetal.iso
+	python3 $(QEMU_MATRIX_SCRIPT) \
+		--build-dir $(BUILD_DIR) \
+		--iso $(BUILD_DIR)/fbvbs-baremetal.iso \
+		--logs-dir $(BUILD_DIR)/qemu-smoke-logs \
+		--output $(BUILD_DIR)/qemu-iommu-summary.txt \
+		--case tcg-intel-iommu \
+		--case tcg-amd-iommu \
+		--require-pass tcg-intel-iommu \
+		--require-pass tcg-amd-iommu
+
+run-qemu-matrix: $(BUILD_DIR)/fbvbs-baremetal.iso
+	python3 $(QEMU_MATRIX_SCRIPT) \
+		--build-dir $(BUILD_DIR) \
+		--iso $(BUILD_DIR)/fbvbs-baremetal.iso \
+		--logs-dir $(BUILD_DIR)/qemu-smoke-logs \
+		--output $(BUILD_DIR)/qemu-matrix-summary.txt \
+		--case tcg-intel-iommu \
+		--case tcg-amd-iommu \
+		--case kvm-intel-iommu \
+		--require-pass tcg-intel-iommu \
+		--require-pass tcg-amd-iommu
+
+provenance: reproducible sbom | $(BUILD_DIR)
+	python3 tools/generate_provenance.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/provenance.json
+
+sign-release: release-manifest release-evidence | $(BUILD_DIR)
+	@test -n "$$FBVBS_RELEASE_SIGNING_KEY" || { echo "ERROR: set FBVBS_RELEASE_SIGNING_KEY to a PEM private key path"; exit 1; }
+	python3 tools/sign_release_artifacts.py --build-dir $(BUILD_DIR) --key "$$FBVBS_RELEASE_SIGNING_KEY" $${FBVBS_RELEASE_SIGNING_CERT:+--cert "$$FBVBS_RELEASE_SIGNING_CERT"}
+
+release-readiness: fuzz-smoke reproducible sbom provenance proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix | $(BUILD_DIR)
+	python3 tools/release_readiness.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-readiness.json
+
+release-manifest: fuzz-smoke reproducible sbom provenance proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix release-readiness | $(BUILD_DIR)
 	@printf "FBVBS retained-C release manifest\n" > $(BUILD_DIR)/release-manifest.txt
 	@printf "Generated: %s\n" "$$(date -u -Iseconds)" >> $(BUILD_DIR)/release-manifest.txt
 	@printf "Git HEAD: %s\n" "$$(git rev-parse HEAD 2>/dev/null || echo unknown)" >> $(BUILD_DIR)/release-manifest.txt
@@ -325,8 +339,14 @@ release-manifest: reproducible sbom proof-smoke proof-shards baremetal-iso verif
 		$(BUILD_DIR)/fbvbs-baremetal.iso \
 		$(BUILD_DIR)/iso-file-list.txt \
 		$(BUILD_DIR)/qemu-smoke.log \
+		$(BUILD_DIR)/qemu-smoke-summary.txt \
+		$(BUILD_DIR)/qemu-iommu-summary.txt \
+		$(BUILD_DIR)/qemu-matrix-summary.txt \
+		$(BUILD_DIR)/fuzz-smoke.txt \
 		$(BUILD_DIR)/proof-smoke.log \
 		$(BUILD_DIR)/proof-shards-summary.txt \
+		$(BUILD_DIR)/provenance.json \
+		$(BUILD_DIR)/release-readiness.json \
 		$(BUILD_DIR)/sbom.txt \
 		$(BUILD_DIR)/repro_manifest_1.sha256 \
 		$(BUILD_DIR)/repro_manifest_2.sha256; do \
@@ -339,10 +359,15 @@ release-manifest: reproducible sbom proof-smoke proof-shards baremetal-iso verif
 	done
 	@echo "Release manifest written to $(BUILD_DIR)/release-manifest.txt"
 
+release-evidence: release-manifest | $(BUILD_DIR)
+	python3 tools/release_evidence_bundle.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-evidence.tar.gz
+
 release-hypervisor:
 	@$(MAKE) clean
-	@$(MAKE) analyze test cppcheck fuzz-build coverage traceability reproducible sbom proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke
+	@$(MAKE) analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix
+	@$(MAKE) provenance
 	@$(MAKE) release-manifest
+	@$(MAKE) release-evidence
 	@echo "Standalone retained-C microhypervisor foundation gates passed; formal proof and release blockers are tracked separately."
 
 # ---------- traceability (Phase 9-1, REQ-1000) ----------
@@ -472,6 +497,9 @@ FUZZ_CFLAGS := $(COMMON_WARNINGS) -O1 -g $(INCLUDES) -DFUZZ_TARGET \
 
 fuzz-build: $(BUILD_DIR)/fuzz_command_page $(BUILD_DIR)/fuzz_multiboot2 $(BUILD_DIR)/fuzz_manifest $(BUILD_DIR)/fuzz_iommu $(BUILD_DIR)/fuzz_log_decoder $(BUILD_DIR)/fuzz_partition_loader
 
+fuzz-smoke: fuzz-build | $(BUILD_DIR)
+	python3 tools/fuzz_smoke.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/fuzz-smoke.txt
+
 $(BUILD_DIR)/fuzz_command_page: $(HOST_OBJECTS) fuzz/fuzz_command_page.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
@@ -492,5 +520,5 @@ $(BUILD_DIR)/fuzz_partition_loader: $(HOST_OBJECTS) fuzz/fuzz_partition_loader.c
 
 # ---------- CI gate (Phase 9-8, REQ-1000) ----------
 # Runs all verification gates in sequence. Equivalent to the GitHub Actions pipeline.
-ci: analyze test cppcheck fuzz-build coverage traceability reproducible sbom
+ci: analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom provenance
 	@echo "CI: All gates passed."

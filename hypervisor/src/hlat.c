@@ -184,16 +184,39 @@ static int fbvbs_hlat_add_region(
         return -1;
     }
 
-    /* Validate all regions share the same PML4 index.
-     * The model uses single shared PDPT/PD/PT tables per PML4 entry;
-     * if regions span different PML4 entries, the shared tables cause
-     * unintended aliasing (CWE-269). Production must allocate per-PML4
-     * subtables; until then, reject cross-PML4 regions. */
+    /* The current model uses a single 512-entry PT table. Regions that
+     * would cross that boundary cannot be represented safely. */
+    {
+        uint64_t start_pt = (uint64_t)((linear_base >> 12) & 0x1FFU);
+        uint64_t pages = size / HLAT_PAGE_SIZE;
+        if (pages > HLAT_ENTRIES_PER_TABLE ||
+            start_pt + pages > HLAT_ENTRIES_PER_TABLE) {
+            return -1;
+        }
+    }
+
+    /* Validate all regions share the same PML4/PDPT/PD indices.
+     * The retained-C model uses one shared PDPT, PD, and PT page per
+     * partition. If regions cross a PDPT/PD boundary, or mix indices from
+     * different upper levels, the shared tables would alias distinct linear
+     * ranges onto the same leaf PT entries. Production must allocate full
+     * per-level subtables; until then, reject anything outside one 2 MiB
+     * window. */
     {
         uint32_t new_pml4_idx = (uint32_t)((linear_base >> 39) & 0x1FFU);
         uint32_t new_end_pml4 = (uint32_t)(((linear_base + size - 1U) >> 39) & 0x1FFU);
+        uint32_t new_pdpt_idx = (uint32_t)((linear_base >> 30) & 0x1FFU);
+        uint32_t new_end_pdpt = (uint32_t)(((linear_base + size - 1U) >> 30) & 0x1FFU);
+        uint32_t new_pd_idx = (uint32_t)((linear_base >> 21) & 0x1FFU);
+        uint32_t new_end_pd_idx = (uint32_t)(((linear_base + size - 1U) >> 21) & 0x1FFU);
         if (new_pml4_idx != new_end_pml4) {
             return -1;  /* Region spans PML4 boundary — not supported */
+        }
+        if (new_pdpt_idx != new_end_pdpt) {
+            return -1;  /* Region spans PDPT boundary — not supported */
+        }
+        if (new_pd_idx != new_end_pd_idx) {
+            return -1;  /* Region spans PD boundary — not supported */
         }
         /* Check existing regions for PML4 consistency */
         {
@@ -202,8 +225,14 @@ static int fbvbs_hlat_add_region(
                 if (config->regions[k].active != 0U) {
                     uint32_t existing_pml4 =
                         (uint32_t)((config->regions[k].linear_base >> 39) & 0x1FFU);
-                    if (existing_pml4 != new_pml4_idx) {
-                        return -1;  /* Different PML4 index — aliasing risk */
+                    uint32_t existing_pdpt =
+                        (uint32_t)((config->regions[k].linear_base >> 30) & 0x1FFU);
+                    uint32_t existing_pd =
+                        (uint32_t)((config->regions[k].linear_base >> 21) & 0x1FFU);
+                    if (existing_pml4 != new_pml4_idx ||
+                        existing_pdpt != new_pdpt_idx ||
+                        existing_pd != new_pd_idx) {
+                        return -1;  /* Different upper-level index — aliasing risk */
                     }
                 }
             }
@@ -276,14 +305,20 @@ static int fbvbs_hlat_remove_region(
     for (i = 0U; i < FBVBS_HLAT_MAX_REGIONS; ++i) {
         if (config->regions[i].active != 0U &&
             config->regions[i].module_object_id == module_object_id) {
-            config->regions[i].active = 0;
-            config->regions[i].linear_base = 0;
-            config->regions[i].size = 0;
-            config->regions[i].module_object_id = 0;
+            uint32_t j;
+
+            /* Compact the array so region_count stays equal to the
+             * number of active entries. */
+            for (j = i; j + 1U < config->region_count; ++j) {
+                config->regions[j] = config->regions[j + 1U];
+            }
             if (config->region_count > 0U) {
+                config->regions[config->region_count - 1U] =
+                    (struct fbvbs_hlat_region){0};
                 config->region_count -= 1U;
             }
             found = 1;
+            break;
         }
     }
 
@@ -327,7 +362,115 @@ struct fbvbs_hlat_partition_state {
     uint64_t phys_pt;
 };
 
+/* CONCURRENCY: hlat_partitions[] is accessed from init (BHL held)
+ * and runtime fault handlers (VM exit context, serialized per-vCPU).
+ * No concurrent mutation: init writes are complete before faults fire,
+ * and add_kld_module holds the BHL. */
 static struct fbvbs_hlat_partition_state hlat_partitions[FBVBS_MAX_PARTITIONS];
+static volatile uint32_t hlat_partition_locks[FBVBS_MAX_PARTITIONS];
+
+static void fbvbs_hlat_partition_lock(uint32_t part_idx)
+{
+#if defined(__FRAMAC__)
+    (void)part_idx;
+#else
+    while (__sync_lock_test_and_set(&hlat_partition_locks[part_idx], 1U) != 0U) {
+        fbvbs_asm_pause();
+    }
+#endif
+}
+
+static void fbvbs_hlat_partition_unlock(uint32_t part_idx)
+{
+#if defined(__FRAMAC__)
+    (void)part_idx;
+#else
+    __sync_lock_release(&hlat_partition_locks[part_idx]);
+#endif
+}
+
+static void fbvbs_hlat_sync_partition_tables(
+    const struct fbvbs_hlat_partition_state *hps)
+{
+#if !defined(__FRAMAC__) && defined(__x86_64__)
+    uint64_t *virt_pml4;
+    uint64_t *virt_pdpt;
+    uint64_t *virt_pd;
+    uint64_t *virt_pt;
+    uint32_t i;
+
+    if (hps == NULL || hps->phys_pml4 == 0U || hps->phys_pdpt == 0U ||
+        hps->phys_pd == 0U || hps->phys_pt == 0U) {
+        return;
+    }
+
+    virt_pml4 = (uint64_t *)(uintptr_t)hps->phys_pml4;
+    virt_pdpt = (uint64_t *)(uintptr_t)hps->phys_pdpt;
+    virt_pd = (uint64_t *)(uintptr_t)hps->phys_pd;
+    virt_pt = (uint64_t *)(uintptr_t)hps->phys_pt;
+
+    for (i = 0U; i < HLAT_ENTRIES_PER_TABLE; ++i) {
+        virt_pml4[i] = 0ULL;
+        virt_pdpt[i] = 0ULL;
+        virt_pd[i] = 0ULL;
+        virt_pt[i] = 0ULL;
+    }
+
+    for (i = 0U; i < hps->config.region_count; ++i) {
+        const struct fbvbs_hlat_region *region = &hps->config.regions[i];
+        uint64_t addr;
+        uint64_t end_addr;
+
+        if (region->active == 0U) {
+            continue;
+        }
+        if (region->size > UINT64_MAX - region->linear_base) {
+            continue;
+        }
+        addr = region->linear_base;
+        end_addr = region->linear_base + region->size;
+        while (addr < end_addr) {
+            uint32_t pml4_idx = (uint32_t)((addr >> 39) & 0x1FFU);
+            uint32_t pdpt_idx = (uint32_t)((addr >> 30) & 0x1FFU);
+            uint32_t pd_idx = (uint32_t)((addr >> 21) & 0x1FFU);
+            uint32_t pt_idx = (uint32_t)((addr >> 12) & 0x1FFU);
+
+            virt_pml4[pml4_idx] = (hps->phys_pdpt & HLAT_PTE_ADDR_MASK) |
+                                  HLAT_PTE_PRESENT | HLAT_PTE_RW;
+            virt_pdpt[pdpt_idx] = (hps->phys_pd & HLAT_PTE_ADDR_MASK) |
+                                  HLAT_PTE_PRESENT | HLAT_PTE_RW;
+            virt_pd[pd_idx] = (hps->phys_pt & HLAT_PTE_ADDR_MASK) |
+                              HLAT_PTE_PRESENT | HLAT_PTE_RW;
+            virt_pt[pt_idx] |= HLAT_PTE_PRESENT;
+            addr += HLAT_PAGE_SIZE;
+        }
+    }
+#else
+    (void)hps;
+#endif
+}
+
+static void fbvbs_hlat_invlpg_range(uint64_t base, uint64_t size)
+{
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    uint64_t addr;
+    uint64_t end_addr;
+
+    if (size == 0U || size > UINT64_MAX - base) {
+        return;
+    }
+
+    addr = base;
+    end_addr = base + size;
+    while (addr < end_addr) {
+        fbvbs_asm_invlpg(addr);
+        addr += HLAT_PAGE_SIZE;
+    }
+#else
+    (void)base;
+    (void)size;
+#endif
+}
 
 /* Extract page table indices from a linear address */
 static uint32_t hlat_pml4_index(uint64_t addr)
@@ -495,11 +638,25 @@ static int fbvbs_hlat_verify_tables(
                         config->regions[i].linear_base);
                     uint64_t pages =
                         config->regions[i].size / HLAT_PAGE_SIZE;
-                    /* Check if pt_idx falls within this region's
-                     * PT index range (mod 512) */
-                    if ((uint64_t)pt_idx >= start_pt &&
-                        (uint64_t)pt_idx < start_pt + pages) {
-                        covered = 1;
+                    uint64_t end_pt = start_pt + pages;
+
+                    /* Wrap-safe coverage check for a single 512-entry PT.
+                     * The add_region path rejects spans that would cross
+                     * the table boundary, but the verification logic still
+                     * handles wrapped ranges defensively. */
+                    if (pages > 0U) {
+                        if (end_pt <= HLAT_ENTRIES_PER_TABLE) {
+                            if ((uint64_t)pt_idx >= start_pt &&
+                                (uint64_t)pt_idx < end_pt) {
+                                covered = 1;
+                            }
+                        } else {
+                            uint64_t wrapped_end = end_pt % HLAT_ENTRIES_PER_TABLE;
+                            if ((uint64_t)pt_idx >= start_pt ||
+                                (uint64_t)pt_idx < wrapped_end) {
+                                covered = 1;
+                            }
+                        }
                     }
                 }
             }
@@ -586,7 +743,9 @@ int fbvbs_hlat_init_for_partition(
     uint64_t kernel_text_base,
     uint64_t kernel_text_size)
 {
-    struct fbvbs_hlat_model_tables tables;
+    /* Static to avoid ~16KB stack allocation. Thread safety is
+     * acceptable: HLAT init is BSP-only, single-threaded. */
+    static struct fbvbs_hlat_model_tables tables;
     struct fbvbs_hlat_vmcs_fields vmcs_fields;
     struct fbvbs_hlat_partition_state *hps;
     uint64_t phys_pml4, phys_pdpt, phys_pd, phys_pt;
@@ -611,6 +770,11 @@ int fbvbs_hlat_init_for_partition(
     }
 
     hps = &hlat_partitions[part_idx];
+    fbvbs_hlat_partition_lock(part_idx);
+    if (hps->config.active != 0U) {
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;
+    }
 
     /* Initialize HLAT configuration */
     fbvbs_hlat_config_init(&hps->config);
@@ -618,32 +782,41 @@ int fbvbs_hlat_init_for_partition(
     /* Add kernel text as the initial executable region */
     if (fbvbs_hlat_add_region(&hps->config, kernel_text_base,
                                kernel_text_size, 0U, 0U) != 0) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
-    hps->config.active = 1;
-
     /* Populate model page tables (validates construction logic) */
     if (fbvbs_hlat_populate_tables(&tables, &hps->config) != 0) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
     /* Verify table integrity */
     if (fbvbs_hlat_verify_tables(&tables, &hps->config) != 0) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
     /* Allocate physical pages for HLAT PML4/PDPT/PD/PT */
     phys_pml4 = fbvbs_page_alloc();
-    if (phys_pml4 == 0U) { return -1; }
+    if (phys_pml4 == 0U) {
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;
+    }
 
     phys_pdpt = fbvbs_page_alloc();
-    if (phys_pdpt == 0U) { (void)fbvbs_page_free(phys_pml4); return -1; }
+    if (phys_pdpt == 0U) {
+        (void)fbvbs_page_free(phys_pml4);
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;
+    }
 
     phys_pd = fbvbs_page_alloc();
     if (phys_pd == 0U) {
         (void)fbvbs_page_free(phys_pml4);
         (void)fbvbs_page_free(phys_pdpt);
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
@@ -652,6 +825,7 @@ int fbvbs_hlat_init_for_partition(
         (void)fbvbs_page_free(phys_pml4);
         (void)fbvbs_page_free(phys_pdpt);
         (void)fbvbs_page_free(phys_pd);
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
@@ -702,6 +876,7 @@ int fbvbs_hlat_init_for_partition(
     hps->config.hlat_pml4_phys = phys_pml4;
 
     /* Build VMCS fields */
+    hps->config.active = 1;
     if (fbvbs_hlat_build_vmcs_fields(&vmcs_fields, &hps->config) != 0) {
         /* Free the 4 pages we just allocated */
         (void)fbvbs_page_free(phys_pml4);
@@ -713,6 +888,8 @@ int fbvbs_hlat_init_for_partition(
         hps->phys_pd = 0U;
         hps->phys_pt = 0U;
         hps->config.hlat_pml4_phys = 0U;
+        hps->config.active = 0U;
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
@@ -720,13 +897,53 @@ int fbvbs_hlat_init_for_partition(
      * PRODUCTION NOTE: These VMWRITE calls require the partition's
      * VMCS to be the active VMCS (via VMPTRLD). The caller must
      * ensure this. */
-    (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
-                            vmcs_fields.tertiary_proc_controls);
-    (void)fbvbs_asm_vmwrite(VMCS_HLAT_PREFIX_SIZE,
-                            vmcs_fields.hlat_prefix_size);
-    (void)fbvbs_asm_vmwrite(VMCS_HLAT_POINTER,
-                            vmcs_fields.hlat_pointer);
+    if (fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                          vmcs_fields.tertiary_proc_controls) != 0) {
+        (void)fbvbs_page_free(phys_pml4);
+        (void)fbvbs_page_free(phys_pdpt);
+        (void)fbvbs_page_free(phys_pd);
+        (void)fbvbs_page_free(phys_pt);
+        hps->phys_pml4 = 0U;
+        hps->phys_pdpt = 0U;
+        hps->phys_pd = 0U;
+        hps->phys_pt = 0U;
+        hps->config.hlat_pml4_phys = 0U;
+        hps->config.active = 0U;
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;  /* VMWRITE failed: tertiary proc controls */
+    }
+    if (fbvbs_asm_vmwrite(VMCS_HLAT_PREFIX_SIZE,
+                          vmcs_fields.hlat_prefix_size) != 0) {
+        (void)fbvbs_page_free(phys_pml4);
+        (void)fbvbs_page_free(phys_pdpt);
+        (void)fbvbs_page_free(phys_pd);
+        (void)fbvbs_page_free(phys_pt);
+        hps->phys_pml4 = 0U;
+        hps->phys_pdpt = 0U;
+        hps->phys_pd = 0U;
+        hps->phys_pt = 0U;
+        hps->config.hlat_pml4_phys = 0U;
+        hps->config.active = 0U;
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;  /* VMWRITE failed: HLAT prefix size */
+    }
+    if (fbvbs_asm_vmwrite(VMCS_HLAT_POINTER,
+                          vmcs_fields.hlat_pointer) != 0) {
+        (void)fbvbs_page_free(phys_pml4);
+        (void)fbvbs_page_free(phys_pdpt);
+        (void)fbvbs_page_free(phys_pd);
+        (void)fbvbs_page_free(phys_pt);
+        hps->phys_pml4 = 0U;
+        hps->phys_pdpt = 0U;
+        hps->phys_pd = 0U;
+        hps->phys_pt = 0U;
+        hps->config.hlat_pml4_phys = 0U;
+        hps->config.active = 0U;
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;  /* VMWRITE failed: HLAT pointer */
+    }
 
+    fbvbs_hlat_partition_unlock(part_idx);
     return 0;
 }
 
@@ -776,20 +993,27 @@ int fbvbs_hlat_add_kld_module(
     }
 
     hps = &hlat_partitions[part_idx];
+    fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active == 0U) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;  /* HLAT not initialized for this partition */
     }
 
     /* Add KLD module as executable region */
     if (fbvbs_hlat_add_region(&hps->config, module_base,
                                module_size, 1U, module_object_id) != 0) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
+
+    fbvbs_hlat_sync_partition_tables(hps);
+    fbvbs_hlat_invlpg_range(module_base, module_size);
 
     /* PRODUCTION NOTE: After adding the region, the physical HLAT
      * page tables must be updated and INVLPG/INVPCID issued for
      * the affected linear address range. */
 
+    fbvbs_hlat_partition_unlock(part_idx);
     return 0;
 }
 
@@ -813,6 +1037,8 @@ int fbvbs_hlat_remove_kld_module(
     struct fbvbs_hlat_partition_state *hps;
     uint32_t part_idx;
     int found = 0;
+    uint64_t removed_base = 0U;
+    uint64_t removed_size = 0U;
 
     if (!fbvbs_hlat_is_available(&state->vmx_caps)) {
         return -1;
@@ -831,15 +1057,36 @@ int fbvbs_hlat_remove_kld_module(
     }
 
     hps = &hlat_partitions[part_idx];
+    fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active == 0U) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return -1;
+    }
+
+    {
+        uint32_t i;
+        for (i = 0U; i < hps->config.region_count; ++i) {
+            if (hps->config.regions[i].active != 0U &&
+                hps->config.regions[i].module_object_id == module_object_id) {
+                removed_base = hps->config.regions[i].linear_base;
+                removed_size = hps->config.regions[i].size;
+                break;
+            }
+        }
     }
 
     /* PRODUCTION NOTE: After removing the region, clear the physical
      * HLAT page table entries and issue INVLPG for each page in the
      * removed region. Zero the removed code pages for defense-in-depth. */
+    if (fbvbs_hlat_remove_region(&hps->config, module_object_id) != 0) {
+        fbvbs_hlat_partition_unlock(part_idx);
+        return -1;
+    }
 
-    return fbvbs_hlat_remove_region(&hps->config, module_object_id);
+    fbvbs_hlat_sync_partition_tables(hps);
+    fbvbs_hlat_invlpg_range(removed_base, removed_size);
+    fbvbs_hlat_partition_unlock(part_idx);
+    return 0;
 }
 
 /* ================================================================
@@ -1089,9 +1336,20 @@ void fbvbs_hlat_cleanup_partition(
     }
 
     hps = &hlat_partitions[part_idx];
+    fbvbs_hlat_partition_lock(part_idx);
 
     if (hps->config.active == 0U) {
+        fbvbs_hlat_partition_unlock(part_idx);
         return;
+    }
+
+    /* Clear PROC3_HLAT_ENABLE in VMCS before freeing page tables
+     * to avoid dangling VMCS references to freed pages. */
+    {
+        uint64_t tertiary = 0;
+        (void)fbvbs_asm_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
+        tertiary &= ~PROC3_HLAT_ENABLE;
+        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
     }
 
     /* Release allocated HLAT page table pages */
@@ -1110,4 +1368,5 @@ void fbvbs_hlat_cleanup_partition(
 
     /* Clear partition state */
     *hps = (struct fbvbs_hlat_partition_state){0};
+    fbvbs_hlat_partition_unlock(part_idx);
 }

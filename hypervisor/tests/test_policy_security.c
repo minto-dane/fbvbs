@@ -11,6 +11,32 @@
 
 #define TEST_ELF_CODE_OFFSET 0x100U
 #define TEST_ELF_CODE_SIZE 0x40U
+#define TEST_AUDIT_CAPTURE_BYTES 2048U
+
+static char g_audit_capture[TEST_AUDIT_CAPTURE_BYTES];
+static size_t g_audit_capture_length;
+static int g_audit_capture_enabled;
+
+void fbvbs_audit_primary_sink_write(const char *message) {
+    size_t index = 0U;
+
+    if (!g_audit_capture_enabled || message == NULL) {
+        return;
+    }
+
+    while (message[index] != '\0' &&
+           g_audit_capture_length + 1U < sizeof(g_audit_capture)) {
+        g_audit_capture[g_audit_capture_length] = message[index];
+        ++g_audit_capture_length;
+        ++index;
+    }
+    g_audit_capture[g_audit_capture_length] = '\0';
+}
+
+static void reset_audit_capture(void) {
+    memset(g_audit_capture, 0, sizeof(g_audit_capture));
+    g_audit_capture_length = 0U;
+}
 
 struct test_elf64_ehdr {
     uint8_t e_ident[16];
@@ -1368,6 +1394,7 @@ static void test_platform_foundation_helpers_expose_release_boundary(void) {
     state.boot_id_hi = 0x1234U;
     state.boot_id_lo = 0x5678U;
     assert(fbvbs_log_init(&state) == OK);
+    assert((state.runtime_state_flags & FBVBS_RUNTIME_AUDIT_PRIMARY_OOB) != 0U);
     assert(fbvbs_audit_runtime_ready(&state) == 1);
     assert(fbvbs_platform_foundation_ready(&state) == 1);
     assert(fbvbs_platform_high_assurance_foundation_ready(&state) == 0);
@@ -1391,6 +1418,37 @@ static void test_platform_foundation_helpers_expose_release_boundary(void) {
     assert((response.capability_bitmap1 & CAP_BITMAP1_FOUNDATION_READY) != 0U);
     assert((response.capability_bitmap1 & CAP_BITMAP1_HOST_DEPRIVILEGE) != 0U);
     assert((response.capability_bitmap1 & CAP_BITMAP1_HIGH_ASSURANCE_FOUNDATION) != 0U);
+}
+
+static void test_log_append_emits_primary_oob_audit_line(void) {
+    struct fbvbs_hypervisor_state state;
+    static const uint8_t payload[] = {0xAAU, 0xBBU, 0x01U};
+
+    memset(&state, 0, sizeof(state));
+    state.boot_id_hi = 0x1122334455667788ULL;
+    state.boot_id_lo = 0x99AABBCCDDEEFF00ULL;
+
+    reset_audit_capture();
+    g_audit_capture_enabled = 1;
+
+    assert(fbvbs_log_init(&state) == OK);
+    assert((state.runtime_state_flags & FBVBS_RUNTIME_AUDIT_PRIMARY_OOB) != 0U);
+    assert(fbvbs_log_append(&state,
+                            3U,
+                            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                            (uint16_t)FBVBS_SEVERITY_WARNING,
+                            0x1234U,
+                            payload,
+                            (uint32_t)sizeof(payload)) == OK);
+
+    g_audit_capture_enabled = 0;
+
+    assert(strstr(g_audit_capture, "AUDIT seq=0000000000000001") != NULL);
+    assert(strstr(g_audit_capture, " boot_hi=1122334455667788") != NULL);
+    assert(strstr(g_audit_capture, " boot_lo=99AABBCCDDEEFF00") != NULL);
+    assert(strstr(g_audit_capture, " cpu=00000003") != NULL);
+    assert(strstr(g_audit_capture, " evt=1234") != NULL);
+    assert(strstr(g_audit_capture, " payload=AABB01") != NULL);
 }
 
 
@@ -1626,27 +1684,30 @@ static void test_vm_release_device_stays_disabled_without_safe_teardown(void) {
     assert(state.partitions[0].assigned_devices[0] == 0xD901U);
 }
 
-static void test_iommu_init_requires_authoritative_host_policy(void) {
+static void test_iommu_init_fails_without_release_complete_platform_policy(void) {
     struct fbvbs_global_security_state intel_state;
     struct fbvbs_global_security_state amd_state;
 
     memset(&intel_state, 0, sizeof(intel_state));
     intel_state.iommu.iommu_type = IOMMU_TYPE_VTD;
     assert(fbvbs_vtd_init(&intel_state) == -1);
+    assert(fbvbs_iommu_runtime_ready(&intel_state) == 0);
     assert(intel_state.iommu.kernel_dma_protection == 0U);
-    assert(intel_state.iommu.interrupt_remapping == 0U);
 
     memset(&amd_state, 0, sizeof(amd_state));
     amd_state.iommu.iommu_type = IOMMU_TYPE_AMD_VI;
     assert(fbvbs_amdvi_init(&amd_state) == -1);
+    assert(fbvbs_iommu_runtime_ready(&amd_state) == 0);
     assert(amd_state.iommu.kernel_dma_protection == 0U);
 }
 
-static void test_deprivilege_host_requires_vmlaunch_handoff(void) {
+static void test_deprivilege_host_rejects_partial_handoff_and_clears_flag(void) {
     struct fbvbs_hypervisor_state state;
 
     memset(&state, 0, sizeof(state));
+    state.runtime_state_flags = FBVBS_RUNTIME_HOST_DEPRIVILEGED;
     assert(fbvbs_deprivilege_host(&state) == -1);
+    assert((state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) == 0U);
 }
 
 int main(void) {
@@ -1677,6 +1738,7 @@ int main(void) {
     test_partition_load_image_requires_guest_initial_stack();
     test_platform_detection_fails_closed_without_real_bringup();
     test_platform_foundation_helpers_expose_release_boundary();
+    test_log_append_emits_primary_oob_audit_line();
     test_vm_device_passthrough_is_fail_closed_without_qualification();
     test_vm_destroy_rejects_assigned_devices_without_safe_teardown();
     test_unregister_shared_rejects_non_owner();
@@ -1684,7 +1746,7 @@ int main(void) {
     test_broadcast_registration_authorizes_any_peer();
     test_vm_device_passthrough_stays_disabled_even_when_platform_looks_ready();
     test_vm_release_device_stays_disabled_without_safe_teardown();
-    test_iommu_init_requires_authoritative_host_policy();
-    test_deprivilege_host_requires_vmlaunch_handoff();
+    test_iommu_init_fails_without_release_complete_platform_policy();
+    test_deprivilege_host_rejects_partial_handoff_and_clears_flag();
     return 0;
 }

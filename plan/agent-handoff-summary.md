@@ -14,7 +14,7 @@ FBVBS (Formally-verified Bare-metal Virtual Boot Security) は x86-64 向けの*
 - Frama-C WP は継続運用中。履歴上の高い証明率はあるが、release 判定では現行ワークツリー上での再現と proof gap 確認が必要
 - Intel VT-x + EPT + HLAT / AMD-V + NPT 両プラットフォーム対応
 - IOMMU (VT-d / AMD-Vi) 必須 (DMA 分離)
-- Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke 経路あり。現在は TCG smoke とローカル KVM smoke の両方で boot artifact materialization、boot catalog ingest、host partition seed まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed
+- Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke 経路あり。repository-local では Stage 1 の TCG `intel-iommu`、Stage 2 のローカル KVM `intel-iommu`、Stage 3 の q35 `intel-iommu` / `amd-iommu` emulation matrix を回せる。現在は boot artifact materialization、boot catalog ingest、host partition seed まで進み、VMX を expose しない環境では `VMX unavailable` で fail-closed
 - bare-metal host kernel artifact (`0x1700`) は immutable loaded image bytes に束縛され、追加 boot module は `artifact:0x...` / `fbvbs.object_id=0x...` cmdline で artifact object に束縛できる
 - retained-C foundation readiness は VMX + runtime-ready IOMMU + initialized audit path を要件とし、high-assurance readiness はそれに measured boot を追加する
 - ソース 26 ファイル、ヘッダ 7 ファイル、ファズハーネス 6 本、約 25K SLOC

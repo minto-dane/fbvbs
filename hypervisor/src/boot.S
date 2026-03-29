@@ -215,6 +215,25 @@ start64:
     /* Clear base pointer for clean backtraces */
     xor %rbp, %rbp
 
+    /* Populate the 64-bit TSS descriptor now that the final runtime
+     * addresses are known, then load TR for VM-exit host state. */
+    lea boot_tss_descriptor(%rip), %rdi
+    lea boot_tss(%rip), %rax
+    mov %rax, %rdx
+    movw $(boot_tss_end - boot_tss - 1), 0(%rdi)
+    movw %ax, 2(%rdi)
+    shr $16, %rdx
+    movb %dl, 4(%rdi)
+    movb $0x89, 5(%rdi)            /* Present, available 64-bit TSS */
+    movb $0x00, 6(%rdi)            /* High limit nibble + flags */
+    shr $8, %rdx
+    movb %dl, 7(%rdi)
+    shr $8, %rdx
+    movl %edx, 8(%rdi)
+    movl $0, 12(%rdi)
+    mov $0x20, %ax
+    ltr %ax
+
     /* Raw 64-bit serial marker before the retained-C runtime is touched.
      * This lets QEMU/KVM smoke distinguish long-mode entry failures from
      * later runtime-init stalls. */
@@ -592,8 +611,10 @@ setup_page_tables_wx:
     mov (nx_high_bits), %edx        /* NX */
     call map_page_range
 
-    /* Unmap the guard page (clear its PTE → page fault on overflow) */
+    /* Unmap guard pages (clear PTEs → page fault on overflow) */
     mov $stack_guard, %eax
+    call unmap_page
+    mov $vmx_stack_guard, %eax
     call unmap_page
 
     pop %ebp
@@ -686,21 +707,41 @@ boot_msg_no_lm:
 boot_msg_64:
     .asciz "FBVBS: boot64 reached\n"
 
+.section .data
 .align 8
 boot_gdt:
     .quad 0x0000000000000000        /* Null descriptor */
-    /* Pre-mark descriptors as accessed before paging tightens .rodata to R+NX.
-     * Real CPUs/KVM may set the accessed bit on control transfers or segment
-     * loads; leaving it clear would turn the long-mode handoff into a fault
-     * once the boot GDT becomes read-only. */
+    /* Pre-mark descriptors as accessed. The runtime GDT lives in writable
+     * data because the retained-C phase patches in the TSS descriptor. */
     .quad 0x00CF9B000000FFFF        /* 32-bit flat boot code (accessed) */
     .quad 0x00CF93000000FFFF        /* 32-bit/64-bit flat data (accessed) */
     .quad 0x00AF9B000000FFFF        /* 64-bit flat code (accessed) */
+boot_tss_descriptor:
+    .quad 0x0000000000000000        /* 64-bit TSS low qword (patched at runtime) */
+    .quad 0x0000000000000000        /* 64-bit TSS high qword (patched at runtime) */
 boot_gdt_end:
 
 boot_gdt_pointer_32:
     .word boot_gdt_end - boot_gdt - 1
     .long boot_gdt
+
+.align 16
+boot_tss:
+    .long 0
+    .quad stack_top                 /* RSP0 */
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .word 0
+    .word boot_tss_end - boot_tss
+boot_tss_end:
 
 /* ================================================================
  * BSS — page-aligned structures
@@ -933,6 +974,20 @@ fbvbs_get_vmx_stack_top:
     lea     vmx_stack_top(%rip), %rax
     ret
 .size fbvbs_get_vmx_stack_top, . - fbvbs_get_vmx_stack_top
+
+/* ----------------------------------------------------------------
+ * fbvbs_get_boot_tss_base — Return the active retained-C TSS base
+ *
+ * Prototype: uint64_t fbvbs_get_boot_tss_base(void);
+ * Used by the VMCS host-state setup to populate HOST_TR_BASE and
+ * GUEST_TR_BASE consistently with the runtime GDT/TSS.
+ * ---------------------------------------------------------------- */
+.global fbvbs_get_boot_tss_base
+.type fbvbs_get_boot_tss_base, @function
+fbvbs_get_boot_tss_base:
+    lea     boot_tss(%rip), %rax
+    ret
+.size fbvbs_get_boot_tss_base, . - fbvbs_get_boot_tss_base
 
 /* Mark stack as non-executable */
 .section .note.GNU-stack,"",@progbits

@@ -44,6 +44,10 @@ int fbvbs_watchdog_on_timer_exit(
     struct fbvbs_partition *part;
     uint32_t count;
 
+    if (partition_idx >= FBVBS_MAX_PARTITIONS) {
+        return 0;  /* Defensive: out-of-bounds index */
+    }
+
     part = &state->partitions[partition_idx];
 
     /* Only monitor occupied, running partitions */
@@ -96,8 +100,9 @@ int fbvbs_watchdog_on_timer_exit(
             (uint64_t)partition_idx
         );
         if (fault_status != 0) {
-            /* Partition was already faulted/destroyed by another path.
-             * Reset counter but don't increment fault total. */
+            /* Return 1 to signal the partition is now in a faulted state.
+             * If another path already faulted it, this still reports the
+             * faulted state while avoiding a duplicate fault_total bump. */
             part->consecutive_timer_exits = 0U;
             return 1;
         }
@@ -111,7 +116,7 @@ int fbvbs_watchdog_on_timer_exit(
     /* Reset counter so recovered partition gets a fresh window */
     part->consecutive_timer_exits = 0U;
 
-    return 1;  /* 1 = partition was faulted */
+    return 1;  /* 1 = partition is in faulted state */
 }
 
 /*@ requires \valid(state);

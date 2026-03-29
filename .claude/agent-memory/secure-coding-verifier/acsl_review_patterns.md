@@ -18,7 +18,7 @@ Most common bug pattern in FBVBS: multi-step page allocation where intermediate 
 
 - **Good pattern (hlat.c init):** Reverse-order free on each failure: if alloc N fails, free allocs N-1..0.
 - **Bad pattern (iommu_vtd.c, iommu_amdvi.c):** Loop allocates pages per-unit, but failure in later steps (enable, root table set) leaks pages from current and all prior iterations.
-- **Bad pattern (vmx_controls.c CET):** Alloc failure returns success (fail-open) — worse than a leak, it enables CET control bits without backing SSP page.
+- **CRITICAL — Bad pattern (vmx_controls.c CET):** Alloc failure returns success (fail-open). This enables CET control bits without a backing SSP page, resulting in undefined behavior on shadow stack operations and potential security bypass.
 
 ## Integer Overflow Check Consistency
 
@@ -35,3 +35,13 @@ Most common bug pattern in FBVBS: multi-step page allocation where intermediate 
 
 - `boot_guard_active` is never set on any code path (MSR 0x13A documented but not read). Fail-closed but overly restrictive on Intel Boot Guard platforms.
 - Measured boot requires DRTM + TPM + (Secure Boot OR Boot Guard) — three-factor AND gate.
+
+## Current Release Boundary Notes
+
+- `proof-smoke` is the bounded regression gate. It must stay free of fatal annotation/user errors, missing-spec/default-assigns regressions, incompatible-pointer-cast regressions, and Missing RTE guards.
+- `proof-shards` is now the heavier repository-local proof evidence. Treat shard `status=0` as the current software-only target, but do not overclaim it as a complete end-to-end proof of the standalone release.
+- QEMU evidence is now staged:
+  - Stage 1: QEMU/TCG boot-to-gate smoke (`tcg-intel-iommu`)
+  - Stage 2: local QEMU/KVM boot-to-gate smoke when `/dev/kvm` and passwordless `sudo` are available (`kvm-intel-iommu`)
+  - Stage 3: q35 IOMMU emulation matrix (`tcg-intel-iommu` + `tcg-amd-iommu`, with optional KVM replay)
+- QEMU stage evidence is useful for boot, ACPI/DMAR/IVRS parsing, fail-closed gating, and MMIO/programming order. It is not authoritative evidence for real DMA isolation, interrupt remapping, host deprivilege completion, or final producer-facing release readiness.

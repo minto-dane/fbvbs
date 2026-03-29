@@ -40,6 +40,13 @@ host operating system and its guest virtual machines.
 | Operating Mode | VMX root (ring 0) / SVM host mode |
 | Hosted OS | FreeBSD (target end state: deprivileged in VMX non-root; current retained-C boundary has not completed the handoff) |
 
+The retained-C boundary has not completed the host handoff yet: the FreeBSD
+host remains part of the trusted computing base, VMX non-root deprivilege is
+not achieved, and host-kernel compromise remains in scope until the runtime
+handoff path is finished. The current mitigation is to keep the platform
+fail-closed and to gate release on VMX root lifecycle, IOMMU bring-up, and
+host-handoff milestones in the roadmap.
+
 ### 1.3 TOE Overview
 
 FBVBS operates as a firmware-loaded separation kernel between the
@@ -111,8 +118,8 @@ Table cells below that mention completeness, coverage, or assurance packages des
 
 | Protection Profile | Conformance |
 |-------------------|-------------|
-| SKPP (Separation Kernel Protection Profile, v1.03) | Strict conformance claim (primary) |
-| Virtualization PP Module (NIAP, v1.1) | Demonstrable conformance (supplementary) |
+| SKPP (Separation Kernel Protection Profile, v1.03) | Target-state strict conformance claim only; not yet achieved because FCS_COP.1 is partial |
+| Virtualization PP Module (NIAP, v1.1) | Demonstrable conformance target; evaluator evidence still required |
 
 **Rationale:** FBVBS is architecturally a separation kernel -- it
 partitions a single hardware platform into isolated execution
@@ -142,6 +149,11 @@ The TOE claims conformance to the following assurance packages:
 - ALC_LCD.1 (Developer-defined lifecycle model)
 - ALC_TAT.2 (Compliance with implementation standards)
 - ALC_FLR.3 (Systematic flaw remediation) -- augmentation
+
+**Conformance note:** SKPP v1.03 includes FCS_COP.1 as a required SFR.
+Because this outline still marks FCS_COP.1 as partial, the SKPP strict
+conformance claim remains target-state only and must not be treated as
+achieved until Phase 5 is complete.
 
 ---
 
@@ -221,9 +233,9 @@ The TOE shall generate audit records for all security-relevant events
 including: partition lifecycle transitions, hypercall invocations,
 policy violations, hardware security events, and fault conditions.
 
-**Implementation:** log.c dual ring buffer (primary + mirror), CRC32C
-per-record integrity, spinlock-serialized append, event types covering
-all 58 hypercall handlers and partition state transitions.
+**Implementation:** log.c mirror ring plus primary UART/OOB sink,
+CRC32C per-record integrity, spinlock-serialized append, event types
+covering all 58 hypercall handlers and partition state transitions.
 
 #### P.INTEGRITY -- Code and Data Integrity
 
@@ -308,9 +320,15 @@ security-relevant events, maintaining both a primary log and a mirror
 log accessible to the host partition.
 
 **Counters:** T.BYPASS (detection), T.TAMPER (detection)
-**Implemented by:** log.c (dual ring buffer, CRC32C integrity, spinlock
-serialization), all hypercall handlers (event generation on state
-transitions and policy violations)
+**Implemented by:** log.c (mirror ring, primary UART/OOB sink, CRC32C
+integrity, spinlock serialization), all hypercall handlers (event
+generation on state transitions and policy violations)
+
+The target design includes an authoritative primary OOB sink. The
+current retained-C repository now serializes committed audit records to
+the bare-metal COM1/UART path and maintains the in-memory mirror ring in
+parallel; hosted/unit-test builds model the same sink through an
+overrideable retained-C hook for verification.
 
 #### O.DMA_CONTROL -- Device DMA Isolation
 
@@ -387,9 +405,9 @@ shall verify the TOE image integrity before execution.
 | FPT_TDC.1 | Inter-TSF basic TSF data consistency | TOCTOU-safe field caching | command.c |
 | FAU_GEN.1 | Audit data generation | Audit log for all security events | log.c |
 | FAU_GEN.2 | User identity association | Partition ID in audit records | log.c, partition.c |
-| FAU_STG.2 | Guarantees of audit data availability | Dual ring (primary + mirror) | log.c |
+| FAU_STG.2 | Guarantees of audit data availability | Primary UART/OOB sink plus mirror ring | log.c |
 | FAU_SAR.1 | Audit review | Mirror log readable by host | log.c |
-| FCS_COP.1 | Cryptographic operation | IKS/SKS key operations | (Phase 5 -- not yet implemented) |
+| FCS_COP.1 | Cryptographic operation | IKS/SKS key operations | (Phase 5 -- partial retained-C SHA-384 path only) |
 | FMT_SMF.1 | Specification of management functions | Hypercall management interface | command.c |
 | FMT_SMR.1 | Security roles | Host partition vs. guest partition | partition.c, command.c |
 
@@ -563,15 +581,23 @@ shall include the partition_id of the subject.
 
 #### FAU_STG.2 / FAU_SAR.1 -- Audit Storage and Review
 
-The TOE shall maintain dual audit storage (primary ring in hypervisor
-memory, mirror ring in host-accessible memory) and provide the host
-partition read access to the mirror log.
+The TOE shall maintain a primary UART/OOB audit sink and a mirror ring
+in host-accessible memory, and provide the host partition read access to
+the mirror log.
 
 **Implementation:**
-- Primary log: hypervisor-internal, EPT-protected from all guests
-- Mirror log: mapped read-only into host partition EPT
+- Primary log path: serialized audit records emitted to the retained-C
+  COM1/UART sink
+- Mirror log: in-memory ring exposed through the retained-C audit APIs
 - Host reads mirror via FBVBS_EVENT_PARTITION_FAULT notifications
 - Log rate limiting prevents flood-induced data loss
+
+**Residual Risk:** The retained-C repository now emits committed audit
+records to the primary UART/OOB path and keeps the mirror ring for
+independent review. Remaining operational risk is sink collection and
+retention outside the hypervisor boundary: deployments still need a
+trusted serial/OOB collector so primary evidence is preserved across host
+compromise or reboot.
 
 #### FCS_COP.1 -- Cryptographic Operation (Phase 5 dependency)
 
@@ -583,7 +609,12 @@ accordance with specified algorithms and key sizes.
 SHA-384 path used by `KCI_VERIFY_MODULE` / `KCI_SET_WX`, but the
 general-purpose cryptographic suite required by this SFR (signature
 verification, MAC, key derivation, encryption/decryption) remains a
-Phase 5 dependency.
+Phase 5 dependency. The implemented runtime path is limited to SHA-384
+measurement and per-page digest comparison for approved module state; it
+does not provide the broader algorithm set required by the SFR. The
+fail-closed behavior in KCI reduces exploitability of missing crypto
+primitives by denying execute permissions on verification failure, but it
+does not close the compliance gap.
 
 #### FMT_SMF.1 / FMT_SMR.1 -- Management Functions and Roles
 
@@ -616,8 +647,8 @@ capability mask).
 | FPT_FLS.1 | partition.c fault handling | ACSL contracts (WP 98.65%), fault injection tests (17 tests) |
 | FPT_TDC.1 | command.c TOCTOU caching | ACSL contracts (WP 99.63%), code review |
 | FAU_GEN.1 | log.c audit generation | ACSL contracts (WP 99.54%) |
-| FAU_STG.2 | log.c dual ring buffer | ACSL contracts (WP 99.54%), design analysis |
-| FCS_COP.1 | (Phase 5 -- pending) | N/A |
+| FAU_STG.2 | log.c primary sink + mirror ring | ACSL contracts (WP 99.54%), design analysis |
+| FCS_COP.1 | Retained C only: SHA-384 measurement + per-page digest comparison | Phase 5 dependency; fail-closed on verify failure |
 | FMT_SMF.1 | command.c 58 handlers | ACSL contracts (WP 99.63%), fuzz harness |
 | FMT_SMR.1 | partition.c capability mask | ACSL contracts (WP 98.65%) |
 
@@ -699,7 +730,8 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Device qualification | device_qualification_matrix.md | Complete |
 | Capability mask configuration | fbvbs_abi.h constants | Complete |
-| Partition creation procedures | (to be developed) | Outline only |
+| Deployment restrictions | deployment_profile.md | Complete |
+| Partition creation procedures | This ST, Section 7.2.1 | Complete |
 
 #### AGD_PRE.1 -- Preparative Procedures
 
@@ -707,7 +739,37 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Build procedures | Makefile targets | Complete |
 | Platform requirements | This ST, Section 1.2 | Complete |
-| Secure Boot configuration | (to be developed) | Outline only |
+| Audit OOB collection | audit_oob_collection.md | Complete |
+| Secure Boot configuration | This ST, Section 7.2.2 | Complete |
+
+##### AGD_OPE.1 Partition Creation Procedure
+
+1. Build the release image with `make -C hypervisor release-hypervisor`.
+2. Verify the bare-metal artifact with `make -C hypervisor verify-baremetal-iso`.
+3. Review `hypervisor/build/release-manifest.txt` and confirm the ELF, ISO,
+   proof-smoke, and SBOM digests match the intended release set.
+4. Boot the target in the documented hypervisor configuration and confirm
+   the log reaches `FBVBS: boot64 reached`, `boot artifacts materialized`,
+   and `boot catalog ingested`.
+5. Create partitions using the documented hypercall flow, then verify
+   `PARTITION_MEASURE`, `PARTITION_LOAD_IMAGE`, and `PARTITION_START` return
+   success for the intended image object.
+6. Validate the created partition by checking the audit log entries and
+   confirming that the partition reaches `Loaded` or `Runnable` only when
+   the manifest and image object IDs match.
+
+##### AGD_PRE.1 Secure Boot Configuration Procedure
+
+1. Enable Secure Boot in platform firmware, disable CSM/legacy boot, and
+   enroll the FBVBS signing key material in PK/KEK/db as appropriate.
+2. Sign the UEFI loader and any boot-time artifacts used by the UEFI path;
+   keep dbx current so revoked keys are rejected.
+3. Ensure the retained-C boot path continues to use fixed ELF64 `ET_EXEC`
+   artifacts with `-fno-pic -fno-pie -no-pie` and the repository linker script.
+4. Validate the Multiboot path with `grub-file --is-x86-multiboot2` and the
+   UEFI path with the platform's Secure Boot verification tooling.
+5. Record the signed artifact hashes and boot-time measurements in the
+   release manifest and audit log evidence bundle.
 
 ### 7.3 Life-cycle Support (ALC)
 
@@ -717,7 +779,8 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Configuration management | Git version control | Complete |
 | Build automation | Make-based build system | Complete |
-| Reproducible builds | Deterministic build + SBOM (Phase 9-3) | Partial: repository-local deterministic build evidence exists, but release provenance hardening remains in progress |
+| Release promotion model | release_promotion_model.md | Complete |
+| Reproducible builds | Deterministic build + SBOM + repository-local provenance (Phase 9-3) | Partial: deterministic build and unsigned provenance exist, but external signing and publication controls remain in progress |
 
 #### ALC_TAT.2 -- Compliance with Implementation Standards
 
@@ -753,7 +816,7 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 |-------------|---------|--------|
 | Subsystem-level testing | Current WP target set + unit/fault tests | Partial: proof target is defined, but WP completion is not yet closed |
 | Integration testing | Fuzz harnesses exercise cross-module paths | Complete |
-| Platform integration testing | (Phase 4+ -- requires hardware) | Not yet implemented |
+| Platform integration testing | QEMU smoke covers boot/init and fail-closed paths; hardware VMX/SVM, EPT/NPT, and IOMMU validation are still required | hardware_validation_campaign.md defines the release-blocking real-hardware campaign |
 
 ### 7.5 Vulnerability Assessment (AVA)
 
@@ -775,6 +838,18 @@ machine-checked by the Frama-C WP plugin against the C implementation.
 - **High:** LLC (L3) sharing, L2 cache, DRAM row buffer, memory bandwidth
   (require hardware features not yet programmed: Intel CAT, SMT-aware
   scheduling)
+
+**High-risk mitigation plan:**
+- LLC (L3) sharing: owner Platform Security; Phase 9 follow-on for Intel CAT
+  programming, with fallback to core-dedicated deployments when CAT is
+  unavailable.
+- L2 cache sharing: owner Scheduler/MP Integration; Phase 8 follow-on for
+  SMT-aware scheduling, with fallback to SMT-off deployment profiles on
+  high-assurance systems.
+- DRAM row buffer and memory bandwidth: owner Platform Security; mitigate by
+  NUMA-local placement and dedicated-core profiles, with acceptance only if
+  controller partitioning is unavailable and the deployment is explicitly
+  approved for the residual risk.
 
 ---
 
@@ -810,7 +885,9 @@ or hardware validation.
 
 FCS_COP.1 depends on Phase 5 (Ada/SPARK cryptographic library). The
 TOE is fail-closed in the absence of crypto: hash verification returns
-MEASUREMENT_FAILED, execute permission is denied.
+MEASUREMENT_FAILED, execute permission is denied. That fail-closed
+behavior reduces exposure, but it does not satisfy the missing FCS_COP.1
+algorithms or replace the Phase 5 implementation dependency.
 
 ---
 
@@ -820,21 +897,22 @@ MEASUREMENT_FAILED, execute permission is denied.
 
 | Gap | Impact | Resolution Path |
 |-----|--------|----------------|
-| FCS_COP.1 not implemented | retained C has only a narrow SHA-384 measurement path for KCI; the general crypto suite (signature, MAC, key derivation, encryption) is still absent | Phase 5: Ada/SPARK crypto library |
-| Platform integration tests | No hardware-level test execution | Phase 4+: requires target platform |
-| IOMMU MMIO access | Parsed but not activated on real hardware | PRODUCTION NOTE markers in iommu_vtd.c, iommu_amdvi.c |
+| FCS_COP.1 not implemented | retained C has only a narrow SHA-384 measurement path for KCI; the general crypto suite (signature, MAC, key derivation, encryption) is still absent, so SKPP strict conformance remains target-state only | Phase 5: Ada/SPARK crypto library |
+| Audit storage primary OOB sink | Retained-C emits primary UART/OOB audit lines and mirror records, but deployment still needs authoritative external collection/retention | Bind release/deployment guidance to the serial/OOB collector and archive FAU_STG.2 evidence |
+| Platform integration tests | QEMU smoke covers boot/init/fail-closed paths only; no hardware VMX/SVM, EPT/NPT, or IOMMU validation yet | Phase 4+: requires target platform |
+| IOMMU MMIO access | VT-d/AMD-Vi retained-C init performs MMIO/programming work, but authoritative host device/domain policy and hardware validation are still incomplete | Complete default-deny host policy, then close the hardware validation campaign |
 | Host deprivilege handoff | `VMLAUNCH` path still fails closed | vmcs_setup.c implementation completion + hardware validation |
 | `KCI_SET_WX` byte binding | Implemented in retained C with full-module SHA-384 verification + approved per-page digest table; external crypto boundary and proof completion remain | Phase 5 crypto boundary tightening + WP completion |
 | LLC/L2 covert channels | High residual risk | Intel CAT / SMT-aware scheduling extensions |
-| Operational guidance | Outline only | Requires evaluator engagement for AGD completion |
-| CI/CD pipeline | Repository CI exists, but supply-chain and release provenance tightening remain | Phase 9 hardening continuation |
+| Operational guidance | Partition creation and preparative procedures documented | ITSEF review and deployment validation |
+| CI/CD pipeline | Repository CI exists, and repository-local provenance/evidence artifacts are generated, but external signing and hardened publication controls remain | Phase 9 hardening continuation |
 
 ### 9.2 Evaluation Readiness
 
 | CC Class | Readiness | Notes |
 |----------|----------|-------|
 | ADV (Development) | MEDIUM | ACSL contracts exist and WP runs launch, but proof completion is still open |
-| AGD (Guidance) | MEDIUM | Repository-local guidance exists, but evaluator-grade procedures remain incomplete |
+| AGD (Guidance) | MEDIUM | Repository-local guidance now includes operational and preparative procedures, but evaluator review is still required |
 | ALC (Life-cycle) | MEDIUM | Build automation, SBOM, and branch model exist; provenance and hardened release process are still maturing |
 | ATE (Tests) | MEDIUM | unit/fault/fuzz build and QEMU smoke exist; hardware integration tests are still pending |
 | AVA (Vulnerability) | HIGH | CCA-001 covert channel analysis + cpu_security.c vuln profiling |
@@ -843,8 +921,8 @@ MEASUREMENT_FAILED, execute permission is denied.
 
 1. **Engage ITSEF (IT Security Evaluation Facility)** for formal evaluation
    scoping and ST review
-2. **Complete AGD documentation** (operational guidance, preparative
-   procedures) to ITSEF requirements
+2. **Submit AGD documentation** (operational guidance, preparative
+   procedures) for ITSEF review and validation
 3. **Implement FCS_COP.1** (Phase 5 crypto) to close the last SFR gap
 4. **Formalize ALC_CMC** procedures (configuration management plan,
    release process)

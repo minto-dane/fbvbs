@@ -93,7 +93,7 @@ void fbvbs_boot_runtime_init(void) {
     __stack_chk_guard = (uintptr_t)seed;
 }
 
-__attribute__((noreturn))
+__attribute__((noreturn, no_stack_protector))
 void __stack_chk_fail(void) {
     fbvbs_boot_console_puts("FATAL: stack protector violation\n");
     fbvbs_boot_halt_forever();
@@ -159,8 +159,14 @@ int memcmp(const void *lhs, const void *rhs, size_t length) {
     const unsigned char *right = (const unsigned char *)rhs;
     size_t index;
 
-    if (lhs == NULL || rhs == NULL) {
+    if (lhs == NULL && rhs == NULL) {
         return 0;
+    }
+    if (lhs == NULL) {
+        return -1;
+    }
+    if (rhs == NULL) {
+        return 1;
     }
 
     for (index = 0U; index < length; ++index) {

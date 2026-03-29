@@ -1058,7 +1058,7 @@ _Static_assert(sizeof(struct fbvbs_partition_status_response) == 16, "partition_
 _Static_assert(sizeof(struct fbvbs_partition_fault_info_response) == 24, "fault_info_response size");
 
 /* Diag entry buffer guards: max_entries * entry_size must fit in entries[4032] */
-_Static_assert(FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES * 64U <= 4032U, "artifact entries exceed response buffer");
-_Static_assert(FBVBS_MAX_DEVICE_CATALOG_ENTRIES * 12U <= 4032U, "device entries exceed response buffer");
+_Static_assert(FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES * sizeof(struct fbvbs_artifact_catalog_entry) <= 4032U, "artifact entries exceed response buffer");
+_Static_assert(FBVBS_MAX_DEVICE_CATALOG_ENTRIES * sizeof(struct fbvbs_device_catalog_entry) <= 4032U, "device entries exceed response buffer");
 
 #endif

@@ -57,12 +57,19 @@ The repository currently exposes these executable checks:
   - bounded proof gate used by `release-hypervisor`
   - confirms that WP launches and reaches proof scheduling without fatal annotation or user errors
   - rejects regression of previously removed `No default assigns clause`, missing-spec, and incompatible-pointer-cast warning classes
+- `make -C hypervisor fuzz-smoke`
+  - runs the committed hex seed corpus against all repository-local standalone fuzz harnesses
+  - writes a replayable summary to `build/fuzz-smoke.txt`
 - `make -C hypervisor baremetal-iso`
   - builds a Multiboot2 bare-metal ELF and GRUB ISO
 - `make -C hypervisor run-qemu-smoke`
-  - boots the Multiboot2 image under QEMU/TCG and checks for retained-C init reaching either successful initialization or an explicit fail-closed platform gate
+  - Stage 1 repository-local evidence: boots the Multiboot2 image under QEMU/TCG with `intel-iommu` emulation and checks for retained-C init reaching either successful initialization or an explicit fail-closed platform gate
 - `make -C hypervisor run-qemu-kvm-smoke`
-  - when `/dev/kvm` and passwordless `sudo` are available, boots the same Multiboot2 image under QEMU/KVM and checks for the same retained-C init boundary
+  - Stage 2 repository-local evidence: when `/dev/kvm` and passwordless `sudo` are available, boots the same image under QEMU/KVM and checks for the same retained-C init boundary
+- `make -C hypervisor run-qemu-iommu-smoke`
+  - Stage 3 repository-local evidence: replays the boot-to-gate path against both q35 `intel-iommu` and q35 `amd-iommu` device emulation
+- `make -C hypervisor run-qemu-matrix`
+  - writes a replayable stage summary and per-case logs for Stage 1 through Stage 3 repository-local QEMU evidence
 
 No repository-local placeholder scripts are treated as evidence.
 
@@ -87,7 +94,7 @@ The current retained C implementation either refuses success outright or narrows
 - `VM_ASSIGN_DEVICE` and `VM_RELEASE_DEVICE`
   - passthrough is disabled because authoritative ACS validation, interrupt remapping control, and safe reset/FLR are not implemented
 - `fbvbs_hypervisor_init`
-  - platform initialization fails closed until IOMMU bring-up provides authoritative evidence instead of model-only detection
+  - platform initialization fails closed until IOMMU bring-up establishes runtime MMIO/programming evidence and an authoritative host device/domain policy
   - measured boot is tracked as a high-assurance condition and is surfaced through capability/state bits instead of being silently ignored
 - `fbvbs_deprivilege_host`
   - VMCS preparation exists, but the final host deprivilege / `VMLAUNCH` handoff still fails closed instead of claiming a runnable VM entry path
@@ -109,6 +116,7 @@ The retained C repository currently demonstrates:
 - analyzer-clean builds under GCC `-fanalyzer`
 - unit-test and gcov coverage for leaf ABI, hypercall trust-boundary checks, VM policy exits, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
 - machine-readable separation between audit-path readiness, retained-C foundation readiness, measured-boot-backed high-assurance readiness, and host deprivilege readiness
+- retained-C primary audit sink serialization to the bare-metal COM1/UART path, with the same sink modeled in hosted/unit-test builds through an overrideable retained-C hook
 - host-deprivilege readiness derived from explicit runtime state, not merely compile-time feature intent
 - authoritative bare-metal retained boot-artifact binding: the host kernel is bound to immutable loaded hypervisor image bytes and the remaining seeded artifacts are bound to explicit Multiboot modules that are checked during ISO verification
 - a retained-C fixed executable loader for authoritative memory-object-backed ELF64 `ET_EXEC` partition-loadable artifacts, including executable-entry and NX-stack validation
@@ -121,6 +129,7 @@ The retained C repository does not currently demonstrate:
 - a broader executable loader profile beyond the retained-C fixed `ET_EXEC` subset (for example `ET_DYN`, runtime relocation, or service autostart orchestration)
 - production-ready device passthrough qualification and teardown
 - authoritative boot-integrity and IOMMU bring-up
+- real DMA isolation, interrupt-remapping correctness, and final host deprivilege completion on real hardware
 - production-ready host deprivilege / `VMLAUNCH` handoff
 
 The correct interpretation is therefore: retained C prototype with explicit fail-closed security gates, not production-ready formal completion.

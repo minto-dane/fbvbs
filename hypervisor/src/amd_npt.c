@@ -576,9 +576,9 @@ static int fbvbs_npt_handle_fault(
 
     if (result == -2) {
         /* Needs KCI approval: caller must check KCI bindings
-         * before emulating the PTE write. Return -1 here;
-         * the outer handler in vm_policy.c will check KCI. */
-        return -1;
+         * before emulating the PTE write. Propagate -2 so the
+         * outer handler in vm_policy.c can perform KCI binding checks. */
+        return -2;
     }
 
     /* Allowed modification: increment TLB generation (saturating) */

@@ -1,3 +1,4 @@
+#include "fbvbs_asm.h"
 #include "fbvbs_hypervisor.h"
 
 /* ================================================================
@@ -49,6 +50,10 @@
 #define MSR_IA32_PL3_SSP                0x000006A7U
 #define MSR_IA32_ISST_ADDR              0x000006A8U
 
+/* VMX control MSR addresses */
+#define MSR_IA32_VMX_PROCBASED_CTLS2    0x0000048BU
+#define MSR_IA32_VMX_PROCBASED_CTLS3    0x00000492U
+
 /* IA32_S_CET bits */
 #define S_CET_SH_STK_EN                (1ULL << 0)
 #define S_CET_WR_SHSTK_EN              (1ULL << 1)
@@ -77,6 +82,8 @@ struct fbvbs_cet_vmcs_config {
     uint64_t guest_ssp;
     uint64_t guest_isst_addr;
 };
+
+static uint64_t g_msr_bitmap_phys;
 
 /*@ requires \valid(config);
     requires \valid_read(caps);
@@ -128,9 +135,29 @@ static int fbvbs_cet_build_vmcs_config(
     return 0;
 }
 
-/* CET MSR save/restore uses fbvbs_cet_save_guest / fbvbs_cet_restore_guest
- * from cpu_security.c (declared in fbvbs_cpu_security.h).
- * Those functions handle VM exit/entry CET state transitions. */
+/* CET MSR save/restore is handled at VM exit/entry time by cpu_security.c.
+ * Initialization must not temporarily write CET state. */
+
+/*@ assigns \result \from g_msr_bitmap_phys;
+*/
+uint64_t fbvbs_vmx_get_msr_bitmap_phys(void)
+{
+    return g_msr_bitmap_phys;
+}
+
+/*@ assigns \result \from msr, bit;
+*/
+static int vmx_control_msr_bit_allowed(uint32_t msr, uint32_t bit)
+{
+#if defined(FBVBS_BAREMETAL_BUILD) && (defined(__x86_64__) || defined(__i386__))
+    uint64_t value = fbvbs_asm_rdmsr(msr);
+    return ((value >> 32U) & (1ULL << bit)) != 0U;
+#else
+    (void)msr;
+    (void)bit;
+    return 0;
+#endif
+}
 
 /* ================================================================
  * Phase 2-4: MSR Bitmap Configuration
@@ -279,6 +306,11 @@ static void fbvbs_msr_bitmap_init(struct fbvbs_msr_bitmap_model *bitmap)
     /* Intercept writes to CET MSRs (REQ-0331) */
     msr_bitmap_intercept_write_low(bitmap, MSR_IA32_S_CET);
     msr_bitmap_intercept_write_low(bitmap, MSR_IA32_U_CET);
+    msr_bitmap_intercept_write_low(bitmap, MSR_IA32_PL0_SSP);
+    msr_bitmap_intercept_write_low(bitmap, MSR_IA32_PL1_SSP);
+    msr_bitmap_intercept_write_low(bitmap, MSR_IA32_PL2_SSP);
+    msr_bitmap_intercept_write_low(bitmap, MSR_IA32_PL3_SSP);
+    msr_bitmap_intercept_write_low(bitmap, MSR_IA32_ISST_ADDR);
 
     /* Intercept writes to SYSCALL/SYSRET MSRs (high range) */
     msr_bitmap_intercept_write_high(bitmap, MSR_IA32_EFER);
@@ -343,20 +375,19 @@ static void fbvbs_preemption_build_config(
     const struct fbvbs_vmx_capabilities *caps)
 {
     *config = (struct fbvbs_preemption_config){0};
+    (void)caps;
 
     /* Always enable preemption timer (REQ-0370) */
     config->pin_controls_or = PIN_VMX_PREEMPTION_TIMER;
     config->preemption_timer_value = FBVBS_DEFAULT_PREEMPTION_TICKS;
 
-    /* Bus lock detection if available */
-    /* PRODUCTION NOTE: Check IA32_VMX_PROCBASED_CTLS3 for availability.
-     * Model assumes available on HLAT-capable hardware. */
-    if (caps->hlat_available != 0U) {
+    /* Bus lock detection if allowed by IA32_VMX_PROCBASED_CTLS2. */
+    if (vmx_control_msr_bit_allowed(MSR_IA32_VMX_PROCBASED_CTLS2, 30U) != 0) {
         config->secondary_controls_or = PROC2_BUS_LOCK_DETECT;
     }
 
-    /* Notify VM Exit if available (requires tertiary controls) */
-    if (caps->hlat_available != 0U) {
+    /* Notify VM Exit if allowed by IA32_VMX_PROCBASED_CTLS3. */
+    if (vmx_control_msr_bit_allowed(MSR_IA32_VMX_PROCBASED_CTLS3, 3U) != 0) {
         config->tertiary_controls_or = PROC3_NOTIFY_VM_EXIT;
         config->notify_window = FBVBS_DEFAULT_NOTIFY_WINDOW;
     }
@@ -378,12 +409,10 @@ int fbvbs_vmx_build_security_controls(
      * Use file-scope static. Single-threaded init path, no race. */
     static struct fbvbs_msr_bitmap_model bitmap;
     struct fbvbs_preemption_config preempt;
+    struct fbvbs_cet_vmcs_config cet_config = {0};
+    uint64_t bitmap_phys;
 
     *controls = (struct fbvbs_vmx_security_controls){0};
-
-    /* MSR bitmap — always initialize */
-    fbvbs_msr_bitmap_init(&bitmap);
-    controls->msr_bitmap_valid = 1;
 
     /* Preemption timer + notify exit */
     fbvbs_preemption_build_config(&preempt, caps);
@@ -397,7 +426,6 @@ int fbvbs_vmx_build_security_controls(
      * allocation fails, the entire security controls init fails.
      * Running without CET on CET-capable hardware is a downgrade. */
     if (caps->cet_available != 0U) {
-        struct fbvbs_cet_vmcs_config cet_config;
         if (fbvbs_cet_build_vmcs_config(&cet_config, caps) != 0) {
             return -1;  /* CET available but SSP/ISST alloc failed */
         }
@@ -409,18 +437,30 @@ int fbvbs_vmx_build_security_controls(
         controls->guest_s_cet = cet_config.guest_s_cet;
     }
 
-    /* PRODUCTION NOTE: The MSR bitmap physical address must be written
-     * to VMCS_MSR_BITMAP (0x2004). The bitmap.data contents must be
-     * copied to a 4KB-aligned physical page. */
-
-    /* Validate CET save/restore functions are callable.
-     * Only run on CET-capable hardware to avoid #GP on non-CET MSRs. */
-    if (caps->cet_available != 0U) {
-        struct fbvbs_cet_state guest_cet;
-        struct fbvbs_cet_state host_cet = {0};
-        fbvbs_cet_save_guest(&guest_cet, &host_cet);
-        fbvbs_cet_restore_guest(&guest_cet);
+    /* MSR bitmap — always initialize after CET setup succeeds. */
+    fbvbs_msr_bitmap_init(&bitmap);
+    bitmap_phys = g_msr_bitmap_phys;
+    if (bitmap_phys == 0U) {
+        bitmap_phys = fbvbs_page_alloc();
+        if (bitmap_phys == 0U) {
+            if (caps->cet_available != 0U) {
+                uint64_t host_ssp_page = cet_config.host_ssp & ~((uint64_t)FBVBS_PAGE_SIZE - 1ULL);
+                if (host_ssp_page != 0U) {
+                    (void)fbvbs_page_free(host_ssp_page);
+                }
+                if (cet_config.host_isst_addr != 0U) {
+                    (void)fbvbs_page_free(cet_config.host_isst_addr);
+                }
+            }
+            return -1;
+        }
+        g_msr_bitmap_phys = bitmap_phys;
     }
+    fbvbs_copy_bytes((uint8_t *)(uintptr_t)bitmap_phys, bitmap.data, sizeof(bitmap.data));
+    controls->msr_bitmap_valid = 1;
+
+    /* The MSR bitmap physical page is exposed via fbvbs_vmx_get_msr_bitmap_phys()
+     * and written into VMCS_MSR_BITMAP by vmcs_setup.c. */
 
     return 0;
 }

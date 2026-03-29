@@ -30,7 +30,8 @@ Key compromise may be detected by:
 
 ### 2.2 Immediate Actions
 
-1. **Isolate affected system**: Remove from network if possible. The FBVBS
+1. **Isolate affected system**: Remove from network immediately and
+   document any operational constraints that prevent isolation. The FBVBS
    audit log (UART/OOB path) continues independently of network state.
 
 2. **Preserve audit trail**: Export primary log via OOB path before any
@@ -143,15 +144,18 @@ When a trusted service partition faults in the full service-enabled design:
    ```
    VM_DESTROY(partition_id)    -- zeroes memory, releases resources
    VM_CREATE(new_config)       -- fresh partition with new ID
-
-**Current boundary note:** The retained-C repository cannot yet execute
-this sequence end-to-end because `PARTITION_LOAD_IMAGE` is still
-fail-closed, so trusted-service partitions do not reach the runnable
-state in the current build.
    MEMORY_MANAGE + MAP         -- re-map service code/data
    LOAD_MANIFEST               -- re-measure service code
    VM_RUN                      -- restart service
    ```
+
+   **Current boundary note:** The retained-C repository can execute the
+   microhypervisor side of the `VM_DESTROY` → `VM_CREATE` →
+   `MEMORY_MANAGE + MAP` → `LOAD_MANIFEST` → `VM_RUN` sequence for the
+   fixed ELF64 `ET_EXEC` release profile. `PARTITION_LOAD_IMAGE` is now
+   implemented and remains fail-closed only on validation or mapping
+   errors; the remaining end-to-end gap is the future trusted-service
+   payload/orchestration work, not the loader primitive itself.
 
 4. **Verify service health**: After restart, verify:
    - Partition state = RUNNING

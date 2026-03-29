@@ -1,5 +1,6 @@
 # Build artifacts
 hypervisor/build/
+hypervisor/build-*/
 hypervisor/build_traceability.md
 *.o
 *.d

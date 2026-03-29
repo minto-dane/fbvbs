@@ -14,6 +14,7 @@ Output: Markdown table showing requirement → implementation → test links.
 import os
 import re
 import sys
+from datetime import date
 from collections import defaultdict
 
 HYPERVISOR_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -150,17 +151,20 @@ def scan_directory(dirpath, extensions=(".c", ".h")):
     refs = defaultdict(set)  # req_id -> set of (file, line)
     if not os.path.isdir(dirpath):
         return refs
-    for fname in sorted(os.listdir(dirpath)):
-        if not any(fname.endswith(ext) for ext in extensions):
-            continue
-        fpath = os.path.join(dirpath, fname)
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                for lineno, line in enumerate(f, 1):
-                    for m in REQ_PATTERN.finditer(line):
-                        refs[m.group(1)].add((fname, lineno))
-        except OSError:
-            pass
+    for root, dirs, files in os.walk(dirpath):
+        dirs.sort()
+        for fname in sorted(files):
+            if not any(fname.endswith(ext) for ext in extensions):
+                continue
+            fpath = os.path.join(root, fname)
+            relname = os.path.relpath(fpath, dirpath)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    for lineno, line in enumerate(f, 1):
+                        for m in REQ_PATTERN.finditer(line):
+                            refs[m.group(1)].add((relname, lineno))
+            except OSError:
+                pass
     return refs
 
 
@@ -195,9 +199,11 @@ def main():
     # Print matrix
     print("# FBVBS Requirement Traceability Matrix")
     print()
-    print(f"Generated: {os.popen('date -I').read().strip()}")
-    print(f"Source files scanned: {len(os.listdir(SRC_DIR))} src + "
-          f"{len(os.listdir(INCLUDE_DIR))} include")
+    print(f"Generated: {date.today().isoformat()}")
+    src_count = len(os.listdir(SRC_DIR)) if os.path.isdir(SRC_DIR) else 0
+    include_count = len(os.listdir(INCLUDE_DIR)) if os.path.isdir(INCLUDE_DIR) else 0
+    print(f"Source files scanned: {src_count} src + "
+          f"{include_count} include")
     print()
 
     # Summary counts

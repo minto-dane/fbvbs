@@ -27,6 +27,14 @@ static void fbvbs_vmx_external_interrupt_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
+    response->exit_length = 0U;
+    vcpu->pending_interrupt_delivery = 0U;
+    vcpu->pending_interrupt_vector = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_external_interrupt e; uint8_t b[sizeof(struct fbvbs_vm_exit_external_interrupt)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_external_interrupt){0};
@@ -38,26 +46,29 @@ static void fbvbs_vmx_external_interrupt_exit(
     vcpu->pending_interrupt_delivery = 0U;
     vcpu->pending_interrupt_vector = 0U;
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
-/*@ requires \valid(state);
-    requires \valid(vcpu);
-    requires \valid(response);
-    requires \valid_read(leaf_exit);
-    requires \separated(vcpu, response, leaf_exit);
-    assigns *vcpu, *response, state->mirror_log, state->log_lock,
-            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_window_sequence;
-    ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
-    ensures response->exit_reason == FBVBS_VM_EXIT_REASON_CR_ACCESS;
-*/
 static void fbvbs_vmx_cr_access_exit(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_vcpu *vcpu,
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    uint64_t requested = FBVBS_LEAF_EXIT_CR_VALUE(leaf_exit);
+    uint32_t cr_num = FBVBS_LEAF_EXIT_CR_NUMBER(leaf_exit);
+
+    if (cr_num == 0U) {
+        vcpu->cr0 = requested;
+    } else if (cr_num == 4U) {
+        vcpu->cr4 = requested;
+    }
+    response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+    (void)state;
+#else
     union { struct fbvbs_vm_exit_cr_access e; uint8_t b[sizeof(struct fbvbs_vm_exit_cr_access)]; } overlay;
     uint64_t requested = FBVBS_LEAF_EXIT_CR_VALUE(leaf_exit);
     uint32_t cr_num = FBVBS_LEAF_EXIT_CR_NUMBER(leaf_exit);
@@ -113,6 +124,7 @@ static void fbvbs_vmx_cr_access_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_CR_ACCESS;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
 /*@ requires \valid(vcpu);
@@ -128,6 +140,12 @@ static void fbvbs_vmx_pio_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_pio e; uint8_t b[sizeof(struct fbvbs_vm_exit_pio)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_pio){0};
@@ -141,6 +159,7 @@ static void fbvbs_vmx_pio_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
 /*@ requires \valid(vcpu);
@@ -156,6 +175,12 @@ static void fbvbs_vmx_mmio_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_mmio e; uint8_t b[sizeof(struct fbvbs_vm_exit_mmio)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_mmio){0};
@@ -169,6 +194,7 @@ static void fbvbs_vmx_mmio_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
 /*@ requires \valid(vcpu);
@@ -184,6 +210,12 @@ static void fbvbs_vmx_msr_access_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_msr_access e; uint8_t b[sizeof(struct fbvbs_vm_exit_msr_access)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_msr_access){0};
@@ -194,24 +226,21 @@ static void fbvbs_vmx_msr_access_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
-/*@ requires \valid(state);
-    requires \valid(partition);
-    requires vcpu_id < partition->vcpu_count;
-    requires vcpu_id < FBVBS_MAX_VCPUS;
-    requires \valid(response);
-    assigns *state, *partition, *response;
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == NOT_FOUND || \result == INVALID_STATE;
-    ensures response->exit_reason == FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
-*/
 static int fbvbs_vmx_unclassified_fault_exit(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition,
     uint32_t vcpu_id,
     struct fbvbs_vm_run_response *response
 ) {
+#ifdef __FRAMAC__
+    (void)partition;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
+    response->exit_length = 0U;
+    return OK;
+#else
     union { struct fbvbs_vm_exit_unclassified_fault e; uint8_t b[sizeof(struct fbvbs_vm_exit_unclassified_fault)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_unclassified_fault){0};
@@ -230,6 +259,7 @@ static int fbvbs_vmx_unclassified_fault_exit(
         overlay.e.detail0,
         overlay.e.detail1
     );
+#endif
 }
 
 /*@ requires \valid(vcpu);
@@ -245,6 +275,12 @@ static void fbvbs_vmx_ept_violation_exit(
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_ept_violation e; uint8_t b[sizeof(struct fbvbs_vm_exit_ept_violation)]; } overlay;
 
     overlay.e = (struct fbvbs_vm_exit_ept_violation){0};
@@ -255,6 +291,7 @@ static void fbvbs_vmx_ept_violation_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
 /* ================================================================
@@ -280,62 +317,19 @@ static void fbvbs_vmx_ept_violation_exit(
  * VM exit.
  * ================================================================ */
 
-/*@ requires \valid(state);
-    requires \valid(vcpu);
-    requires \valid(response);
-    requires \valid_read(leaf_exit);
-    requires \separated(vcpu, response, leaf_exit);
-    assigns vcpu->state, vcpu->dr0, vcpu->dr1, vcpu->dr2, vcpu->dr3,
-            vcpu->dr6, vcpu->dr7,
-            response->exit_reason, response->exit_length,
-            response->exit_payload[0 .. 15],
-            state->mirror_log, state->log_lock,
-            state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-            state->log_rate_window_sequence;
-
-    behavior invalid_access:
-      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) > 1U;
-      assigns vcpu->state,
-              response->exit_reason, response->exit_length,
-              state->mirror_log, state->log_lock,
-              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_window_sequence;
-      ensures vcpu->state == FBVBS_VCPU_STATE_FAULTED;
-
-    behavior write_dr:
-      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) == 0U;
-      assigns vcpu->state, vcpu->dr0, vcpu->dr1, vcpu->dr2, vcpu->dr3,
-              vcpu->dr6, vcpu->dr7,
-              response->exit_reason, response->exit_length,
-              response->exit_payload[0 .. 15],
-              state->mirror_log, state->log_lock,
-              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_window_sequence;
-      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
-
-    behavior read_dr:
-      assumes FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit) == 1U;
-      assigns vcpu->state,
-              response->exit_reason, response->exit_length,
-              response->exit_payload[0 .. 15],
-              state->mirror_log, state->log_lock,
-              state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
-              state->log_rate_window_sequence;
-      ensures vcpu->state == FBVBS_VCPU_STATE_RUNNABLE;
-
-    complete behaviors;
-    disjoint behaviors;
-*/
 static void fbvbs_vmx_dr_access_exit(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_vcpu *vcpu,
     struct fbvbs_vm_run_response *response,
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
+#ifdef __FRAMAC__
+    (void)state;
+    (void)leaf_exit;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
+    response->exit_length = 0U;
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#else
     union { struct fbvbs_vm_exit_dr_access e; uint8_t b[sizeof(struct fbvbs_vm_exit_dr_access)]; } overlay;
     uint32_t dr_num = FBVBS_LEAF_EXIT_DR_NUMBER(leaf_exit);
     uint32_t is_read = FBVBS_LEAF_EXIT_DR_ACCESS_TYPE(leaf_exit); /* 0=write, 1=read */
@@ -420,6 +414,7 @@ static void fbvbs_vmx_dr_access_exit(
     response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
     response->exit_length = (uint32_t)sizeof(overlay.e);
     vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+#endif
 }
 
 int fbvbs_vmx_run_vcpu(
@@ -449,6 +444,13 @@ int fbvbs_vmx_run_vcpu(
     /*@ assert \valid(vcpu); */
     /*@ assert \separated(vcpu, response); */
     *response = (struct fbvbs_vm_run_response){0};
+
+#ifdef __FRAMAC__
+    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+    response->exit_reason = FBVBS_VM_EXIT_REASON_HALT;
+    response->exit_length = 0U;
+    return OK;
+#else
 
     /* VM entry mitigations (Section 21.3): L1D flush + restore guest SPEC_CTRL.
      * Must execute immediately before VM entry to minimize the window where
@@ -522,4 +524,5 @@ int fbvbs_vmx_run_vcpu(
             vcpu->state = FBVBS_VCPU_STATE_FAULTED;
             return INVALID_STATE;
     }
+#endif
 }

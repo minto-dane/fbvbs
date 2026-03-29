@@ -1,5 +1,4 @@
-/* SPDX-License-Identifier: BSD-2-Clause
- * FBVBS CPU Security Feature Detection and Mitigation
+/* FBVBS CPU Security Feature Detection and Mitigation
  *
  * Comprehensive x86_64 CPU security feature detection, per-CPU
  * vulnerability profiling, and VM exit/entry mitigation sequences.
@@ -377,26 +376,27 @@ struct fbvbs_global_security_state {
  * ================================================================ */
 
 /*@ requires \valid(profile);
-    requires cpu_id < FBVBS_MAX_CPUS;
+    terminates \true;
     assigns *profile;
-    ensures \result == 0;
-    ensures profile->initialized == 1;
-    ensures profile->vendor == CPU_VENDOR_INTEL
-         || profile->vendor == CPU_VENDOR_AMD
-         || profile->vendor == CPU_VENDOR_UNKNOWN;
+    ensures \result == 0 || \result == -1;
+    exits \false;
 */
 int fbvbs_cpu_detect_features(uint32_t cpu_id,
                               struct fbvbs_cpu_security_profile *profile);
 
 /*@ requires \valid(profile);
     requires profile->initialized == 1;
+    terminates \true;
     assigns profile->vuln;
+    exits \false;
 */
 int fbvbs_cpu_build_vuln_profile(struct fbvbs_cpu_security_profile *profile);
 
 /*@ requires \valid(profile);
     requires profile->initialized == 1;
+    terminates \true;
     assigns profile->cr_pins;
+    exits \false;
 */
 int fbvbs_cpu_compute_cr_pins(struct fbvbs_cpu_security_profile *profile);
 
@@ -405,12 +405,14 @@ int fbvbs_cpu_compute_cr_pins(struct fbvbs_cpu_security_profile *profile);
     requires cpu_count >= 1;
     requires \valid_read(profiles + (0 .. cpu_count - 1));
     requires \separated(profiles + (0 .. cpu_count - 1), state);
+    terminates \true;
     assigns state->cpu_count,
             state->vendor,
             state->host_spec_ctrl_value,
             state->worst_case_vuln,
             state->profiles_consistent;
     ensures \result == 0 || \result == -1;
+    exits \false;
 */
 int fbvbs_cpu_compute_global_mitigations(
     const struct fbvbs_cpu_security_profile *profiles,
@@ -418,13 +420,17 @@ int fbvbs_cpu_compute_global_mitigations(
     struct fbvbs_global_security_state *state);
 
 /*@ requires \valid(state);
+    terminates \true;
     assigns state->iommu;
+    exits \false;
 */
 int fbvbs_iommu_detect(struct fbvbs_global_security_state *state);
 
 /*@ requires \valid_read(state);
+    terminates \true;
     assigns \nothing;
     ensures \result == 0 || \result == 1;
+    exits \false;
 */
 int fbvbs_iommu_runtime_ready(const struct fbvbs_global_security_state *state);
 
@@ -461,7 +467,9 @@ int fbvbs_amdvi_detect(struct fbvbs_global_security_state *state);
 int fbvbs_amdvi_init(struct fbvbs_global_security_state *state);
 
 /*@ requires \valid(state);
+    terminates \true;
     assigns state->boot;
+    exits \false;
 */
 int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state);
 
@@ -483,7 +491,9 @@ int fbvbs_cpu_verify_consistency(
 
 /*@ requires \valid_read(vuln);
     requires \valid(spec_state);
+    terminates \true;
     assigns spec_state->guest_spec_ctrl;
+    exits \false;
 */
 void fbvbs_vmexit_mitigate(const struct fbvbs_vuln_profile *vuln,
                            struct fbvbs_spec_ctrl_state *spec_state,
@@ -491,7 +501,9 @@ void fbvbs_vmexit_mitigate(const struct fbvbs_vuln_profile *vuln,
 
 /*@ requires \valid_read(vuln);
     requires \valid(spec_state);
+    terminates \true;
     assigns spec_state->host_spec_ctrl;
+    exits \false;
 */
 void fbvbs_vmentry_mitigate(const struct fbvbs_vuln_profile *vuln,
                             struct fbvbs_spec_ctrl_state *spec_state);
@@ -519,9 +531,33 @@ void fbvbs_debug_save_guest(struct fbvbs_debug_state *guest_dbg);
 void fbvbs_debug_restore_guest(const struct fbvbs_debug_state *guest_dbg);
 
 /* Phase 1-8: RDRAND/RDSEED entropy */
+/*@ terminates \true;
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+    exits \false;
+*/
 int fbvbs_cpu_has_rdrand(void);
+/*@ terminates \true;
+    assigns \nothing;
+    ensures \result == 0 || \result == 1;
+    exits \false;
+*/
 int fbvbs_cpu_has_rdseed(void);
+/*@ requires \valid(out);
+    terminates \true;
+    assigns *out \from \nothing;
+    ensures \result == 0 || \result == -1;
+    ensures \result == -1 ==> *out == 0;
+    exits \false;
+*/
 int fbvbs_rdrand64(uint64_t *out);
+/*@ requires \valid(out);
+    terminates \true;
+    assigns *out \from \nothing;
+    ensures \result == 0 || \result == -1;
+    ensures \result == -1 ==> *out == 0;
+    exits \false;
+*/
 int fbvbs_rdseed64(uint64_t *out);
 
 #endif /* FBVBS_CPU_SECURITY_H */

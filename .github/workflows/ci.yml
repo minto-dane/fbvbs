@@ -92,7 +92,7 @@ jobs:
         run: make -C hypervisor test CC=gcc-13
 
   fuzz-build:
-    name: Fuzz harness build (5 harnesses)
+    name: Fuzz harness build + smoke (6 harnesses)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -109,6 +109,9 @@ jobs:
       - name: Build fuzz harnesses
         run: make -C hypervisor fuzz-build CC=gcc-13
 
+      - name: Run fuzz smoke corpus
+        run: make -C hypervisor fuzz-smoke CC=gcc-13
+
       - name: Upload fuzz binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -119,6 +122,8 @@ jobs:
             hypervisor/build/fuzz_multiboot2
             hypervisor/build/fuzz_iommu
             hypervisor/build/fuzz_log_decoder
+            hypervisor/build/fuzz_partition_loader
+            hypervisor/build/fuzz-smoke.txt
 
   coverage:
     name: Coverage evidence
@@ -170,6 +175,9 @@ jobs:
       - name: Generate SBOM
         run: make -C hypervisor sbom CC=gcc-13
 
+      - name: Generate provenance metadata
+        run: make -C hypervisor provenance CC=gcc-13
+
       - name: Upload reproducibility artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -178,6 +186,7 @@ jobs:
             hypervisor/build/repro_manifest_1.sha256
             hypervisor/build/repro_manifest_2.sha256
             hypervisor/build/sbom.txt
+            hypervisor/build/provenance.json
 
   baremetal-smoke:
     name: Bare-metal GRUB/QEMU smoke
@@ -194,8 +203,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y gcc-13 qemu-system-x86 grub-pc-bin grub-common xorriso mtools
 
-      - name: Build and run QEMU smoke
-        run: make -C hypervisor run-qemu-smoke CC=gcc-13
+      - name: Build and run QEMU smoke matrix
+        run: make -C hypervisor run-qemu-matrix CC=gcc-13
 
       - name: Upload bare-metal artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -205,6 +214,10 @@ jobs:
             hypervisor/build/fbvbs-baremetal.elf
             hypervisor/build/fbvbs-baremetal.iso
             hypervisor/build/qemu-smoke.log
+            hypervisor/build/qemu-smoke-summary.txt
+            hypervisor/build/qemu-iommu-summary.txt
+            hypervisor/build/qemu-matrix-summary.txt
+            hypervisor/build/qemu-smoke-logs
 
   traceability:
     name: Requirement traceability
@@ -220,9 +233,9 @@ jobs:
         run: |
           mkdir -p hypervisor/build
           python3 hypervisor/tools/traceability_matrix.py | tee hypervisor/build/traceability.txt
-          if grep -q "no source reference" hypervisor/build/traceability.txt; then
+          if grep -qi "no source reference" hypervisor/build/traceability.txt; then
             echo "FAIL: Some requirements have no source reference"
-            grep "no source reference" hypervisor/build/traceability.txt
+            grep -i "no source reference" hypervisor/build/traceability.txt
             exit 1
           fi
 

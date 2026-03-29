@@ -22,8 +22,8 @@ This directory contains repository-local fuzz entry points for the retained C mi
 
 ## Current status
 
-- The repository ships the harness sources and `make -C hypervisor fuzz-build`.
-- Seed corpora, dictionaries, and continuous fuzzing infrastructure are not yet committed here.
+- The repository ships the harness sources, committed seed corpora under `fuzz/corpus/`, `make -C hypervisor fuzz-build`, and `make -C hypervisor fuzz-smoke`.
+- The committed smoke corpus is intentionally small and deterministic; long-running AFL++/libFuzzer campaigns remain complementary external evidence.
 - Fuzz results are supporting evidence, not a substitute for proof obligations or hardware validation.
 
 ## Usage
@@ -33,6 +33,7 @@ Build all harnesses:
 ```bash
 cd hypervisor
 make fuzz-build
+make fuzz-smoke
 ```
 
-The resulting binaries are placed in `hypervisor/build/`.
+The resulting binaries are placed in `hypervisor/build/`. `make fuzz-smoke` writes a replayable summary to `hypervisor/build/fuzz-smoke.txt`.

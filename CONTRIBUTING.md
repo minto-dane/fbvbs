@@ -35,6 +35,7 @@ make -C hypervisor coverage
 make -C hypervisor traceability
 make -C hypervisor reproducible
 make -C hypervisor sbom
+make -C hypervisor provenance
 make -C hypervisor run-qemu-smoke
 ```
 

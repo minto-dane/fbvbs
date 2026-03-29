@@ -172,10 +172,11 @@ static inline void fbvbs_asm_wrmsr(uint32_t msr, uint64_t value) {
  * C. CPUID
  * ================================================================ */
 
-/*@ requires eax == \null || \valid(eax);
-    requires ebx == \null || \valid(ebx);
-    requires ecx == \null || \valid(ecx);
-    requires edx == \null || \valid(edx);
+/*@ requires \valid(eax);
+    requires \valid(ebx);
+    requires \valid(ecx);
+    requires \valid(edx);
+    requires \separated(eax, ebx, ecx, edx);
     assigns *eax, *ebx, *ecx, *edx;
 */
 static inline void fbvbs_asm_cpuid(
@@ -420,9 +421,33 @@ static inline void fbvbs_asm_lgdt(const struct fbvbs_asm_desc_ptr *gdtr) {
 
 static inline void fbvbs_asm_ltr(uint16_t selector) {
 #if defined(__x86_64__) && !defined(__FRAMAC__)
-    __asm__ volatile("ltr %0" : : "r"(selector) : "memory");
+    __asm__ volatile("ltr %w0" : : "r"(selector) : "memory");
 #else
     (void)selector;
+#endif
+}
+
+/*@ assigns \result \from \nothing;
+*/
+static inline uint64_t fbvbs_asm_read_rsp(void) {
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    uint64_t value;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(value));
+    return value;
+#else
+    return 0U;
+#endif
+}
+
+/*@ assigns \result \from \nothing;
+*/
+static inline uint64_t fbvbs_asm_read_rflags(void) {
+#if defined(__x86_64__) && !defined(__FRAMAC__)
+    uint64_t value;
+    __asm__ volatile("pushfq; popq %0" : "=r"(value) : : "memory");
+    return value;
+#else
+    return 0x202U;
 #endif
 }
 
@@ -542,6 +567,7 @@ extern int fbvbs_vmlaunch(void);
 extern int fbvbs_vmresume(void);
 extern uint64_t fbvbs_get_vmexit_handler_rip(void);
 extern uint64_t fbvbs_get_vmx_stack_top(void);
+extern uint64_t fbvbs_get_boot_tss_base(void);
 #endif
 
 #endif /* FBVBS_ASM_H */

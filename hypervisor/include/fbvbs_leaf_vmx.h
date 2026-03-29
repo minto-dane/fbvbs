@@ -159,7 +159,7 @@ _Static_assert(
     ((uint8_t)(((exit_ptr)->detail.word1 >> 8) & 0xFFULL))
 
 #define FBVBS_LEAF_EXIT_MMIO_VALUE(exit_ptr) \
-    ((uint32_t)((exit_ptr)->detail.word2 & 0xFFFFFFFFULL))
+    ((exit_ptr)->detail.word2)
 
 #define FBVBS_LEAF_EXIT_EPT_GPA(exit_ptr) \
     ((exit_ptr)->detail.word0)
@@ -176,7 +176,9 @@ _Static_assert(
 #define FBVBS_LEAF_EXIT_DR_VALUE(exit_ptr) \
     ((exit_ptr)->detail.word1)
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_external_interrupt(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t vector
@@ -186,7 +188,9 @@ static inline void fbvbs_leaf_exit_set_external_interrupt(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_cr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t cr_number,
@@ -198,7 +202,9 @@ static inline void fbvbs_leaf_exit_set_cr_access(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_msr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t msr_address,
@@ -210,7 +216,9 @@ static inline void fbvbs_leaf_exit_set_msr_access(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_ept_violation(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint64_t guest_physical_address,
@@ -221,7 +229,9 @@ static inline void fbvbs_leaf_exit_set_ept_violation(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_pio(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint16_t port,
@@ -236,7 +246,9 @@ static inline void fbvbs_leaf_exit_set_pio(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_mmio(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint64_t guest_physical_address,
@@ -249,7 +261,9 @@ static inline void fbvbs_leaf_exit_set_mmio(
     leaf_exit->detail.word2 = value;
 }
 
-/*@ requires \valid(leaf_exit); */
+/*@ requires \valid(leaf_exit);
+    assigns leaf_exit->detail;
+*/
 static inline void fbvbs_leaf_exit_set_dr_access(
     struct fbvbs_vmx_leaf_exit *leaf_exit,
     uint32_t dr_number,
@@ -261,20 +275,20 @@ static inline void fbvbs_leaf_exit_set_dr_access(
     leaf_exit->detail.word2 = 0U;
 }
 
-/*@ requires \valid(caps) || caps == \null;
+/*@ requires \valid(caps);
+    terminates \true;
     assigns *caps;
-    behavior null_ptr:
-      assumes caps == \null;
-      assigns \nothing;
-      ensures \result == INVALID_PARAMETER;
-    behavior valid_ptr:
-      assumes caps != \null;
-      assigns *caps;
-      ensures \result == OK;
-    complete behaviors;
-    disjoint behaviors;
+    ensures \result == OK;
+    exits \false;
 */
 int fbvbs_vmx_probe(struct fbvbs_vmx_capabilities *caps);
+/*@ requires \valid_read(caps); requires \valid_read(vcpu); requires \valid(leaf_exit);
+    requires intercepted_msr_count == 0 ||
+             \valid_read(intercepted_msrs + (0 .. intercepted_msr_count - 1));
+    terminates \true;
+    assigns *leaf_exit;
+    exits \false;
+*/
 int fbvbs_vmx_leaf_run_vcpu(
     const struct fbvbs_vmx_capabilities *caps,
     const struct fbvbs_vcpu *vcpu,

@@ -239,8 +239,8 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                 }
                 break;
 
-            case 15:  /* ACPI RSDP v2+ */
-                if (size >= 36U) {
+            case 15:  /* ACPI RSDP v2+ (36-byte RSDP after 8-byte tag header) */
+                if (size >= 44U) {
                     /* Prefer the newer ACPI handoff if both are present. */
                     state->acpi_rsdp = tag_ptr + 8U;
                 }

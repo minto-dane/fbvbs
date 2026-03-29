@@ -51,8 +51,9 @@
  *     IOMMU domains, KSI/IKS/SKS/UVS state, command trackers,
  *     artifact/device catalogs, manifest profiles, callsite tables
  *
- * Rule: A CPU holding the BHL may acquire log_lock (Level 2 → Level 1
- * is forbidden; Level 1 → Level 2 is the allowed direction).
+ * Rule: A CPU holding the BHL (Level 2) may acquire log_lock (Level 1).
+ * Level 2 → Level 1 is allowed.
+ * Level 1 → Level 2 is forbidden (holding log_lock then acquiring BHL).
  * In practice, hypercall handlers call fbvbs_log_append while holding
  * the BHL, which acquires log_lock. This is safe because log_lock
  * is never held when the BHL is acquired.
@@ -118,8 +119,8 @@
 #define FBVBS_PER_CPU
 
 /* Lock identifiers (for documentation; not instantiated on BSP-only) */
-#define FBVBS_LOCK_LOG       0U  /* Level 1: log_lock */
-#define FBVBS_LOCK_BHL       1U  /* Level 2: big hypervisor lock */
+#define FBVBS_LOCK_LOG       0U  /* Index 0: log_lock (Level 1, inner) */
+#define FBVBS_LOCK_BHL       1U  /* Index 1: BHL (Level 2, outer, acquired first) */
 #define FBVBS_LOCK_LEVEL_MAX 2U
 
 #endif /* FBVBS_CONCURRENCY_H */

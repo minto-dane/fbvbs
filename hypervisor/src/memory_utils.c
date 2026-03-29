@@ -1,10 +1,23 @@
 #include "fbvbs_asm.h"
 #include "fbvbs_hypervisor.h"
 
+/* Predicate for valid SHA-384 context state */
+/*@
+  @ predicate fbvbs_sha384_context_valid(struct fbvbs_sha384_context *c) =
+  @     c != NULL &&
+  @     (!c->invalid ==> c->buffered_length <= 127) &&
+  @     (c->invalid ==> c->total_length == 0 && c->buffered_length == 0);
+  @*/
+
+/*@
+  @ requires length > 0 ==> \valid(((char*)buffer) + (0 .. length - 1));
+  @ requires length == 0 ==> \true;
+  @ assigns ((char*)buffer)[0 .. length - 1];
+  @ ensures \forall size_t i; i < length ==> ((char*)buffer)[i] == 0;
+  @*/
 void fbvbs_zero_memory(void *buffer, size_t length) {
     uint8_t *bytes;
     size_t index;
-    volatile uint8_t *volatile_bytes;
 
     if (buffer == NULL || length == 0U) {
         return;
@@ -12,17 +25,32 @@ void fbvbs_zero_memory(void *buffer, size_t length) {
 
     bytes = (uint8_t *)buffer;
 
-    /* Use volatile to prevent compiler optimization */
-    volatile_bytes = (volatile uint8_t *)bytes;
-
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop invariant \forall size_t i; i < index ==> bytes[i] == 0;
+      @ loop assigns index, bytes[0 .. length - 1];
+      @ loop variant length - index;
+      @*/
     for (index = 0; index < length; ++index) {
-        volatile_bytes[index] = 0;
+        bytes[index] = 0;
     }
 
     /* Memory barrier to ensure all writes are visible */
+#ifndef __FRAMAC__
     __asm__ volatile("mfence" : : : "memory");
+#endif
 }
 
+/*@
+  @ requires length > 0 ==> \valid(((char*)destination) + (0 .. length - 1));
+  @ requires length > 0 ==> \valid_read(((const char*)source) + (0 .. length - 1));
+  @ requires length > 0 ==> \separated(((char*)destination) + (0 .. length - 1),
+  @                                     ((const char*)source) + (0 .. length - 1));
+  @ requires length == 0 ==> \true;
+  @ assigns ((char*)destination)[0 .. length - 1];
+  @ ensures \forall size_t i; i < length ==>
+  @     ((char*)destination)[i] == ((const char*)source)[i];
+  @*/
 void fbvbs_copy_memory(void *destination, const void *source, size_t length) {
     uint8_t *dest;
     const uint8_t *src;
@@ -35,17 +63,37 @@ void fbvbs_copy_memory(void *destination, const void *source, size_t length) {
     dest = (uint8_t *)destination;
     src = (const uint8_t *)source;
 
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop invariant \forall size_t i; i < index ==> dest[i] == src[i];
+      @ loop invariant \separated(dest + (0 .. length - 1), src + (0 .. length - 1));
+      @ loop assigns index, dest[0 .. length - 1];
+      @ loop variant length - index;
+      @*/
     for (index = 0; index < length; ++index) {
         dest[index] = src[index];
     }
 
     /* Memory barrier to ensure all writes are visible */
+#ifndef __FRAMAC__
     __asm__ volatile("mfence" : : : "memory");
+#endif
 }
 
+/*@
+  @ requires length > 0 ==> \valid_read(((const char*)a) + (0 .. length - 1));
+  @ requires length > 0 ==> \valid_read(((const char*)b) + (0 .. length - 1));
+  @ requires length == 0 ==> \true;
+  @ ensures length == 0 ==> \result == 0;
+  @ ensures length > 0 && \result == 1 <==> \forall size_t i; i < length ==>
+  @     ((const char*)a)[i] == ((const char*)b)[i];
+  @ ensures length > 0 && \result == 0 <==> \exists size_t i; i < length &&
+  @     ((const char*)a)[i] != ((const char*)b)[i];
+  @ ensures \result == 0 || \result == 1;
+  @*/
 int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
-    const volatile uint8_t *va;
-    const volatile uint8_t *vb;
+    const uint8_t *va;
+    const uint8_t *vb;
     size_t index;
     uint32_t accumulator = 0U;
 
@@ -53,11 +101,18 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
         return 0;
     }
 
-    va = (const volatile uint8_t *)a;
-    vb = (const volatile uint8_t *)b;
+    va = (const uint8_t *)a;
+    vb = (const uint8_t *)b;
 
     /* Constant-time: always iterate all bytes.
        Prevents timing side-channel that could leak partial match length. */
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop invariant accumulator == 0 <==> \forall size_t i; i < index ==>
+      @     va[i] == vb[i];
+      @ loop assigns index, accumulator;
+      @ loop variant length - index;
+      @*/
     for (index = 0; index < length; ++index) {
         accumulator |= (uint32_t)(va[index] ^ vb[index]);
     }
@@ -68,8 +123,18 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
     return accumulator == 0U ? 1 : 0;
 }
 
+/*@
+  @ requires length > 0 ==> \valid_read(((const char*)buffer) + (0 .. length - 1));
+  @ requires length == 0 ==> \true;
+  @ ensures length == 0 ==> \result == 0;
+  @ ensures length > 0 && \result == 1 <==> \forall size_t i; i < length ==>
+  @     ((const char*)buffer)[i] == 0;
+  @ ensures length > 0 && \result == 0 <==> \exists size_t i; i < length &&
+  @     ((const char*)buffer)[i] != 0;
+  @ ensures \result == 0 || \result == 1;
+  @*/
 int fbvbs_memory_is_zero(const void *buffer, size_t length) {
-    const volatile uint8_t *bytes;
+    const uint8_t *bytes;
     size_t index;
     uint32_t accumulator = 0U;
 
@@ -77,10 +142,17 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
         return 0;
     }
 
-    bytes = (const volatile uint8_t *)buffer;
+    bytes = (const uint8_t *)buffer;
 
     /* Constant-time: always iterate all bytes to prevent
        timing side-channel leaking which byte is non-zero */
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop invariant accumulator == 0 <==> \forall size_t i; i < index ==>
+      @     bytes[i] == 0;
+      @ loop assigns index, accumulator;
+      @ loop variant length - index;
+      @*/
     for (index = 0; index < length; ++index) {
         accumulator |= (uint32_t)bytes[index];
     }
@@ -91,6 +163,10 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
     return accumulator == 0U ? 1 : 0;
 }
 
+/*@
+  @ requires 0 < shift < 64;
+  @ ensures \result == (value >> shift) | (value << (64 - shift));
+  @*/
 static uint64_t fbvbs_rotr64(uint64_t value, uint32_t shift) {
     return (value >> shift) | (value << (64U - shift));
 }
@@ -229,6 +305,14 @@ static const uint64_t fbvbs_sha384_initial_state[8] = {
     UINT64_C(0xDB0C2E0D64F98FA7), UINT64_C(0x47B5481DBEFA4FA4)
 };
 
+/*@
+  @ requires context != NULL;
+  @ assigns *context;
+  @ ensures fbvbs_sha384_context_valid(context);
+  @ ensures context->total_length == 0;
+  @ ensures context->buffered_length == 0;
+  @ ensures context->invalid == 0;
+  @*/
 void fbvbs_sha384_init(struct fbvbs_sha384_context *context) {
     uint32_t index;
 
@@ -242,6 +326,17 @@ void fbvbs_sha384_init(struct fbvbs_sha384_context *context) {
     }
 }
 
+/*@
+  @ requires fbvbs_sha384_context_valid(context);
+  @ requires !context->invalid && length > 0 ==> data != NULL;
+  @ requires !context->invalid && length > 0 ==> \valid_read(((const char*)data) + (0 .. length - 1));
+  @ requires !context->invalid && length > 0 ==>
+  @     \separated((const char*)data + (0 .. length - 1),
+  @                (char*)context + (0 .. sizeof(*context) - 1));
+  @ assigns *context;
+  @ ensures fbvbs_sha384_context_valid(context);
+  @ ensures context->invalid ==> context->total_length == 0 && context->buffered_length == 0;
+  @*/
 void fbvbs_sha384_update(
     struct fbvbs_sha384_context *context,
     const void *data,
@@ -254,11 +349,18 @@ void fbvbs_sha384_update(
     if (context == NULL) {
         return;
     }
+    if (context->invalid) {
+        return;
+    }
     if (length == 0U) {
         return;
     }
     if (data == NULL || context->total_length > UINT64_MAX - length) {
-        fbvbs_zero_memory(context, sizeof(*context));
+        fbvbs_zero_memory(context->state, sizeof(context->state));
+        fbvbs_zero_memory(context->buffer, sizeof(context->buffer));
+        context->total_length = 0;
+        context->buffered_length = 0;
+        context->invalid = 1;
         return;
     }
 
@@ -297,6 +399,16 @@ void fbvbs_sha384_update(
     context->total_length += length;
 }
 
+/*@
+  @ requires fbvbs_sha384_context_valid(context);
+  @ requires out != NULL;
+  @ requires \valid(((char*)out) + (0 .. 47));
+  @ requires \separated((char*)out + (0 .. 47),
+  @                     (char*)context + (0 .. sizeof(*context) - 1));
+  @ assigns ((char*)out)[0 .. 47];
+  @ assigns *context;
+  @ ensures \old(context->invalid) ==> \forall size_t i; i < 48 ==> out[i] == 0;
+  @*/
 void fbvbs_sha384_final(
     struct fbvbs_sha384_context *context,
     uint8_t out[48]
@@ -308,6 +420,12 @@ void fbvbs_sha384_final(
     uint32_t out_index;
 
     if (context == NULL || out == NULL) {
+        return;
+    }
+
+    if (context->invalid) {
+        fbvbs_zero_memory(out, 48U);
+        fbvbs_zero_memory(context, sizeof(*context));
         return;
     }
 

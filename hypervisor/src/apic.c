@@ -150,8 +150,10 @@ int fbvbs_apic_build_virt_config(
         config->secondary_proc_or |= PROC2_VIRTUALIZE_APIC_ACCESSES;
         config->apic_access_page = APIC_DEFAULT_BASE;
 
-        /* Enable APIC register virtualization for read acceleration */
-        if (caps->hlat_available != 0U) {
+        /* Enable APIC register virtualization for read acceleration.
+         * Requires APIC virtualization capability (proc-based-controls2),
+         * not HLAT. */
+        if (caps->apic_virt_available != 0U) {
             config->secondary_proc_or |= PROC2_APIC_REGISTER_VIRT;
         }
     } else {

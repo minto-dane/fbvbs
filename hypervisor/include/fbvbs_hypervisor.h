@@ -21,6 +21,7 @@
 #endif
 
 #define FBVBS_RUNTIME_HOST_DEPRIVILEGED (1U << 0)
+#define FBVBS_RUNTIME_AUDIT_PRIMARY_OOB (1U << 1)
 
 struct fbvbs_trap_registers {
     uint64_t rax;
@@ -412,7 +413,7 @@ struct fbvbs_sha384_context {
     uint64_t state[8];
     uint64_t total_length;
     uint32_t buffered_length;
-    uint32_t reserved0;
+    uint32_t invalid;  /* 0 = valid, 1 = invalid (error occurred) */
     uint8_t buffer[128];
 };
 
@@ -537,6 +538,14 @@ int fbvbs_memory_object_hash_sha384(
     const struct fbvbs_memory_object *object,
     uint8_t out[48]
 );
+/*@ requires \valid_read(object);
+    requires \valid(out + (0 .. 47));
+    requires object->allocated;
+    terminates \true;
+    assigns out[0 .. 47];
+    ensures \result == 0 || \result == -1;
+    exits \false;
+*/
 int fbvbs_memory_object_hash_page_sha384(
     const struct fbvbs_memory_object *object,
     uint32_t page_index,
@@ -578,6 +587,7 @@ void fbvbs_kernel_main(const void *multiboot_info);
 const void *fbvbs_acpi_find_table(uint32_t signature);
 void fbvbs_boot_runtime_init(void);
 void fbvbs_boot_console_puts(const char *message);
+void fbvbs_audit_primary_sink_write(const char *message);
 /*@ requires \valid(state);
     requires multiboot_info == \null ||
              \valid_read(((const char *)multiboot_info) + (0 .. buffer_size - 1));
@@ -605,7 +615,7 @@ static inline void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *s
         return;
     }
 
-    state->acpi_rsdp = 0U;
+    state->acpi_rsdp = NULL;
     state->memory_map_count = 0U;
     state->boot_device = 0U;
     state->boot_partition = 0U;
@@ -632,11 +642,23 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                                   uint32_t buffer_size);
 #endif
 
+/*@ requires length == 0 || \valid_read(data + (0 .. length - 1));
+    terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 uint32_t fbvbs_crc32c(const uint8_t *data, size_t length);
+/*@ requires \valid(state);
+    terminates \true;
+    assigns state->mirror_log, state->runtime_state_flags;
+    exits \false;
+*/
 int fbvbs_log_init(struct fbvbs_hypervisor_state *state);
-/*@ assigns state->mirror_log, state->log_lock;
-    ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == RESOURCE_BUSY || \result == RESOURCE_EXHAUSTED;
+/*@ requires \valid(state);
+    requires payload_length == 0 || \valid_read(payload + (0 .. payload_length - 1));
+    terminates \true;
+    assigns state->mirror_log, state->log_lock;
+    exits \false;
 */
 int fbvbs_log_append(
     struct fbvbs_hypervisor_state *state,
@@ -649,17 +671,14 @@ int fbvbs_log_append(
 );
 /* Rate-limited log append: drops events exceeding per-class threshold,
  * emits RATE_LIMIT_SUMMARY on window rotation. CRITICAL/ALERT exempt. */
-/*@ requires \valid(state) || state == \null;
-    requires payload_length != 0 && payload != \null ==>
-             \valid_read(payload + (0 .. payload_length - 1));
-    requires payload_length != 0 && payload != \null && state != \null ==>
-             \separated(payload + (0 .. payload_length - 1), &state->mirror_log);
-    assigns state->mirror_log, state->log_lock,
+/*@ requires \valid(state);
+    requires payload_length == 0 || \valid_read(payload + (0 .. payload_length - 1));
+    terminates \true;
+    assigns state->mirror_log,
+            state->log_lock,
             state->log_rate_counts[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
             state->log_rate_dropped[0 .. FBVBS_RATE_LIMIT_CLASSES - 1],
             state->log_rate_window_sequence;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == RESOURCE_BUSY ||
-                      \result == RESOURCE_EXHAUSTED;
     exits \false;
 */
 int fbvbs_log_append_rate_limited(
@@ -671,8 +690,8 @@ int fbvbs_log_append_rate_limited(
     const uint8_t *payload,
     uint32_t payload_length
 );
-/*@ requires \valid(state) || state == \null;
-    requires \valid(response) || response == \null;
+/*@ requires \valid(state);
+    requires \valid(response);
     terminates \true;
     assigns *response;
     ensures \result == OK || \result == INVALID_PARAMETER;
@@ -696,15 +715,30 @@ int fbvbs_configure_host_callsite_table(
     const uint64_t *allowed_offsets,
     uint32_t count
 );
+/*@ requires \valid_read(state);
+    terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 uint64_t fbvbs_primary_host_callsite(
     const struct fbvbs_hypervisor_state *state,
     uint8_t caller_class
 );
+/*@ requires \valid_read(state);
+    terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 const struct fbvbs_manifest_profile *fbvbs_find_manifest_profile_for_object(
     const struct fbvbs_hypervisor_state *state,
     uint8_t component_type,
     uint64_t object_id
 );
+/*@ requires \valid_read(state);
+    terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 const struct fbvbs_manifest_profile *fbvbs_find_host_manifest_profile(
     const struct fbvbs_hypervisor_state *state,
     uint8_t caller_class
@@ -752,11 +786,10 @@ int fbvbs_ingest_boot_catalog(
     uint32_t profile_count
 );
 
-/*@ requires \valid(state) || state == \null;
-    requires \valid(partition) || partition == \null;
-    requires \valid(response) || response == \null;
-    requires state != \null && partition != \null && response != \null ==>
-             \separated(response, partition);
+/*@ requires \valid(state);
+    requires \valid(partition);
+    requires \valid(response);
+    requires \separated(response, partition);
     terminates \true;
     assigns *state, *partition, *response;
     ensures \result == OK || \result == INVALID_PARAMETER ||
@@ -771,28 +804,40 @@ int fbvbs_vmx_run_vcpu(
     struct fbvbs_vm_run_response *response
 );
 
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_partition_create(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_create_request *request,
     struct fbvbs_partition_create_response *response
 );
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
 int fbvbs_partition_get_status(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     struct fbvbs_partition_status_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_partition_measure(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_measure_request *request,
     struct fbvbs_partition_measure_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_load_image(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_load_image_request *request
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_start(struct fbvbs_hypervisor_state *state, uint64_t partition_id);
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_quiesce(struct fbvbs_hypervisor_state *state, uint64_t partition_id);
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_resume(struct fbvbs_hypervisor_state *state, uint64_t partition_id);
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_fault(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
@@ -801,259 +846,347 @@ int fbvbs_partition_fault(
     uint64_t detail0,
     uint64_t detail1
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_recover(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition_recover_request *request
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_seed_freebsd_host(struct fbvbs_hypervisor_state *state);
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_partition_destroy(struct fbvbs_hypervisor_state *state, uint64_t partition_id);
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
 int fbvbs_partition_get_fault_info(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     struct fbvbs_partition_fault_info_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_vm_create(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_create_request *request,
     struct fbvbs_vm_create_response *response
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_destroy(struct fbvbs_hypervisor_state *state, uint64_t vm_partition_id);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
 int fbvbs_vm_get_vcpu_status(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_vcpu_status_request *request,
     struct fbvbs_vm_vcpu_status_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_set_register(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_register_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
 int fbvbs_vm_get_register(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_register_read_request *request,
     struct fbvbs_vm_register_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_vm_run(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_run_request *request,
     struct fbvbs_vm_run_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_map_memory(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_map_memory_request *request,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_inject_interrupt(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_inject_interrupt_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_assign_device(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_device_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_vm_release_device(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_vm_device_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true;
+    assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1],
+            state->next_memory_object_id,
+            *response;
+    exits \false; */
 int fbvbs_memory_allocate_object(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_allocate_object_request *request,
     struct fbvbs_memory_allocate_object_response *response,
     uint64_t owner_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_memory_map(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_map_request *request,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_memory_unmap(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_unmap_request *request,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_memory_set_permission(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_set_permission_request *request,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_memory_register_shared(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_memory_register_shared_request *request,
     struct fbvbs_memory_register_shared_response *response,
     uint64_t owner_partition_id
 );
+/*@ requires \valid(state); terminates \true;
+    assigns state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1];
+    exits \false; */
 int fbvbs_memory_release_object(
     struct fbvbs_hypervisor_state *state,
     uint64_t memory_object_id,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_memory_unregister_shared(
     struct fbvbs_hypervisor_state *state,
     uint64_t shared_object_id,
     uint64_t requester_partition_id
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_kci_verify_module(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_verify_module_request *request,
     struct fbvbs_verdict_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_kci_set_wx(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_set_wx_request *request
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 void fbvbs_kci_invalidate_bindings_for_gpa(
     struct fbvbs_hypervisor_state *state,
     uint64_t guest_physical_address,
     uint64_t size
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 void fbvbs_kci_invalidate_approved_module_for_gpa(
     struct fbvbs_hypervisor_state *state,
     uint64_t guest_physical_address,
     uint64_t size
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_kci_pin_cr(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_pin_cr_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_kci_intercept_msr(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_kci_intercept_msr_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_ksi_create_target_set(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_create_target_set_request *request,
     struct fbvbs_ksi_target_set_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_register_tier_a(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_register_tier_a_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_register_tier_b(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_register_tier_b_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_modify_tier_b(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_modify_tier_b_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_register_pointer(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_register_pointer_request *request
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_ksi_validate_setuid(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_validate_setuid_request *request,
     struct fbvbs_verdict_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_ksi_allocate_ucred(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_allocate_ucred_request *request,
     struct fbvbs_ksi_allocate_ucred_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_replace_tier_b_object(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_ksi_replace_tier_b_object_request *request
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_ksi_unregister_object(
     struct fbvbs_hypervisor_state *state,
     uint64_t object_id
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_iks_import_key(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_iks_import_key_request *request,
     struct fbvbs_handle_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_iks_sign(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_iks_sign_request *request,
     struct fbvbs_iks_sign_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_iks_key_exchange(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_iks_key_exchange_request *request,
     struct fbvbs_handle_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_iks_derive(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_iks_derive_request *request,
     struct fbvbs_handle_response *response
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_iks_destroy_key(
     struct fbvbs_hypervisor_state *state,
     uint64_t key_handle
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_sks_import_dek(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_sks_import_dek_request *request,
     struct fbvbs_handle_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_sks_decrypt_batch(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_sks_batch_request *request,
     struct fbvbs_sks_batch_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_sks_encrypt_batch(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_sks_batch_request *request,
     struct fbvbs_sks_batch_response *response
 );
+/*@ requires \valid(state); terminates \true; assigns *state; exits \false; */
 int fbvbs_sks_destroy_dek(
     struct fbvbs_hypervisor_state *state,
     uint64_t dek_handle
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_uvs_verify_manifest_set(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_uvs_verify_manifest_set_request *request,
     struct fbvbs_uvs_verify_manifest_set_response *response
 );
+/*@ requires \valid_read(state);
+    terminates \true;
+    assigns \result \from artifact_object_id,
+                         manifest_object_id,
+                         state->approvals[0 .. FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES - 1];
+    exits \false;
+    ensures \result == 0 || \result == 1;
+*/
 int fbvbs_artifact_approval_exists(
     const struct fbvbs_hypervisor_state *state,
     uint64_t artifact_object_id,
     uint64_t manifest_object_id
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_uvs_verify_artifact(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_uvs_verify_artifact_request *request,
     struct fbvbs_verdict_response *response
 );
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
 int fbvbs_uvs_check_revocation(
     struct fbvbs_hypervisor_state *state,
     const struct fbvbs_uvs_check_revocation_request *request,
     struct fbvbs_uvs_check_revocation_response *response
 );
+/*@ requires \valid(state); requires \valid(response); requires \valid(response_length);
+    terminates \true; assigns *response, *response_length; exits \false; */
 int fbvbs_diag_get_partition_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_partition_list_response *response,
     uint32_t *response_length
 );
-/*@ requires \valid(state);
-    requires \valid(response);
-    terminates \true;
-    assigns *response;
-    exits \false;
-*/
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
 int fbvbs_diag_get_capabilities(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_capabilities_response *response
 );
-/*@ requires \valid(state);
-    requires \valid(response);
-    requires \valid(response_length);
-    terminates \true;
-    assigns *response, *response_length;
-    exits \false;
-*/
+/*@ requires \valid(state); requires \valid(response); requires \valid(response_length);
+    terminates \true; assigns *response, *response_length; exits \false; */
 int fbvbs_diag_get_artifact_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_artifact_list_response *response,
     uint32_t *response_length
 );
-/*@ requires \valid(state);
-    requires \valid(response);
-    requires \valid(response_length);
-    terminates \true;
-    assigns *response, *response_length;
-    exits \false;
-*/
+/*@ requires \valid(state); requires \valid(response); requires \valid(response_length);
+    terminates \true; assigns *response, *response_length; exits \false; */
 int fbvbs_diag_get_device_list(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_device_list_response *response,
@@ -1111,6 +1244,10 @@ struct fbvbs_vmx_security_controls {
 int fbvbs_vmx_build_security_controls(
     struct fbvbs_vmx_security_controls *controls,
     const struct fbvbs_vmx_capabilities *caps);
+
+/*@ assigns \result \from \nothing;
+*/
+uint64_t fbvbs_vmx_get_msr_bitmap_phys(void);
 
 /* ---- HLAT (Hypervisor-managed Linear Address Translation) ---- */
 
@@ -1256,6 +1393,11 @@ int fbvbs_ept_unmap_region(
     uint64_t gpa,
     uint64_t size);
 
+/*@ requires \valid(state);
+    terminates \true;
+    assigns *state;
+    exits \false;
+*/
 void fbvbs_ept_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id);
@@ -1349,12 +1491,37 @@ void fbvbs_watchdog_on_voluntary_exit(
     uint32_t partition_idx);
 
 /* Phase 0C: Physical page frame allocator */
+/*@ requires map_count == 0 || \valid_read(map + (0 .. map_count - 1));
+    terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
                           uint32_t map_count);
+/*@ terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size);
+/*@ terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 uint64_t fbvbs_page_alloc(void);
+/*@ terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 int fbvbs_page_free(uint64_t phys_addr);
+/*@ terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 uint32_t fbvbs_page_alloc_free_count(void);
+/*@ terminates \true;
+    assigns \nothing;
+    exits \false;
+*/
 uint32_t fbvbs_page_alloc_total_pages(void);
 
 /* Phase 1-11: State structure size guards.

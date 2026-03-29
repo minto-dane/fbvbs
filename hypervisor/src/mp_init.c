@@ -147,6 +147,30 @@ _Static_assert(sizeof(struct fbvbs_mp_state) <= 16384U,
  * bloating the main state struct during WP verification) */
 static struct fbvbs_mp_state g_mp_state;
 
+/* TLB shootdown serialization.
+ * The request structure is shared across CPUs, so the initiator must
+ * serialize request setup and broadcast. The ACK counter remains
+ * atomic in the handler. */
+static volatile uint32_t g_tlb_shootdown_lock = 0U;
+
+static void mp_tlb_shootdown_lock(void)
+{
+#ifdef __FRAMAC__
+    return;
+#else
+    while (__sync_lock_test_and_set(&g_tlb_shootdown_lock, 1U) != 0U) {
+        fbvbs_asm_pause();
+    }
+#endif
+}
+
+static void mp_tlb_shootdown_unlock(void)
+{
+#ifndef __FRAMAC__
+    __sync_lock_release(&g_tlb_shootdown_lock);
+#endif
+}
+
 /* ================================================================
  * MADT Parsing (Phase 8-1)
  *
@@ -557,8 +581,21 @@ static int identify_bsp(struct fbvbs_mp_state *mp) {
 #else
     {
         uint32_t eax, ebx, ecx, edx;
-        fbvbs_asm_cpuid(0x01U, 0U, &eax, &ebx, &ecx, &edx);
-        bsp_apic_id = (ebx >> 24) & 0xFFU;
+        uint64_t apic_base = fbvbs_asm_rdmsr(0x1BU);
+
+        if (((apic_base >> 10U) & 1U) != 0U) {
+            /* x2APIC enabled: CPUID leaf 0x0B/0x1F returns the full APIC ID
+             * in EDX. Prefer 0x0B and fall back to 0x1F if unavailable. */
+            fbvbs_asm_cpuid(0x0BU, 0U, &eax, &ebx, &ecx, &edx);
+            if (ebx == 0U && ecx == 0U && edx == 0U) {
+                fbvbs_asm_cpuid(0x1FU, 0U, &eax, &ebx, &ecx, &edx);
+            }
+            bsp_apic_id = edx;
+        } else {
+            /* Fallback: CPUID leaf 0x01, 8-bit initial APIC ID */
+            fbvbs_asm_cpuid(0x01U, 0U, &eax, &ebx, &ecx, &edx);
+            bsp_apic_id = (ebx >> 24) & 0xFFU;
+        }
     }
 #endif
 
@@ -733,30 +770,42 @@ static int start_all_aps(struct fbvbs_mp_state *mp) {
 
         /* Allocate per-AP stack (4 pages = 16KB) */
         {
-            uint64_t stack_page;
+            uint64_t stack_pages[4U];
             uint32_t page_count = 4U;
-            uint64_t stack_base = 0ULL;
             uint32_t p;
 
             /*@ loop invariant 0 <= p <= page_count;
-                loop assigns p, stack_page, stack_base;
+                loop assigns p, stack_pages[0 .. 3];
                 loop variant page_count - p;
             */
             for (p = 0U; p < page_count; ++p) {
-                stack_page = fbvbs_page_alloc();
-                if (stack_page == 0ULL) {
-                    /* Stack allocation failed — cannot start this AP.
-                     * Pages already allocated are leaked.
-                     * PRODUCTION NOTE: Track and free on failure. */
+                stack_pages[p] = fbvbs_page_alloc();
+                if (stack_pages[p] == 0ULL) {
+                    /* Stack allocation failed — free already-allocated pages */
+                    uint32_t q;
+                    for (q = p; q > 0U; --q) {
+                        (void)fbvbs_page_free(stack_pages[q - 1U]);
+                        stack_pages[q - 1U] = 0ULL;
+                    }
                     mp->cpus[i].state = CPU_STATE_HALTED;
+                    mp->cpus[i].stack_base = 0ULL;
                     errors += 1U;
                     goto next_ap;
                 }
-                if (p == 0U) {
-                    stack_base = stack_page;
+                if (p > 0U && stack_pages[p] != stack_pages[p - 1U] + 4096ULL) {
+                    uint32_t q;
+                    for (q = p + 1U; q > 0U; --q) {
+                        (void)fbvbs_page_free(stack_pages[q - 1U]);
+                        stack_pages[q - 1U] = 0ULL;
+                    }
+                    mp->cpus[i].state = CPU_STATE_HALTED;
+                    mp->cpus[i].stack_base = 0ULL;
+                    errors += 1U;
+                    goto next_ap;
                 }
             }
-            mp->cpus[i].stack_base = stack_base;
+            /* Stack grows downward: set base to top of allocation */
+            mp->cpus[i].stack_base = stack_pages[0U] + (uint64_t)page_count * 4096ULL;
         }
 
         /* PRODUCTION NOTE: Send INIT-SIPI-SIPI sequence here.
@@ -875,9 +924,9 @@ static int send_ipi_broadcast(
     return 0;
 }
 
+/* target_apic_id is uint32_t: xAPIC (<256) or x2APIC (full 32-bit range) */
 /*@ requires \valid(mp);
     requires mp->cpu_count <= FBVBS_MAX_CPUS;
-    requires target_apic_id < 256U || target_apic_id < 0xFFFFFFFFU;
     assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
@@ -961,6 +1010,11 @@ struct fbvbs_tlb_shootdown_request {
 
 static struct fbvbs_tlb_shootdown_request g_tlb_shootdown;
 
+/* CONCURRENCY: g_tlb_shootdown is a single static structure.
+ * Callers must hold the Big Hypervisor Lock (BHL) to prevent
+ * concurrent shootdown requests from corrupting in-flight state.
+ * All hypercall paths (the only callers) acquire BHL before entry. */
+
 /*@ assigns g_tlb_shootdown;
     ensures \result == 0 || \result == -1;
 */
@@ -970,6 +1024,7 @@ int fbvbs_mp_tlb_shootdown(
     uint64_t size
 ) {
     const struct fbvbs_mp_state *mp = &g_mp_state;
+    mp_tlb_shootdown_lock();
     /* Set up shootdown request */
     g_tlb_shootdown.address = address;
     g_tlb_shootdown.size = size;
@@ -981,12 +1036,14 @@ int fbvbs_mp_tlb_shootdown(
     if (g_tlb_shootdown.target_count == 0U) {
         /* Single-CPU: local invalidation only */
         /* PRODUCTION NOTE: INVEPT/INVLPGA here */
+        mp_tlb_shootdown_unlock();
         return 0;
     }
 
     /* Send TLB shootdown IPI to all other CPUs */
     if (send_ipi_broadcast(mp, IPI_REASON_TLB_SHOOTDOWN,
                            TLB_SHOOTDOWN_VECTOR) != 0) {
+        mp_tlb_shootdown_unlock();
         return -1;
     }
 
@@ -1007,6 +1064,7 @@ int fbvbs_mp_tlb_shootdown(
      * }
      */
 
+    mp_tlb_shootdown_unlock();
     return 0;
 }
 
@@ -1029,8 +1087,12 @@ void fbvbs_mp_tlb_shootdown_handler(void) {
      * __sync_fetch_and_add(&g_tlb_shootdown.ack_count, 1);
      */
 
-    /* Model: just increment ack counter */
+    /* Atomic increment: multiple CPUs ACK concurrently */
+#ifdef __FRAMAC__
     g_tlb_shootdown.ack_count += 1U;
+#else
+    __sync_fetch_and_add(&g_tlb_shootdown.ack_count, 1U);
+#endif
 }
 
 /* ================================================================
@@ -1046,7 +1108,7 @@ void fbvbs_mp_tlb_shootdown_handler(void) {
 /*@ requires \valid(mp);
     requires cpu_id < mp->cpu_count;
     requires cpu_id < FBVBS_MAX_CPUS;
-    ensures \result == 0ULL || \result != 0ULL;
+    assigns \nothing;
 */
 static uint64_t fbvbs_mp_page_alloc_local(
     const struct fbvbs_mp_state *mp,

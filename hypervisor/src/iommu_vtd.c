@@ -56,7 +56,7 @@
  * ACPI / DMAR table structures (packed wire format)
  * ================================================================ */
 
-struct acpi_table_header {
+struct __attribute__((packed)) acpi_table_header {
     uint32_t signature;
     uint32_t length;
     uint8_t  revision;
@@ -68,7 +68,7 @@ struct acpi_table_header {
     uint32_t creator_revision;
 };
 
-struct dmar_table_header {
+struct __attribute__((packed)) dmar_table_header {
     struct acpi_table_header header;
     uint8_t  host_address_width;
     uint8_t  flags;
@@ -76,12 +76,12 @@ struct dmar_table_header {
     /* Variable-length remapping structures follow */
 };
 
-struct dmar_remapping_header {
+struct __attribute__((packed)) dmar_remapping_header {
     uint16_t type;
     uint16_t length;
 };
 
-struct dmar_device_scope {
+struct __attribute__((packed)) dmar_device_scope {
     uint8_t  type;
     uint8_t  length;
     uint16_t reserved;
@@ -512,6 +512,11 @@ int fbvbs_vtd_detect(struct fbvbs_global_security_state *state)
 #define VTD_CCMD_ICC        (1ULL << 63)  /* Invalidate Context-Cache */
 #define VTD_CCMD_CIRG_GLOBAL (1ULL << 61) /* Global Invalidation */
 
+/* IOTLB Invalidation register (offset from ECAP.IRO) */
+#define VTD_REG_IOTLB       0x108U  /* IOTLB Invalidate Register */
+#define VTD_IOTLB_IVT       (1ULL << 63)  /* Invalidate IOTLB */
+#define VTD_IOTLB_IIRG_GLOBAL (1ULL << 60) /* Global Invalidation */
+
 /* ================================================================
  * VT-d page table entry format (Second Level)
  *
@@ -726,13 +731,20 @@ static int vtd_set_root_table(uint64_t reg_base, uint64_t root_table_phys)
         vtd_mmio_write32(reg_base, VTD_REG_GCMD, gsts | VTD_GCMD_SRTP);
     }
 
-    /* PRODUCTION NOTE: Poll GSTS.RTPS until set (with timeout).
-     * Model returns success immediately. */
+    /* Poll GSTS.RTPS until set with bounded timeout. */
 #if !defined(__FRAMAC__)
     {
-        uint32_t gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+        uint32_t poll;
+        uint32_t gsts = 0;
+        for (poll = 0; poll < 10000U; ++poll) {
+            gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+            if (gsts & VTD_GSTS_RTPS) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
         if (!(gsts & VTD_GSTS_RTPS)) {
-            return -1;  /* Fail-closed: MMIO not functional */
+            return -1;  /* Fail-closed: RTPS not set after timeout */
         }
     }
 #endif
@@ -751,8 +763,44 @@ static int vtd_invalidate_context_global(uint64_t reg_base)
     /* PRODUCTION NOTE: Poll CCMD.ICC until cleared (with timeout). */
 #if !defined(__FRAMAC__)
     {
-        uint64_t ccmd = vtd_mmio_read64(reg_base, VTD_REG_CCMD);
+        uint32_t poll;
+        uint64_t ccmd = 0;
+        for (poll = 0; poll < 10000U; ++poll) {
+            ccmd = vtd_mmio_read64(reg_base, VTD_REG_CCMD);
+            if ((ccmd & VTD_CCMD_ICC) == 0ULL) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
         if (ccmd & VTD_CCMD_ICC) {
+            return -1;  /* Fail-closed */
+        }
+    }
+#endif
+    return 0;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
+static int vtd_invalidate_iotlb_global(uint64_t reg_base)
+{
+    vtd_mmio_write64(reg_base, VTD_REG_IOTLB,
+                     VTD_IOTLB_IVT | VTD_IOTLB_IIRG_GLOBAL);
+
+    /* PRODUCTION NOTE: Poll IOTLB.IVT until cleared (with timeout). */
+#if !defined(__FRAMAC__)
+    {
+        uint32_t poll;
+        uint64_t iotlb = 0;
+        for (poll = 0; poll < 10000U; ++poll) {
+            iotlb = vtd_mmio_read64(reg_base, VTD_REG_IOTLB);
+            if ((iotlb & VTD_IOTLB_IVT) == 0ULL) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
+        if (iotlb & VTD_IOTLB_IVT) {
             return -1;  /* Fail-closed */
         }
     }
@@ -770,7 +818,16 @@ static int vtd_enable_translation(uint64_t reg_base)
 
     /* PRODUCTION NOTE: Poll GSTS.TES until set (with timeout). */
 #if !defined(__FRAMAC__)
-    gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+    {
+        uint32_t poll;
+        for (poll = 0; poll < 10000U; ++poll) {
+            gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+            if (gsts & VTD_GSTS_TES) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
+    }
     if (!(gsts & VTD_GSTS_TES)) {
         return -1;  /* Fail-closed */
     }
@@ -796,7 +853,15 @@ static int vtd_enable_interrupt_remapping(uint64_t reg_base,
     /* Wait for IRTPS before enabling IRE (VT-d spec requirement) */
 #if !defined(__FRAMAC__)
     {
-        uint32_t gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+        uint32_t poll;
+        uint32_t gsts = 0;
+        for (poll = 0; poll < 10000U; ++poll) {
+            gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+            if (gsts & VTD_GSTS_IRTPS) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
         if (!(gsts & VTD_GSTS_IRTPS)) {
             return -1;  /* Fail-closed: IRTA pointer not accepted */
         }
@@ -812,7 +877,15 @@ static int vtd_enable_interrupt_remapping(uint64_t reg_base,
     /* Wait for IRES */
 #if !defined(__FRAMAC__)
     {
-        uint32_t gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+        uint32_t poll;
+        uint32_t gsts = 0;
+        for (poll = 0; poll < 10000U; ++poll) {
+            gsts = vtd_mmio_read32(reg_base, VTD_REG_GSTS);
+            if (gsts & VTD_GSTS_IRES) {
+                break;
+            }
+            fbvbs_asm_pause();
+        }
         if (!(gsts & VTD_GSTS_IRES)) {
             return -1;
         }
@@ -972,6 +1045,9 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
                 }
             }
             if (failed == 0 && vtd_invalidate_context_global(reg_base) != 0) {
+                failed = 1;
+            }
+            if (failed == 0 && vtd_invalidate_iotlb_global(reg_base) != 0) {
                 failed = 1;
             }
             if (failed == 0 && vtd_enable_translation(reg_base) != 0) {

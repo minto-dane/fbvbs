@@ -180,12 +180,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     EFI_BOOT_SERVICES *bs;
     EFI_STATUS status;
     struct fbvbs_efi_boot_info boot_info;
-    uint8_t mmap_buffer[FBVBS_MMAP_BUFFER_SIZE];
+    EFI_PHYSICAL_ADDRESS mmap_buffer_phys = 0;
+    uint8_t *mmap_buffer = NULL;
     UINTN map_key = 0;
     UINTN mmap_size = 0;
     UINTN desc_size = 0;
     uint32_t desc_version = 0;
     EFI_PHYSICAL_ADDRESS stack_pages = 0;
+    UINTN mmap_page_count = (FBVBS_MMAP_BUFFER_SIZE + 4095U) / 4096U;
 
     /* Basic validation */
     if (system_table == NULL || system_table->boot_services == NULL) {
@@ -218,7 +220,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     efi_print_hex(boot_info.acpi_rsdp);
     efi_print(u"\r\n");
 
-    /* ---- Step 2: Allocate hypervisor stack ---- */
+    /* ---- Step 2: Allocate memory map buffer ---- */
+    status = bs->allocate_pages(
+        AllocateAnyPages,
+        EFI_LOADER_DATA,
+        mmap_page_count,
+        &mmap_buffer_phys
+    );
+    if (EFI_ERROR(status)) {
+        efi_print(u"ERROR: Failed to allocate memory map buffer\r\n");
+        return status;
+    }
+    mmap_buffer = (uint8_t *)(uintptr_t)mmap_buffer_phys;
+
+    /* ---- Step 3: Allocate hypervisor stack ---- */
     status = bs->allocate_pages(
         AllocateAnyPages,
         EFI_LOADER_DATA,
@@ -227,6 +242,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     );
     if (EFI_ERROR(status)) {
         efi_print(u"ERROR: Failed to allocate stack pages\r\n");
+        bs->free_pages(mmap_buffer_phys, mmap_page_count);
         return status;
     }
     boot_info.stack_base = stack_pages;
@@ -236,22 +252,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     efi_print_hex(stack_pages);
     efi_print(u"\r\n");
 
-    /* ---- Step 3: Get memory map ---- */
+    /* ---- Step 4: Get memory map ---- */
     status = get_memory_map(
-        bs, mmap_buffer, sizeof(mmap_buffer),
+        bs, mmap_buffer, FBVBS_MMAP_BUFFER_SIZE,
         &map_key, &mmap_size, &desc_size, &desc_version
     );
     if (EFI_ERROR(status)) {
         efi_print(u"ERROR: Failed to get memory map\r\n");
         bs->free_pages(stack_pages, FBVBS_HV_STACK_PAGES);
+        bs->free_pages(mmap_buffer_phys, mmap_page_count);
         return status;
     }
 
-    /* SECURITY NOTE: memory_map_addr points to a stack-local buffer.
-     * This is safe only because fbvbs_efi_to_hypervisor runs on the
-     * same stack frame (efi_main does not return after ExitBootServices).
-     * Production with ABI trampoline must allocate this buffer via
-     * EFI AllocatePages to survive stack switches. */
+    /* The memory-map buffer is page-allocated so it survives the
+     * ExitBootServices transition. */
     boot_info.memory_map_addr = (uint64_t)(uintptr_t)mmap_buffer;
     boot_info.memory_map_size = mmap_size;
     boot_info.descriptor_size = desc_size;
@@ -264,16 +278,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     efi_print_hex((uint64_t)boot_info.mmap_entry_count);
     efi_print(u"\r\n");
 
-    /* ---- Step 4: Exit Boot Services ---- */
+    /* ---- Step 5: Exit Boot Services ---- */
     efi_print(u"\r\nExiting boot services...\r\n");
 
     /* ExitBootServices may invalidate the memory map; the spec
      * requires calling GetMemoryMap again if it returns
      * EFI_INVALID_PARAMETER (stale map_key). */
     status = bs->exit_boot_services(image_handle, map_key);
-    if (EFI_ERROR(status)) {
-        /* Retry: get fresh memory map and try again */
-        mmap_size = sizeof(mmap_buffer);
+    if (status == EFI_INVALID_PARAMETER) {
+        /* Stale map_key: get fresh memory map and retry (UEFI spec §7.4) */
+        mmap_size = FBVBS_MMAP_BUFFER_SIZE;
         status = bs->get_memory_map(
             &mmap_size,
             (EFI_MEMORY_DESCRIPTOR *)mmap_buffer,
@@ -282,6 +296,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             &desc_version
         );
         if (EFI_ERROR(status)) {
+            bs->free_pages(stack_pages, FBVBS_HV_STACK_PAGES);
+            bs->free_pages(mmap_buffer_phys, mmap_page_count);
             return status;
         }
         boot_info.memory_map_size = mmap_size;
@@ -294,11 +310,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         status = bs->exit_boot_services(image_handle, map_key);
         if (EFI_ERROR(status)) {
             /* Fatal: cannot exit boot services */
+            bs->free_pages(stack_pages, FBVBS_HV_STACK_PAGES);
+            bs->free_pages(mmap_buffer_phys, mmap_page_count);
             return status;
         }
+    } else if (EFI_ERROR(status)) {
+        /* Non-retryable error — propagate immediately */
+        bs->free_pages(stack_pages, FBVBS_HV_STACK_PAGES);
+        bs->free_pages(mmap_buffer_phys, mmap_page_count);
+        return status;
     }
 
-    /* ---- Step 5: Transition to hypervisor ---- */
+    /* ---- Step 6: Transition to hypervisor ---- */
     /* After ExitBootServices:
      * - No UEFI services available (bs pointer is invalid)
      * - No console output possible
