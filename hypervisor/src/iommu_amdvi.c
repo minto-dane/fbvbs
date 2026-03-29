@@ -389,6 +389,9 @@ static uint64_t amdvi_mmio_read64(uint64_t base, uint32_t offset)
 static void amdvi_mmio_write64(uint64_t base, uint32_t offset, uint64_t value)
 {
 #if defined(FBVBS_BAREMETAL_BUILD) && !defined(__FRAMAC__)
+    if (!amdvi_mmio_base_valid(base) || (uint64_t)offset > UINT64_MAX - base) {
+        return;
+    }
     volatile uint64_t *reg =
         (volatile uint64_t *)(uintptr_t)(base + (uint64_t)offset);
     *reg = value;

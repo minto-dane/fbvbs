@@ -1,6 +1,6 @@
 # FBVBS v7 包括的実装ロードマップ
 
-**日付:** 2026-03-20 (retained C hardening 継続中)
+**日付:** 2026-03-24
 **基準文書:** plan/fbvbs-design.md (FBVBS v7 仕様書)
 **現状:** retained C マイクロハイパーバイザー基盤は広く実装済みだが、production release 完了ではない。Multiboot2 bare-metal ELF/GRUB ISO/QEMU smoke は追加済みで、repository-local では Stage 1 の TCG `intel-iommu`、Stage 2 のローカル KVM `intel-iommu`、Stage 3 の q35 `intel-iommu` / `amd-iommu` emulation matrix が boot artifact materialization、boot catalog ingest、host partition seed を通過し、VMX を expose しない環境では `VMX unavailable` で fail-closed する。`KCI_SET_WX` は retained-C 内蔵 SHA-384 と approved per-page digest table により runtime binding する。さらに、initialized audit path を含む retained-C foundation readiness、measured-boot を伴う high-assurance foundation readiness、host deprivilege readiness をコード上で区別する helper/capability bit を追加した。repository-local release packet には `provenance.json`、`release-readiness.json`、`release-evidence.tar.gz`、QEMU matrix summaries/per-case logs が含まれる。bare-metal retained boot artifact catalog は host kernel artifact を immutable loaded image bytes に、残りの retained seed artifact を明示 Multiboot module に authoritative に束縛する。`PARTITION_LOAD_IMAGE` は retained-C fixed ELF64 `ET_EXEC` loader として実装済みで、manifest/profile、`entry_ip`、writable and non-executable stack 条件を満たす authoritative image object に対して `Loaded` へ遷移する。残る主 blocker は authoritative な IOMMU bring-up と実機検証、host deprivilege handoff、Missing RTE guards と timeout を中心とする proof hardening、外部署名付き provenance、Phase 4-7 の信頼サービス/フロントエンド実装である。過去の WP 件数は履歴値として保持するが、常に再現済みの release 証拠を意味しない。
 

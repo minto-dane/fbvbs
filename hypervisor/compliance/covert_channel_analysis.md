@@ -64,6 +64,8 @@ of other partitions.
 
 ### 2.5 Microarchitectural Data Sampling (MDS) Channels
 
+Fully immune CPUs are CPUs whose vendor guidance, microcode level, and observed profile collectively indicate immunity to MFBDS, MLPDS, MSBDS, TAA, MMIO stale data, and RFDS. In FBVBS terms, that means the vulnerability profile built in `cpu_security.c` marks the corresponding `immune_*` bits and therefore does not require `need_verw`. Immunity must be grounded in vendor errata/CVE guidance, microcode/firmware revision, and profile-validation evidence; if there is uncertainty, the safe fallback is to set `need_verw` and execute VERW.
+
 | Channel | Mechanism | FBVBS Mitigation | Residual Risk |
 |---------|-----------|------------------|---------------|
 | MFBDS (Fallout) | Store buffer leakage | VERW on VM exit when `need_verw` set (cpu_security.c) | **Low (conditional)**: Low when `need_verw` is set; High if the CPU remains vulnerable and VERW is not programmed |
@@ -115,6 +117,50 @@ of other partitions.
 - L2 cache sharing — requires SMT-aware scheduling
 - DRAM row buffer — requires hardware controller partitioning
 - Memory bandwidth contention — requires hardware bandwidth allocation
+
+### 3.5 CPU Profiling Assurance
+
+The conditional mitigations in `cpu_security.c` depend on the CPU vulnerability profiling path, especially `need_l1d_flush` and `need_verw`. Profiles are determined from CPUID/MSR state and then merged into the global worst-case profile. Assurance for this mechanism therefore depends on both accurate hardware identification and conservative fallback behavior.
+
+Validation requirements:
+
+- cross-check the detected vendor/family/model/feature set against vendor errata and microcode guidance
+- run automated test vectors that exercise the VERW and L1D_FLUSH decision paths under VM entry/exit conditions
+- preserve telemetry showing when VERW or L1D_FLUSH was skipped because the profile marked the CPU immune
+- on any mismatch, unknown CPU ID, or microcode uncertainty, fail safe by enabling the mitigation (`need_verw=1`, `need_l1d_flush=1`) rather than skipping it
+
+Profile maintenance requirements:
+
+- re-validate profiles whenever CPU microcode, firmware, or the platform model changes
+- stage profile updates through reproducible tests and audit review before promotion
+- roll back to the conservative profile if an updated profile cannot be justified with evidence
+
+Claimed assurance level:
+
+- repository-local evidence supports a design-analysis claim aligned with AVA_VAN.5-style review intent
+- it is not yet a completed EAL5+ assurance claim because hardware validation and full proof closure are still open
+
+### 3.6 VERW Profile Validation Procedure
+
+To validate the `need_verw` gating logic:
+
+1. Record CPUID and relevant vulnerability capability bits for the target CPU.
+2. Compare the generated FBVBS profile against vendor errata and known vulnerability tables.
+3. Exercise VM-exit paths in test VMs and verify that VERW executes when the profile requires it.
+4. Review audit/telemetry for events where VERW was skipped; treat any unexpected skip as a release blocker.
+5. Re-run this validation after firmware or microcode updates.
+
+Recommended evidence sources and tooling:
+
+- the profiling implementation in `hypervisor/src/cpu_security.c`
+- regression coverage in `hypervisor/tests/test_policy_security.c`
+- repository-local QEMU smoke and matrix runs for gate behavior, with the understanding that they do not replace real-hardware validation
+- release audit telemetry showing whether the platform entered a mitigation-required or mitigation-skipped path
+
+Expected discrepancy handling:
+
+- if profile generation disagrees with vendor errata, microcode expectations, or observed VM-exit test vectors, raise a platform-gate alert and force the conservative path (`need_verw=1`)
+- if telemetry shows VERW was skipped on a CPU that cannot be justified as fully immune, treat the build as non-release-ready until the profile is corrected and re-validated
 
 ---
 

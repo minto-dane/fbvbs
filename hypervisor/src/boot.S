@@ -739,6 +739,7 @@ boot_tss:
     .quad 0
     .quad 0
     .quad 0
+    .quad 0
     .word 0
     .word boot_tss_end - boot_tss
 boot_tss_end:

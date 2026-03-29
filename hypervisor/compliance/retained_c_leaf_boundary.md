@@ -116,7 +116,7 @@ The retained C repository currently demonstrates:
 - analyzer-clean builds under GCC `-fanalyzer`
 - unit-test and gcov coverage for leaf ABI, hypercall trust-boundary checks, VM policy exits, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
 - machine-readable separation between audit-path readiness, retained-C foundation readiness, measured-boot-backed high-assurance readiness, and host deprivilege readiness
-- retained-C primary audit sink serialization to the bare-metal COM1/UART path, with the same sink modeled in hosted/unit-test builds through an overrideable retained-C hook
+- retained-C primary audit sink serialization to the bare-metal COM1/UART path, with the same sink modeled in hosted/unit-test builds through an overridable retained-C hook
 - host-deprivilege readiness derived from explicit runtime state, not merely compile-time feature intent
 - authoritative bare-metal retained boot-artifact binding: the host kernel is bound to immutable loaded hypervisor image bytes and the remaining seeded artifacts are bound to explicit Multiboot modules that are checked during ISO verification
 - a retained-C fixed executable loader for authoritative memory-object-backed ELF64 `ET_EXEC` partition-loadable artifacts, including executable-entry and NX-stack validation

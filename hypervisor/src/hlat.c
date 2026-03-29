@@ -368,6 +368,7 @@ struct fbvbs_hlat_partition_state {
  * and add_kld_module holds the BHL. */
 static struct fbvbs_hlat_partition_state hlat_partitions[FBVBS_MAX_PARTITIONS];
 static volatile uint32_t hlat_partition_locks[FBVBS_MAX_PARTITIONS];
+static struct fbvbs_hlat_model_tables hlat_model_tables[FBVBS_MAX_PARTITIONS];
 
 static void fbvbs_hlat_partition_lock(uint32_t part_idx)
 {
@@ -743,9 +744,7 @@ int fbvbs_hlat_init_for_partition(
     uint64_t kernel_text_base,
     uint64_t kernel_text_size)
 {
-    /* Static to avoid ~16KB stack allocation. Thread safety is
-     * acceptable: HLAT init is BSP-only, single-threaded. */
-    static struct fbvbs_hlat_model_tables tables;
+    struct fbvbs_hlat_model_tables *tables;
     struct fbvbs_hlat_vmcs_fields vmcs_fields;
     struct fbvbs_hlat_partition_state *hps;
     uint64_t phys_pml4, phys_pdpt, phys_pd, phys_pt;
@@ -770,6 +769,7 @@ int fbvbs_hlat_init_for_partition(
     }
 
     hps = &hlat_partitions[part_idx];
+    tables = &hlat_model_tables[part_idx];
     fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active != 0U) {
         fbvbs_hlat_partition_unlock(part_idx);
@@ -787,13 +787,13 @@ int fbvbs_hlat_init_for_partition(
     }
 
     /* Populate model page tables (validates construction logic) */
-    if (fbvbs_hlat_populate_tables(&tables, &hps->config) != 0) {
+    if (fbvbs_hlat_populate_tables(tables, &hps->config) != 0) {
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
 
     /* Verify table integrity */
-    if (fbvbs_hlat_verify_tables(&tables, &hps->config) != 0) {
+    if (fbvbs_hlat_verify_tables(tables, &hps->config) != 0) {
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
@@ -842,28 +842,28 @@ int fbvbs_hlat_init_for_partition(
 
         /* Write PML4 entries — set next-level physical address */
         for (i = 0; i < HLAT_ENTRIES_PER_TABLE; ++i) {
-            if ((tables.pml4[i] & HLAT_PTE_PRESENT) != 0U) {
+            if ((tables->pml4[i] & HLAT_PTE_PRESENT) != 0U) {
                 virt_pml4[i] = (phys_pdpt & HLAT_PTE_ADDR_MASK) |
                                HLAT_PTE_PRESENT | HLAT_PTE_RW;
             }
         }
         /* Write PDPT entries */
         for (i = 0; i < HLAT_ENTRIES_PER_TABLE; ++i) {
-            if ((tables.pdpt[i] & HLAT_PTE_PRESENT) != 0U) {
+            if ((tables->pdpt[i] & HLAT_PTE_PRESENT) != 0U) {
                 virt_pdpt[i] = (phys_pd & HLAT_PTE_ADDR_MASK) |
                                HLAT_PTE_PRESENT | HLAT_PTE_RW;
             }
         }
         /* Write PD entries */
         for (i = 0; i < HLAT_ENTRIES_PER_TABLE; ++i) {
-            if ((tables.pd[i] & HLAT_PTE_PRESENT) != 0U) {
+            if ((tables->pd[i] & HLAT_PTE_PRESENT) != 0U) {
                 virt_pd[i] = (phys_pt & HLAT_PTE_ADDR_MASK) |
                              HLAT_PTE_PRESENT | HLAT_PTE_RW;
             }
         }
         /* Write PT entries — leaf level, just Present (execute allowed) */
         for (i = 0; i < HLAT_ENTRIES_PER_TABLE; ++i) {
-            virt_pt[i] = tables.pt[i];
+            virt_pt[i] = tables->pt[i];
         }
     }
 #endif
@@ -914,6 +914,9 @@ int fbvbs_hlat_init_for_partition(
     }
     if (fbvbs_asm_vmwrite(VMCS_HLAT_PREFIX_SIZE,
                           vmcs_fields.hlat_prefix_size) != 0) {
+        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                                vmcs_fields.tertiary_proc_controls &
+                                ~PROC3_HLAT_ENABLE);
         (void)fbvbs_page_free(phys_pml4);
         (void)fbvbs_page_free(phys_pdpt);
         (void)fbvbs_page_free(phys_pd);
@@ -929,6 +932,9 @@ int fbvbs_hlat_init_for_partition(
     }
     if (fbvbs_asm_vmwrite(VMCS_HLAT_POINTER,
                           vmcs_fields.hlat_pointer) != 0) {
+        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                                vmcs_fields.tertiary_proc_controls &
+                                ~PROC3_HLAT_ENABLE);
         (void)fbvbs_page_free(phys_pml4);
         (void)fbvbs_page_free(phys_pdpt);
         (void)fbvbs_page_free(phys_pd);
@@ -1347,9 +1353,31 @@ void fbvbs_hlat_cleanup_partition(
      * to avoid dangling VMCS references to freed pages. */
     {
         uint64_t tertiary = 0;
-        (void)fbvbs_asm_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
-        tertiary &= ~PROC3_HLAT_ENABLE;
-        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
+        int vmread_rc = fbvbs_asm_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
+        if (vmread_rc == 0) {
+            int vmwrite_rc;
+            tertiary &= ~PROC3_HLAT_ENABLE;
+            vmwrite_rc = fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
+            if (vmwrite_rc != 0) {
+                (void)fbvbs_log_append(
+                    state, 0U,
+                    FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                    (uint16_t)FBVBS_SEVERITY_ERROR,
+                    (uint16_t)FBVBS_EVENT_VM_PLATFORM_GATE,
+                    (const uint8_t *)"hlat_cleanup:vmwrite",
+                    19U
+                );
+            }
+        } else {
+            (void)fbvbs_log_append(
+                state, 0U,
+                FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                (uint16_t)FBVBS_SEVERITY_ERROR,
+                (uint16_t)FBVBS_EVENT_VM_PLATFORM_GATE,
+                (const uint8_t *)"hlat_cleanup:vmread",
+                18U
+            );
+        }
     }
 
     /* Release allocated HLAT page table pages */

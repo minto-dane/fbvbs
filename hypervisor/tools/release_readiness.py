@@ -35,7 +35,7 @@ def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
     if path.is_absolute():
         return path.resolve()
     cwd_candidate = (pathlib.Path.cwd() / path).resolve()
-    if cwd_candidate.exists() or cwd_candidate.parent.exists():
+    if cwd_candidate.exists():
         return cwd_candidate
     return (base_dir / path).resolve()
 
@@ -52,6 +52,12 @@ def text_contains(path: pathlib.Path, needle: str) -> bool:
     if not path.is_file():
         return False
     return needle in path.read_text(encoding="utf-8", errors="replace")
+
+
+def normalized_text(path: pathlib.Path) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
 
 
 def main() -> int:
@@ -111,7 +117,7 @@ def main() -> int:
     repro_ready = (
         repro1.is_file() and
         repro2.is_file() and
-        repro1.read_text(encoding="utf-8") == repro2.read_text(encoding="utf-8")
+        normalized_text(repro1) == normalized_text(repro2)
     )
     docs = {
         rel_name: (repo_root / rel_name).is_file()

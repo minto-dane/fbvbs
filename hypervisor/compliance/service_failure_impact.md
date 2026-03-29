@@ -87,6 +87,15 @@ phase work.
   windows (e.g., ucred, prison, securelevel). KSI maintains shadow copies
   and grants/revokes write access.
 
+**Tier B resynchronization after KSI recovery:** Each Tier B shadow copy
+must carry an epoch/version stamp and integrity checksum. When KSI is
+restarted, it must fetch the current kernel state, compare the live object
+against the shadow copy, and either roll forward through the recorded
+change log or rebuild a fresh shadow under KSI control. During this
+resync, writes remain gated by a temporary write-disable window or a
+short-lived hypervisor-enforced lock; the new shadow is staged and then
+atomically swapped in only after checksum and epoch validation succeed.
+
 **Fail-Closed Behavior:**
 - Tier A structures remain EPT read-only protected regardless of KSI
   availability — the microhypervisor enforces this independently
@@ -181,10 +190,57 @@ confirm its health and audit continuity, then restart KSI in normal mode
 or verification-suspended mode, and finally re-enable dependent services
 only after both services pass health checks.
 
+Offline verification token requirements:
+
+- generated under an operator-controlled asymmetric signing key (Ed25519 or ECDSA-P256 in the current design) held in HSM/SE-backed storage where available
+- scoped to a specific KSI instance, boot/session epoch, and cached-metadata hash; any token KDF or derivation context must bind those fields so the token cannot be replayed for another service instance
+- short-lived, single-purpose, and usage-count bounded; expiry, nonce, and allowed-use counter must be embedded in the signed token payload
+- distributed only through the operator break-glass path and retained in sealed operator storage; emergency activation requires dual-approval or equivalent multi-party authorization
+- must be audited with operator identity, token identifier, reason, KCI health status, and timestamp
+- must trigger misuse alerts on repeated use, use outside the approved window, or mismatch with cached metadata
+
+Bounded self-check definition:
+
+- the self-check covers only the KSI executable image, its configuration manifest, the cached integrity metadata set, and the Tier B shadow-copy metadata required to start in read-only monitoring mode
+- the algorithm is a deterministic local verification of signed metadata, image hash, token scope, epoch, and checksum/version fields; it must not silently regenerate or "repair" missing trust roots
+- acceptable residual risk is limited to temporary operation with cached metadata while KCI is unavailable; live KCI-backed code-integrity approval and service-election participation remain disabled
+- on any self-check failure, token mismatch, or cache inconsistency, KSI must remain non-running and the operator must fall back to restarting KCI first
+
+Verification-suspended exit criteria:
+
+- KCI health endpoint responds successfully for at least 3 consecutive probes over a minimum 30-second retry window
+- cached metadata or offline-token self-check completes without integrity mismatch
+- the bounded self-check covers the KSI image, configuration manifest, and shadow-copy metadata set
+- KSI performs one clean shadow-copy resync pass and records a success audit event before transitioning to RUNNING
+- on failure, KSI remains non-running and dependent services stay disabled
+
+## 3.1 Service Election Mechanism
+
+Participating services: KCI, KSI, IKS, SKS, UVS.
+
+Purpose:
+
+- control which service instance is allowed to advertise healthy leadership in a redundant deployment
+- prevent a recovering or verification-suspended instance from rejoining prematurely
+
+Rules:
+
+- election is triggered on service startup, fault recovery, explicit operator restart, or health degradation
+- tie-breakers use deployment policy ordering and monotonically increasing instance epoch
+- quorum and redundancy policy are deployment-specific, but a service may not advertise itself healthy until its mandatory health checks pass
+
+KSI rejoin criteria:
+
+- 3 consecutive successful probes of the KSI health endpoint and integrity-status endpoint with no checksum/epoch mismatch
+- shadow-copy resync queue empty and last resync marked committed
+- no outstanding verification-suspended state
+- operator acknowledgement if the instance previously used an offline token
+- election rejoin must be logged together with operator identity and the recovery reason when manual approval was required
+
 | Service Down | Cascade Effect |
 |-------------|----------------|
 | KCI down | Existing KSI continues with last-verified code; KSI startup must enter verification-suspended mode using cached metadata or an operator-approved offline token until KCI health checks pass |
-| KSI down | No cascade (KCI, IKS, SKS, UVS independent); do not rejoin election until KSI health checks pass |
+| KSI down | No cascade (KCI, IKS, SKS, UVS independent); do not rejoin election until KSI health checks pass (see Section 3.1) |
 | IKS down | SKS key derivation fails; UVS signature verification fails |
 | SKS down | No cascade (mount operations fail, but I/O continues) |
 | UVS down | No cascade (updates blocked, system runs at current state) |
@@ -231,16 +287,23 @@ When a trusted service partition faults:
 
 ### 5.1 Phase 4 Timeline and Interim Verification
 
-- M1 (Owner: KCI/KSI service lead): complete the KCI/KSI mock interfaces and
+- M1 (Owner: KCI/KSI service lead, target 2026-04-15): complete the KCI/KSI mock interfaces and
   replayable fixtures for the partition lifecycle and health-check path.
-- M2 (Owner: Trusted-service verification lead): validate KCI denial and KSI
+- M2 (Owner: Trusted-service verification lead, target 2026-04-29): validate KCI denial and KSI
   verification-suspended startup using unit tests with offline tokens and
-  cached metadata.
-- M3 (Owner: IKS/SKS/UVS service lead): validate cascade behavior with
+  cached metadata defined in Section 3.
+- M3 (Owner: IKS/SKS/UVS service lead, target 2026-05-13): validate cascade behavior with
   subsystem simulations and audit-log assertions.
 - Success criteria: each mock-based test must demonstrate fail-closed
   behavior, explicit operator actions, and reproducible logs before the
   hardware-backed Phase 4 run.
-- Target window: Phase 4 execution is aligned to the next roadmap hardware
-  validation milestone; until then, the mock and static-analysis evidence
-  above is the official verification proxy.
+- Official verification proxy approval authority: the standalone
+  microhypervisor release authority together with the trusted-service
+  verification lead must approve mock and static-analysis evidence before it
+  is treated as the verification proxy.
+- Known limitations of the proxy: mock-based tests cannot prove real timing,
+  device interaction, or physical isolation properties; they only justify
+  fail-closed service logic and orchestration behavior.
+- Risk acceptance for schedule slip: delays beyond the dates above require
+  explicit approval by the release authority, documented acceptance
+  criteria, and escalation to the project security owner.

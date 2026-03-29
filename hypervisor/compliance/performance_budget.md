@@ -89,6 +89,23 @@ requires IPI-based TLB shootdown (fbvbs_mp_tlb_shootdown), adding
 - HLAT table updates require page allocation + PTE writes + INVEPT.
 - Total expected: 10ms–100ms for typical modules.
 
+### 1.5.1 KCI_SET_WX Raw-Bytes Recheck Measurement Requirement
+
+The retained-C `KCI_VERIFY_MODULE` / `KCI_SET_WX` path must be measured as
+part of release evidence, not only design analysis. At minimum the release
+packet must include:
+
+- a resident-artifact case where the approved raw bytes are read from immutable retained-C memory
+- an external-artifact case where the approved raw bytes are fetched from external storage or a staging buffer
+- at least one module with multiple executable segments
+- at least one large module representative of the upper supported size range
+- latency and I/O-count measurements for both `KCI_VERIFY_MODULE` and `KCI_SET_WX`
+- comparison against the page-digest cache hit/miss path so the raw-byte recheck cost is explicit
+
+If the measured path exceeds the Appendix J KLD budget, the deployment must
+not claim producer-facing release readiness until the cache policy, module
+layout, or verification strategy is corrected and re-measured.
+
 ### 1.6 VM Exit Fast Path
 
 **Budget:** Sub-µs (500ns–1µs)

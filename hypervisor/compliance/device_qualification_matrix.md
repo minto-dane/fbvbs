@@ -53,6 +53,36 @@ Phase 0A therefore covers fail-closed rejection plus operator-declared
 qualification. Phase 0B is the follow-on phase for automated PCI capability
 verification, domain setup, and device programming.
 
+### Phase 0A Operator-Declared Risk Model
+
+Phase 0A does not contradict fail-closed behavior; it narrows it. The hypervisor still rejects devices by default, but any positive `qualified` assertion is presently an operator claim rather than an automated proof of Q1-Q7. That means a mistaken declaration can admit a device whose ACS/FLR/MSI-X properties are weaker than required.
+
+Security impact when Q3 is only recommended:
+
+- Q1, Q2, Q4-Q8 remain mandatory and are still the minimum barrier for DMA safety and reset hygiene
+- Q3 weakness primarily affects interrupt isolation and cross-VM interference risk
+- devices without MSI-X may share vectors or depend on coarser interrupt routing, increasing the chance of interrupt timing leakage, IRQ contention, and operational interference between trusted and untrusted workloads
+
+Operational controls for non-MSI-X devices:
+
+- assign non-MSI-X devices only to trusted or single-tenant guests
+- pin IRQ affinity away from unrelated workloads
+- use host-level IRQ routing/isolation policy and monitor interrupt rates during qualification
+- document the exception in the deployment approval and risk register
+
+Phase 0A operator support that must accompany Q8 `qualified`:
+
+- standalone diagnostic scripts for PCI capability capture and review
+- reference qualification templates for approved device classes
+- operator training material and a qualification checklist retained with the release packet
+
+Phase 0B action plan:
+
+- automate Q1-Q7 discovery and validation in the hypervisor enumeration path
+- add runtime ACS/FLR/MSI-X verification logs
+- reject stale or inconsistent operator declarations once automated discovery is present
+- recommended Phase 0A validation inputs: `pciconf -lvbc`, firmware/BMC inventory, platform topology notes, and any deployment-specific PCIe qualification script retained with the release evidence
+
 ## Fail-Closed Behavior
 
 - Devices default to `qualified = 0` (unqualified)
@@ -75,3 +105,14 @@ does not yet read PCI capability registers to verify Q1-Q7 automatically.
 Automated PCI capability verification is planned for Phase 0B; until then,
 operators bear responsibility for ensuring assigned devices meet all
 qualification criteria in this matrix.
+
+## Verification Checklist for Non-MSI-X Qualification
+
+Before allowing a non-MSI-X device under Q3's exception path, the owner must complete:
+
+1. Record the device class, BDF, and target VM/partition.
+2. Verify Q1, Q2, Q4-Q8 manually and archive the evidence.
+3. Capture interrupt telemetry during guest bring-up and steady-state I/O.
+4. Verify IRQ affinity and routing do not overlap with unrelated trusted workloads.
+5. Confirm there is no unexpected interrupt storm, vector sharing anomaly, or cross-guest interference.
+6. Obtain operator approval and record the residual-risk acceptance.

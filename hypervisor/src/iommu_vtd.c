@@ -512,8 +512,6 @@ int fbvbs_vtd_detect(struct fbvbs_global_security_state *state)
 #define VTD_CCMD_ICC        (1ULL << 63)  /* Invalidate Context-Cache */
 #define VTD_CCMD_CIRG_GLOBAL (1ULL << 61) /* Global Invalidation */
 
-/* IOTLB Invalidation register (offset from ECAP.IRO) */
-#define VTD_REG_IOTLB       0x108U  /* IOTLB Invalidate Register */
 #define VTD_IOTLB_IVT       (1ULL << 63)  /* Invalidate IOTLB */
 #define VTD_IOTLB_IIRG_GLOBAL (1ULL << 60) /* Global Invalidation */
 
@@ -781,11 +779,22 @@ static int vtd_invalidate_context_global(uint64_t reg_base)
 }
 
 /*@ assigns \nothing;
+    ensures \result <= UINT32_MAX;
+*/
+static uint32_t vtd_iotlb_reg_offset(uint64_t ecap)
+{
+    uint32_t iro = (uint32_t)((ecap >> 8U) & 0x3FFU);
+    return (iro * 16U) + 8U;
+}
+
+/*@ assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
-static int vtd_invalidate_iotlb_global(uint64_t reg_base)
+static int vtd_invalidate_iotlb_global(uint64_t reg_base, uint64_t ecap)
 {
-    vtd_mmio_write64(reg_base, VTD_REG_IOTLB,
+    uint32_t iotlb_offset = vtd_iotlb_reg_offset(ecap);
+
+    vtd_mmio_write64(reg_base, iotlb_offset,
                      VTD_IOTLB_IVT | VTD_IOTLB_IIRG_GLOBAL);
 
     /* PRODUCTION NOTE: Poll IOTLB.IVT until cleared (with timeout). */
@@ -794,7 +803,7 @@ static int vtd_invalidate_iotlb_global(uint64_t reg_base)
         uint32_t poll;
         uint64_t iotlb = 0;
         for (poll = 0; poll < 10000U; ++poll) {
-            iotlb = vtd_mmio_read64(reg_base, VTD_REG_IOTLB);
+            iotlb = vtd_mmio_read64(reg_base, iotlb_offset);
             if ((iotlb & VTD_IOTLB_IVT) == 0ULL) {
                 break;
             }
@@ -1028,6 +1037,7 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
 
         for (i = 0U; i < info.drhd_count; ++i) {
             uint64_t reg_base = info.drhd_units[i].register_base_address;
+            uint64_t ecap = vtd_mmio_read64(reg_base, VTD_REG_ECAP);
             uint64_t root_table_phys;
             int failed = 0;
 
@@ -1047,7 +1057,7 @@ int fbvbs_vtd_init(struct fbvbs_global_security_state *state)
             if (failed == 0 && vtd_invalidate_context_global(reg_base) != 0) {
                 failed = 1;
             }
-            if (failed == 0 && vtd_invalidate_iotlb_global(reg_base) != 0) {
+            if (failed == 0 && vtd_invalidate_iotlb_global(reg_base, ecap) != 0) {
                 failed = 1;
             }
             if (failed == 0 && vtd_enable_translation(reg_base) != 0) {

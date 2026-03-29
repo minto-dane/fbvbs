@@ -85,6 +85,21 @@ struct fbvbs_cet_vmcs_config {
 
 static uint64_t g_msr_bitmap_phys;
 
+/* Retained-C bare-metal keeps allocator-backed control pages reachable via the
+ * identity map, and hosted/unit-test builds return page-backed virtual
+ * addresses from fbvbs_page_alloc().  VMX control initialization therefore
+ * treats the returned physical page as directly writable at this stage. */
+/*@ assigns \nothing;
+    ensures \result == \null || \valid(((uint8_t *)\result) + (0 .. FBVBS_PAGE_SIZE - 1));
+*/
+static uint8_t *fbvbs_page_phys_to_writable_ptr(uint64_t phys_addr)
+{
+    if (phys_addr == 0ULL) {
+        return NULL;
+    }
+    return (uint8_t *)(uintptr_t)phys_addr;
+}
+
 /*@ requires \valid(config);
     requires \valid_read(caps);
     assigns *config;
@@ -456,7 +471,13 @@ int fbvbs_vmx_build_security_controls(
         }
         g_msr_bitmap_phys = bitmap_phys;
     }
-    fbvbs_copy_bytes((uint8_t *)(uintptr_t)bitmap_phys, bitmap.data, sizeof(bitmap.data));
+    {
+        uint8_t *bitmap_ptr = fbvbs_page_phys_to_writable_ptr(bitmap_phys);
+        if (bitmap_ptr == NULL) {
+            return -1;
+        }
+        fbvbs_copy_bytes(bitmap_ptr, bitmap.data, sizeof(bitmap.data));
+    }
     controls->msr_bitmap_valid = 1;
 
     /* The MSR bitmap physical page is exposed via fbvbs_vmx_get_msr_bitmap_phys()

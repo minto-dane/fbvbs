@@ -466,8 +466,13 @@ int fbvbs_cpu_detect_features(uint32_t cpu_id,
 
 int fbvbs_cpu_build_vuln_profile(struct fbvbs_cpu_security_profile *profile)
 {
-    struct fbvbs_vuln_profile *v = &profile->vuln;
+    struct fbvbs_vuln_profile *v;
 
+    if (profile == NULL) {
+        return -1;
+    }
+
+    v = &profile->vuln;
     *v = (struct fbvbs_vuln_profile){0};
 #if defined(__FRAMAC__)
     v->immune_meltdown = 1U;
@@ -575,8 +580,13 @@ int fbvbs_cpu_build_vuln_profile(struct fbvbs_cpu_security_profile *profile)
 
 int fbvbs_cpu_compute_cr_pins(struct fbvbs_cpu_security_profile *profile)
 {
-    struct fbvbs_cr_pin_config *p = &profile->cr_pins;
+    struct fbvbs_cr_pin_config *p;
 
+    if (profile == NULL) {
+        return -1;
+    }
+
+    p = &profile->cr_pins;
     *p = (struct fbvbs_cr_pin_config){0};
 #if defined(__FRAMAC__)
     p->cr0_pin_mask = CR0_WP;
@@ -900,10 +910,11 @@ int fbvbs_cpu_compute_global_mitigations(
 
 int fbvbs_iommu_detect(struct fbvbs_global_security_state *state)
 {
-#if defined(__FRAMAC__)
     if (state == NULL) {
         return -1;
     }
+
+#if defined(__FRAMAC__)
     state->iommu = (struct fbvbs_iommu_state){0};
     state->iommu.iommu_type = IOMMU_TYPE_VTD;
     state->iommu.dma_remapping = 1U;
@@ -949,10 +960,11 @@ int fbvbs_iommu_runtime_ready(const struct fbvbs_global_security_state *state)
 
 int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
 {
-#if defined(__FRAMAC__)
     if (state == NULL) {
         return -1;
     }
+
+#if defined(__FRAMAC__)
     state->boot = (struct fbvbs_boot_integrity){0};
     state->boot.drtm_available = 1U;
     state->boot.drtm_type = (state->vendor == CPU_VENDOR_AMD) ? 2U : 1U;

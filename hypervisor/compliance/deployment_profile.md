@@ -2,14 +2,20 @@
 
 This document records the supported producer-facing deployment profile for the standalone retained-C microhypervisor.
 
+## Glossary
+
+- **retained-C**: the current standalone microhypervisor build model in which a bounded C implementation and its authoritative runtime/ABI artifacts remain inside the release boundary
+- **producer-facing**: intended for integrators and downstream projects consuming `hypervisor/`, not for end-user self-service deployment
+- **Formally-verified Bare-metal Virtual Boot Security (FBVBS)**: the broader future stack of trusted services and control-plane components; only the standalone microhypervisor boundary is in scope here
+
 ## Supported release profile
 
 - x86_64 platform
 - Secure Boot enabled for the UEFI path when that path is used
 - fixed ELF64 `ET_EXEC` retained-C image profile
 - IOMMU required
-- primary audit collection through COM1/UART or an equivalent OOB serial path
-- explicit acceptance that future FBVBS trusted services are out of scope for this standalone release
+- primary audit collection through a FreeBSD serial port / UART path (for example `/dev/ttyu0`) or an equivalent OOB serial path
+- explicit acceptance that future Formally-verified Bare-metal Virtual Boot Security (FBVBS) trusted services are out of scope for this standalone release
 
 ## Required platform properties
 
@@ -37,7 +43,7 @@ This document records the supported producer-facing deployment profile for the s
 
 - the Multiboot profile must keep the explicit retained boot artifacts in the ISO
 - the UEFI path must use signed boot artifacts and firmware key enrollment appropriate to the operator environment
-- the retained-C host-kernel artifact binding is authoritative only for the documented build profile
+- the retained-C host-kernel artifact binding is authoritative only for the documented build profile (see [plan/fbvbs-design.md](/home/nia/opencode/fbvbs/plan/fbvbs-design.md), Appendix L.1.E and the bare-metal release-profile rules in Section L.1.C/L.1.E)
 
 ## Operational expectations
 

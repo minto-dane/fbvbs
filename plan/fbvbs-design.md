@@ -607,7 +607,7 @@ Kernel Code Integrity Service は、旧来案で HEKI と呼ばれていたコ�
 
 ここで注意すべきは、コード整合性が成立しても、既存コード断片の悪用、すなわち ROP や JOP が自動的に消滅するわけではないことである。本書は、この点を明示する。Kernel Code Integrity Service は、書込み型攻撃に対して強い境界を提供するが、制御フロー悪用に対しては CET、Shadow Stack、IBT、SMEP/SMAP のような補助機構を併用しなければならない。
 
-また、`KCI_SET_WX` は execute 権限を付与する最終境界であるため、artifact bytes と対象 GPA range の対応関係を hypervisor が authoritative に保持していなければならない。ABI v1 では、`KCI_VERIFY_MODULE` が承認済み module mapping 全体の raw SHA-384 を manifest `payload_hash` と照合し、一致したときだけ internal approved state を更新してよい。この approved state の正本は raw artifact bytes でなければならず、page-aligned SHA-384 digest table は raw bytes から導出される内部キャッシュとしてのみ保持してよい。`KCI_SET_WX` は `file_offset..file_offset+size` の範囲を raw bytes に対して再照合し、一致したときのみ execute 権限を付与してよい。write 付与、unmap、remap、または module object の再検証は、この approved state を必ず失効させなければならない。
+また、`KCI_SET_WX` は execute 権限を付与する最終境界であるため、artifact bytes と対象 GPA range の対応関係を hypervisor が authoritative に保持していなければならない。ABI v1 では、`KCI_VERIFY_MODULE` が承認済み module mapping 全体の raw SHA-384 を manifest `payload_hash` と照合し、一致したときだけ internal approved state を更新してよい。この approved state の正本は raw artifact bytes でなければならず、page-aligned SHA-384 digest table は raw bytes から導出される内部キャッシュとしてのみ保持してよい。`KCI_SET_WX` は `file_offset..file_offset+size` の範囲を raw bytes に対して再照合し、一致したときのみ execute 権限を付与してよい。write 付与、unmap、remap、または module object の再検証は、この approved state を必ず失効させなければならない。release evidence は resident immutable retained memory と external storage retrieval の両ケースについて `KCI_VERIFY_MODULE` / `KCI_SET_WX` の latency と I/O count を計測し、複数 executable segment と大型 module を含む workload で Appendix J の KLD budget に収まることを示さなければならない。もし budget を超えるなら、その build profile は release-ready と主張してはならず、cache policy または artifact layout の是正を先に行う。
 
 ## 27. Kernel State Integrity Service
 
@@ -813,7 +813,9 @@ TCB は Trusted Computing Base の略であり、ある保護性質を成立さ�
 
 VT-x は Intel の仮想化拡張、AMD-V は AMD の仮想化拡張を指す。EPT は Extended Page Tables、NPT は Nested Page Tables の略であり、いずれも第二レベルアドレス変換機構である。HLAT は Hypervisor-Managed Linear Address Translation の略であり、Intel が公開している、ハイパーバイザー管理下の線形アドレス変換機構を指す。MBEC は Mode-Based Execute Control の略であり、Intel 側の実行権限細粒度化機構を指す。AMD 側の対応機能は GMET と呼ばれる。RMP は Reverse Map Table の略であり、SEV-SNP における物理ページ所有権整合性の管理機構を指す。VMPL は Virtual Machine Privilege Level の略であり、SEV-SNP guest における特権階層を指す。
 
-retained-C は、本書における build model の一つであり、C 実装の一部を最終成果物の authoritative byte range として保持する方式を指す。Intel/x86_64 実装では linker symbols `_binary_start .. _data_end` をその具体例として用いてよいが、これは platform-specific implementation example であり universal rule ではない。これらの symbol を持たない platform は、Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、もしくは size/offset metadata による明示 binding を使って authoritative source を宣言しなければならない。
+retained-C は、本書における build model の一つであり、C 実装の一部を最終成果物の authoritative byte range として保持する方式を指す。これは「C で書かれていること」自体を security property にする語ではなく、現行実装が C の linker/loader artifact を authoritative source として使うことを示す歴史的ラベルである。Ada/SPARK など別言語実装が同等の immutable authoritative byte range を定義する場合は、より中立な「retained artifact build model」または「immutable-region build model」と記述してよく、`retained-C` という語は current C-based microhypervisor profile に対してのみ使う。Intel/x86_64 実装では linker symbols `_binary_start .. _data_end` をその具体例として用いてよいが、これは platform-specific implementation example であり universal rule ではない。これらの symbol を持たない platform は、Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、もしくは size/offset metadata による明示 binding を使って authoritative source を宣言しなければならない。
+
+bare-metal release profile は、conformance profile のうち物理ホスト上の standalone microhypervisor 配布を対象とする subtype である。これは bootloader-bound artifact set、固定 loader 規約、OOB audit collector、IOMMU 必須条件、QEMU では代替できない実機検証要求を含む。VM-hosted や containerized な test profile は存在し得るが、それらは bare-metal release profile ではなく、production-grade publication の正本プロファイルとして扱ってはならない。
 
 W^X は Write XOR Execute の略記であり、あるページが同時に書込み可能かつ実行可能であってはならないという原則を意味する。PIO は Programmed I/O、MMIO は Memory-Mapped I/O の略であり、それぞれポート空間 I/O とメモリ写像 I/O を指す。MSI は Message Signaled Interrupts、MSI-X はその拡張である。SR-IOV は Single Root I/O Virtualization の略であり、一つの物理デバイスを複数の仮想機能へ分割して提供する仕組みである。ACS は Access Control Services の略であり、PCI Express 上でのトランザクション分離に関係する。
 
@@ -1534,7 +1536,7 @@ ABI v1 で caller が opaque ID を取得する frozen 経路は次のとおり�
 
 artifact catalog では、manifest と image/module の対応を `related_index` で固定する。`object_kind=2` の manifest entry の `related_index` は対応する image または module entry の index を指す。`object_kind=1` または `3` の entry の `related_index` は対応する manifest entry の index を指す。無効 index は `INVALID_PARAMETER` とする。
 
-boot artifact registry は artifact bytes の authoritative source も固定しなければならない。bare-metal build の `freebsd-kernel` artifact は bootloader から再取得した file image ではなく、ロード済みハイパーバイザーの immutable image bytes に束縛してよい。現行 retained-C build ではその authoritative 範囲は Intel/x86_64 の linker symbols `_binary_start .. _data_end` を例として用いる。これは universal rule ではなく、これらの symbol を持たない platform は Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、あるいは explicit size/offset metadata により object ID と authoritative source を明示 binding しなければならない。追加 retained boot artifact は Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...` により object ID と束縛し、bare-metal release profile では対応 module が存在しない artifact を受理してはならない。synthetic payload builder を用いる build は test-only とし、production-grade authoritative boot source と主張してはならない。
+boot artifact registry は artifact bytes の authoritative source も固定しなければならない。bare-metal release profile の `freebsd-kernel` artifact は bootloader から再取得した file image ではなく、ロード済みハイパーバイザーの immutable image bytes に束縛してよい。現行 retained-C build ではその authoritative 範囲は Intel/x86_64 の linker symbols `_binary_start .. _data_end` を例として用いる。これは universal rule ではなく、これらの symbol を持たない platform は Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、あるいは explicit size/offset metadata により object ID と authoritative source を明示 binding しなければならない。追加 retained boot artifact は Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...` により object ID と束縛し、bare-metal release profile では対応 module が存在しない artifact を受理してはならない。synthetic payload builder を用いる build は test-only とし、production-grade authoritative boot source と主張してはならない。
 
 ```c
 struct fbvbs_artifact_catalog_v1 {
@@ -1589,8 +1591,8 @@ ABI v1 では、partition-loadable executable artifact を `hypervisor`, `truste
 
 ABI v1 の partition-loadable executable artifact は、すべて ELF64 little-endian とし、固定 loader 規約に従う。`PARTITION_LOAD_IMAGE`、boot 時 trusted-service 自動起動、guest boot artifact 配置は、この規約から逸脱してはならない。`freebsd-kernel` と `freebsd-module` は host measurement/callsite artifact であり、この loader 規約の対象外とする。
 
-- 受理形式は retained-C ABI v1 では `ET_EXEC` の ELF64 のみとする
-- trusted-service と guest/boot artifact の build system は `-no-pie -fno-pic` などの非 PIE / 非 PIC オプションと固定 linker script を用い、load base を明示しなければならない。CI は `ET_DYN` を出力する成果物を拒否し、ELF header の `e_type == ET_EXEC` を検証しなければならない
+- 受理形式は retained-C ABI v1 bare-metal release profile では `ET_EXEC` の ELF64 のみとする。これは deterministic measurement と retained loader simplicity を優先する current-profile constraint であり、将来 profile で canonical relocation discipline が定義されるまでの暫定的な release boundary である
+- trusted-service と guest/boot artifact の build system は current retained-C bare-metal release profile では `-no-pie -fno-pic` などの非 PIE / 非 PIC オプションと固定 linker script を用い、load base を明示しなければならない。CI はこの profile では `ET_DYN` を出力する成果物を拒否し、ELF header の `e_type == ET_EXEC` を検証しなければならない。これは ASLR/KASLR と trade-off を持つため、Section 50 の residual risk として受容し、将来 `ET_DYN` profile を追加する場合は measurement canonicalization と relocation proof を別途定義しなければならない
 - `PT_LOAD` segment だけをロード対象とし、`PT_INTERP`、動的リンカ要求、実行時再配置、圧縮、自己展開ローダ、実装依存 fixup を禁止する
 - 各 `PT_LOAD` segment は `p_vaddr` に従って page-align で配置し、file 部分をコピーし、`p_memsz - p_filesz` を 0 で初期化する
 - segment の permission は `p_flags` から `R/W/X` を機械的に導出し、追加実装裁量を与えてはならない
@@ -1598,7 +1600,7 @@ ABI v1 の partition-loadable executable artifact は、すべて ELF64 little-e
 - `entry_ip` は ELF header `e_entry` と一致しなければならず、`PARTITION_LOAD_IMAGE.entry_ip!=0` の場合はその値とも一致しなければならない
 - `entry_ip` は少なくとも一つの executable `PT_LOAD` segment に含まれなければならない
 - `initial_sp` は guest VM では caller 指定値から与え、trusted-service では manifest `initial_sp` からのみ与える。`PARTITION_LOAD_IMAGE.initial_sp` は guest VM では非ゼロ必須、trusted-service では 0 または manifest 値との一致のみを許容し、loader が暗黙既定 stack を生成してはならない
-- ABI v1 の stack semantics は単一の initial stack page とし、その page は `initial_sp` を含む 4096-byte 領域として writable かつ non-executable でマップしなければならない。ABI v1 は automatic stack growth を定義しない。もし実装が後続に stack を拡張する場合は、追加 page を明示的に map し、各 page に対して同じ writable + non-executable 条件を適用しなければならない
+- ABI v1 の stack semantics は単一の initial stack page とし、その page は `initial_sp` を含む 4096-byte 領域として writable かつ non-executable でマップしなければならない。ABI v1 は automatic stack growth を定義しない。より大きい stack が必要な caller は、`VM_MAP_MEMORY` または同等の明示 map により追加 stack page を事前に確保し、entry 前に同じ writable + non-executable 条件で連続 stack region を構成しなければならない
 
 この loader 規約により、同一 artifact bytes は同一の guest virtual memory image、同一の page permission、同一の initial instruction pointer を生成しなければならない。
 

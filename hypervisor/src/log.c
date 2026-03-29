@@ -536,8 +536,11 @@ int fbvbs_log_append_rate_limited(
     result = fbvbs_log_append(state, cpu_id, source_component,
                               severity, event_code, payload, payload_length);
     if (result != OK) {
+        uint64_t rollback_window_sequence = state->log_rate_window_sequence;
         if (fbvbs_log_spinlock_acquire(&state->log_lock) == OK) {
-            state->log_rate_counts[event_class] = prior_count;
+            if (rollback_window_sequence == state->log_rate_window_sequence) {
+                state->log_rate_counts[event_class] = prior_count;
+            }
             fbvbs_log_spinlock_release(&state->log_lock);
         }
     }

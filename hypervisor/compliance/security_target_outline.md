@@ -328,7 +328,7 @@ The target design includes an authoritative primary OOB sink. The
 current retained-C repository now serializes committed audit records to
 the bare-metal COM1/UART path and maintains the in-memory mirror ring in
 parallel; hosted/unit-test builds model the same sink through an
-overrideable retained-C hook for verification.
+overridable retained-C hook for verification.
 
 #### O.DMA_CONTROL -- Device DMA Isolation
 

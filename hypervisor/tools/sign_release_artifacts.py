@@ -13,7 +13,7 @@ def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
     if path.is_absolute():
         return path.resolve()
     cwd_candidate = (pathlib.Path.cwd() / path).resolve()
-    if cwd_candidate.exists() or cwd_candidate.parent.exists():
+    if cwd_candidate.exists():
         return cwd_candidate
     return (base_dir / path).resolve()
 
@@ -61,7 +61,7 @@ def main() -> int:
     metadata = {
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "algorithm": "openssl-dgst-sha256",
-        "key_path": str(key_path),
+        "key_fingerprint": file_sha256(key_path),
         "certificate_path": str(cert_path) if cert_path is not None else None,
         "certificate_sha256": file_sha256(cert_path) if cert_path is not None else None,
         "artifacts": [],

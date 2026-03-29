@@ -100,6 +100,12 @@ static int ept_clear_table_reference(uint64_t *table, uint64_t child_phys,
     if (level >= 3U) {
         return 0;
     }
+    if (table == NULL ||
+        child_phys == 0U ||
+        (child_phys & (FBVBS_PAGE_SIZE - 1U)) != 0U ||
+        child_phys > EPT_MAX_PHYS_ADDR) {
+        return 0;
+    }
 
     /*@ loop invariant 0 <= index <= EPT_ENTRIES_PER_TABLE;
         loop assigns index, table[0 .. EPT_ENTRIES_PER_TABLE - 1];
@@ -115,11 +121,16 @@ static int ept_clear_table_reference(uint64_t *table, uint64_t child_phys,
             table[index] = 0U;
             return 1;
         }
-        if (level < 2U &&
-            ept_clear_table_reference((uint64_t *)(uintptr_t)(entry & EPT_ADDR_MASK),
-                                      child_phys,
-                                      level + 1U) != 0) {
-            return 1;
+        if (level < 2U) {
+            uint64_t child_table_phys = entry & EPT_ADDR_MASK;
+            if (child_table_phys != 0U &&
+                (child_table_phys & (FBVBS_PAGE_SIZE - 1U)) == 0U &&
+                child_table_phys <= EPT_MAX_PHYS_ADDR &&
+                ept_clear_table_reference((uint64_t *)(uintptr_t)child_table_phys,
+                                          child_phys,
+                                          level + 1U) != 0) {
+                return 1;
+            }
         }
     }
 
@@ -869,12 +880,12 @@ int fbvbs_memory_object_get_page_phys(
     if (object->backing_kind == FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST) {
 #ifdef __FRAMAC__
         if (object->backing_page_list_head_phys == 0U ||
-            object->backing_page_list_head_phys > UINT64_MAX - (((uint64_t)page_index + 1U) *
+            object->backing_page_list_head_phys > UINT64_MAX - ((uint64_t)page_index *
                                                                 FBVBS_PAGE_SIZE)) {
             return -1;
         }
         *page_phys_out = object->backing_page_list_head_phys +
-                         (((uint64_t)page_index + 1U) * FBVBS_PAGE_SIZE);
+                         ((uint64_t)page_index * FBVBS_PAGE_SIZE);
         return 0;
 #else
         uint32_t remaining = page_index;

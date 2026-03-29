@@ -15,7 +15,7 @@ def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
     if path.is_absolute():
         return path.resolve()
     cwd_candidate = (pathlib.Path.cwd() / path).resolve()
-    if cwd_candidate.exists() or cwd_candidate.parent.exists():
+    if cwd_candidate.exists():
         return cwd_candidate
     return (base_dir / path).resolve()
 

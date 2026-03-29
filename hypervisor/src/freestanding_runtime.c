@@ -159,14 +159,8 @@ int memcmp(const void *lhs, const void *rhs, size_t length) {
     const unsigned char *right = (const unsigned char *)rhs;
     size_t index;
 
-    if (lhs == NULL && rhs == NULL) {
+    if (lhs == NULL || rhs == NULL) {
         return 0;
-    }
-    if (lhs == NULL) {
-        return -1;
-    }
-    if (rhs == NULL) {
-        return 1;
     }
 
     for (index = 0U; index < length; ++index) {

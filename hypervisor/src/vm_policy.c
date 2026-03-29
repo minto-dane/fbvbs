@@ -236,7 +236,10 @@ static int fbvbs_vmx_unclassified_fault_exit(
     struct fbvbs_vm_run_response *response
 ) {
 #ifdef __FRAMAC__
-    (void)partition;
+    (void)state;
+    if (vcpu_id < partition->vcpu_count) {
+        partition->vcpus[vcpu_id].state = FBVBS_VCPU_STATE_FAULTED;
+    }
     response->exit_reason = FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
     response->exit_length = 0U;
     return OK;
@@ -446,7 +449,7 @@ int fbvbs_vmx_run_vcpu(
     *response = (struct fbvbs_vm_run_response){0};
 
 #ifdef __FRAMAC__
-    vcpu->state = FBVBS_VCPU_STATE_RUNNABLE;
+    vcpu->state = FBVBS_VCPU_STATE_BLOCKED;
     response->exit_reason = FBVBS_VM_EXIT_REASON_HALT;
     response->exit_length = 0U;
     return OK;

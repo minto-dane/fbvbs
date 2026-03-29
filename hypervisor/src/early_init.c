@@ -267,7 +267,7 @@ void fbvbs_efi_to_hypervisor(struct fbvbs_efi_boot_info *boot_info)
     /* Process EFI memory map */
     if (process_efi_memory_map(boot_info) != 0) {
         serial_print("FBVBS: ERROR: Failed to process memory map\n");
-        return;
+        goto halt;
     }
     serial_print("FBVBS: Memory map processed\n");
 

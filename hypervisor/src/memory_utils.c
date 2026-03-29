@@ -16,24 +16,32 @@
   @ ensures \forall size_t i; i < length ==> ((char*)buffer)[i] == 0;
   @*/
 void fbvbs_zero_memory(void *buffer, size_t length) {
-    uint8_t *bytes;
     size_t index;
 
     if (buffer == NULL || length == 0U) {
         return;
     }
 
-    bytes = (uint8_t *)buffer;
-
     /*@
       @ loop invariant 0 <= index <= length;
-      @ loop invariant \forall size_t i; i < index ==> bytes[i] == 0;
-      @ loop assigns index, bytes[0 .. length - 1];
+      @ loop invariant \forall size_t i; i < index ==> ((uint8_t *)buffer)[i] == 0;
+      @ loop assigns index, ((uint8_t *)buffer)[0 .. length - 1];
       @ loop variant length - index;
       @*/
+#ifndef __FRAMAC__
+    {
+        volatile uint8_t *volatile_bytes = (volatile uint8_t *)buffer;
+        for (index = 0; index < length; ++index) {
+            volatile_bytes[index] = 0U;
+        }
+        __asm__ volatile("" : : : "memory");
+    }
+#else
+    uint8_t *bytes = (uint8_t *)buffer;
     for (index = 0; index < length; ++index) {
         bytes[index] = 0;
     }
+#endif
 
     /* Memory barrier to ensure all writes are visible */
 #ifndef __FRAMAC__
