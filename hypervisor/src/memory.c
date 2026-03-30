@@ -503,6 +503,9 @@ int fbvbs_ept_unmap_region(
 
 /* Release all EPT pages for a partition.
  * Called from partition destroy path. */
+/*@ requires \valid_read(state);
+    assigns ept_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+*/
 void fbvbs_ept_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id)
@@ -523,7 +526,9 @@ void fbvbs_ept_cleanup_partition(
     eps = &ept_partitions[idx];
 
 #ifdef __FRAMAC__
-    *eps = (struct fbvbs_ept_partition_state){0};
+    eps->pml4_phys = 0ULL;
+    eps->table_page_count = 0U;
+    eps->reserved0 = 0U;
 #else
     /* Free all allocated table pages (in reverse order for safety) */
     /*@ loop invariant 0 <= i <= eps->table_page_count;

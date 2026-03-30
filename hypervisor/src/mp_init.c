@@ -147,12 +147,30 @@ _Static_assert(sizeof(struct fbvbs_mp_state) <= 16384U,
  * bloating the main state struct during WP verification) */
 static struct fbvbs_mp_state g_mp_state;
 
+/*@ requires bit < 32U;
+    assigns \nothing;
+*/
+static inline uint32_t mp_bit_mask(uint32_t bit)
+{
+    return (1U << bit);
+}
+
+/*@ predicate fbvbs_mp_state_bounded(struct fbvbs_mp_state *mp) =
+      \valid(mp) &&
+      mp->cpu_count <= FBVBS_MAX_CPUS &&
+      mp->online_count <= mp->cpu_count &&
+      mp->ioapic_count <= FBVBS_MAX_IOAPICS &&
+      mp->numa_range_count <= FBVBS_MAX_NUMA_MEMORY_RANGES &&
+      mp->numa_domain_count <= FBVBS_MAX_NUMA_DOMAINS;
+*/
+
 /* TLB shootdown serialization.
  * The request structure is shared across CPUs, so the initiator must
  * serialize request setup and broadcast. The ACK counter remains
  * atomic in the handler. */
 static volatile uint32_t g_tlb_shootdown_lock = 0U;
 
+/*@ assigns g_tlb_shootdown_lock; */
 static void mp_tlb_shootdown_lock(void)
 {
 #ifdef __FRAMAC__
@@ -164,11 +182,224 @@ static void mp_tlb_shootdown_lock(void)
 #endif
 }
 
+/*@ assigns g_tlb_shootdown_lock; */
 static void mp_tlb_shootdown_unlock(void)
 {
 #ifndef __FRAMAC__
     __sync_lock_release(&g_tlb_shootdown_lock);
 #endif
+}
+
+/*@ requires \valid_read(bytes + (0 .. 3));
+    assigns \nothing;
+*/
+static uint32_t mp_read_le32(const uint8_t *bytes)
+{
+    return (uint32_t)bytes[0] |
+           ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+/*@ requires \valid_read(bytes + (0 .. 7));
+    assigns \nothing;
+*/
+static uint64_t mp_read_le64(const uint8_t *bytes)
+{
+    return (uint64_t)mp_read_le32(bytes) |
+           ((uint64_t)mp_read_le32(bytes + 4) << 32);
+}
+
+/*@ requires \valid(cpu);
+    assigns *cpu;
+    ensures cpu->apic_id == apic_id;
+    ensures cpu->acpi_uid == acpi_uid;
+    ensures cpu->state == CPU_STATE_OFFLINE;
+    ensures cpu->socket_id == 0U;
+    ensures cpu->numa_domain == 0U;
+    ensures cpu->is_bsp == 0U;
+    ensures cpu->stack_base == 0ULL;
+    ensures cpu->vmx_enabled == 0U;
+    ensures cpu->reserved0 == 0U;
+*/
+static void mp_init_cpu_slot(
+    struct fbvbs_cpu_info *cpu,
+    uint32_t apic_id,
+    uint32_t acpi_uid
+)
+{
+    cpu->apic_id = apic_id;
+    cpu->acpi_uid = acpi_uid;
+    cpu->state = CPU_STATE_OFFLINE;
+    cpu->socket_id = 0U;
+    cpu->numa_domain = 0U;
+    cpu->is_bsp = 0U;
+    cpu->stack_base = 0ULL;
+    cpu->vmx_enabled = 0U;
+    cpu->reserved0 = 0U;
+}
+
+/*@ requires \valid(ioapic);
+    assigns *ioapic;
+    ensures ioapic->ioapic_id == ioapic_id;
+    ensures ioapic->mmio_base == mmio_base;
+    ensures ioapic->gsi_base == gsi_base;
+*/
+static void mp_init_ioapic_slot(
+    struct fbvbs_ioapic_info *ioapic,
+    uint32_t ioapic_id,
+    uint64_t mmio_base,
+    uint32_t gsi_base
+)
+{
+    ioapic->ioapic_id = ioapic_id;
+    ioapic->mmio_base = mmio_base;
+    ioapic->gsi_base = gsi_base;
+}
+
+/*@ assigns g_mp_state;
+    ensures fbvbs_mp_state_bounded(&g_mp_state);
+ */
+static void mp_reset_state(void)
+{
+    uint32_t i;
+
+    /*@ loop invariant 0 <= i <= FBVBS_MAX_CPUS;
+        loop assigns i, g_mp_state.cpus[0 .. FBVBS_MAX_CPUS - 1];
+        loop variant FBVBS_MAX_CPUS - i;
+    */
+    for (i = 0U; i < FBVBS_MAX_CPUS; ++i) {
+        mp_init_cpu_slot(&g_mp_state.cpus[i], 0U, 0U);
+    }
+
+    /*@ loop invariant 0 <= i <= FBVBS_MAX_IOAPICS;
+        loop assigns i, g_mp_state.ioapics[0 .. FBVBS_MAX_IOAPICS - 1];
+        loop variant FBVBS_MAX_IOAPICS - i;
+    */
+    for (i = 0U; i < FBVBS_MAX_IOAPICS; ++i) {
+        mp_init_ioapic_slot(&g_mp_state.ioapics[i], 0U, 0ULL, 0U);
+    }
+
+    /*@ loop invariant 0 <= i <= FBVBS_MAX_NUMA_MEMORY_RANGES;
+        loop assigns i, g_mp_state.numa_ranges[0 .. FBVBS_MAX_NUMA_MEMORY_RANGES - 1];
+        loop variant FBVBS_MAX_NUMA_MEMORY_RANGES - i;
+    */
+    for (i = 0U; i < FBVBS_MAX_NUMA_MEMORY_RANGES; ++i) {
+        g_mp_state.numa_ranges[i].base_address = 0ULL;
+        g_mp_state.numa_ranges[i].length = 0ULL;
+        g_mp_state.numa_ranges[i].proximity_domain = 0U;
+        g_mp_state.numa_ranges[i].flags = 0U;
+    }
+
+    g_mp_state.cpu_count = 0U;
+    g_mp_state.online_count = 0U;
+    g_mp_state.bsp_apic_id = 0U;
+    g_mp_state.reserved0 = 0U;
+    g_mp_state.ioapic_count = 0U;
+    g_mp_state.lapic_base = 0ULL;
+    g_mp_state.lapic_base_overridden = 0U;
+    g_mp_state.numa_range_count = 0U;
+    g_mp_state.numa_domain_count = 0U;
+    g_mp_state.ap_sync_flag = 0U;
+    g_mp_state.ap_init_errors = 0U;
+}
+
+/*@ requires \valid(mp);
+    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+    assigns mp->cpus[0 .. mp->cpu_count - 1].numa_domain,
+            mp->cpus[0 .. mp->cpu_count - 1].socket_id;
+*/
+static void mp_assign_cpu_domain(
+    struct fbvbs_mp_state *mp,
+    uint32_t apic_id,
+    uint32_t prox_domain
+)
+{
+    uint32_t ci;
+
+    /*@ loop invariant 0 <= ci <= mp->cpu_count;
+        loop invariant ci <= FBVBS_MAX_CPUS;
+        loop assigns ci,
+                     mp->cpus[0 .. mp->cpu_count - 1].numa_domain,
+                     mp->cpus[0 .. mp->cpu_count - 1].socket_id;
+        loop variant mp->cpu_count - ci;
+    */
+    for (ci = 0U; ci < mp->cpu_count && ci < FBVBS_MAX_CPUS; ++ci) {
+        if (mp->cpus[ci].apic_id == apic_id) {
+            mp->cpus[ci].numa_domain = prox_domain;
+            mp->cpus[ci].socket_id = prox_domain;
+            break;
+        }
+    }
+}
+
+/*@ assigns \nothing; */
+static uint32_t mp_count_bits_u32(uint32_t bits)
+{
+    uint32_t i;
+    uint32_t count = 0U;
+
+    /*@ loop invariant 0 <= i <= 32;
+        loop invariant 0 <= count <= i;
+        loop assigns i, bits, count;
+        loop variant 32 - i;
+    */
+    for (i = 0U; i < 32U; ++i) {
+        count += bits & 1U;
+        bits >>= 1;
+    }
+
+    return count;
+}
+
+/*@ requires \valid(stack_pages + (0 .. 3));
+    requires count <= 4U;
+    assigns stack_pages[0 .. 3];
+*/
+static void mp_free_stack_pages(uint64_t stack_pages[4], uint32_t count)
+{
+    uint32_t q;
+
+    /*@ loop invariant q <= count;
+        loop assigns q, stack_pages[0 .. 3];
+        loop variant q;
+    */
+    for (q = count; q > 0U; --q) {
+        (void)fbvbs_page_free(stack_pages[q - 1U]);
+        stack_pages[q - 1U] = 0ULL;
+    }
+}
+
+/*@ requires \valid(stack_base_out);
+    assigns *stack_base_out;
+    ensures \result == 0 || \result == -1;
+    ensures \result == -1 ==> *stack_base_out == 0ULL;
+*/
+static int mp_allocate_ap_stack(uint64_t *stack_base_out)
+{
+    uint64_t stack_pages[4U] = { 0ULL, 0ULL, 0ULL, 0ULL };
+    uint32_t p;
+
+    *stack_base_out = 0ULL;
+
+    /*@ loop invariant 0 <= p <= 4U;
+        loop assigns p, stack_pages[0 .. 3];
+        loop variant 4U - p;
+    */
+    for (p = 0U; p < 4U; ++p) {
+        stack_pages[p] = fbvbs_page_alloc();
+        if (stack_pages[p] == 0ULL) {
+            mp_free_stack_pages(stack_pages, p);
+            return -1;
+        }
+        if (p > 0U && stack_pages[p] != stack_pages[p - 1U] + 4096ULL) {
+            mp_free_stack_pages(stack_pages, p + 1U);
+            return -1;
+        }
+    }
+
+    *stack_base_out = stack_pages[0U] + (4ULL * 4096ULL);
+    return 0;
 }
 
 /* ================================================================
@@ -184,13 +415,12 @@ static void mp_tlb_shootdown_unlock(void)
  * ================================================================ */
 
 /*@ requires \valid(mp);
+    requires \valid_read(table_data + (0 .. table_length - 1));
     assigns mp->cpus[0 .. FBVBS_MAX_CPUS - 1],
             mp->cpu_count, mp->bsp_apic_id,
             mp->ioapics[0 .. FBVBS_MAX_IOAPICS - 1],
             mp->ioapic_count,
             mp->lapic_base, mp->lapic_base_overridden;
-    ensures mp->cpu_count <= FBVBS_MAX_CPUS;
-    ensures mp->ioapic_count <= FBVBS_MAX_IOAPICS;
     ensures \result == 0 || \result == -1;
 */
 static int madt_parse_entries(
@@ -209,17 +439,13 @@ static int madt_parse_entries(
     }
 
     /* Extract Local APIC base address from MADT header (offset 36, 4 bytes) */
-    mp->lapic_base = (uint64_t)(
-        (uint32_t)table_data[36] |
-        ((uint32_t)table_data[37] << 8) |
-        ((uint32_t)table_data[38] << 16) |
-        ((uint32_t)table_data[39] << 24)
-    );
+    mp->lapic_base = (uint64_t)mp_read_le32(table_data + 36U);
     mp->lapic_base_overridden = 0U;
 
     offset = 44U;
 
     /*@ loop invariant 44U <= offset;
+        loop invariant offset <= table_length;
         loop invariant cpu_idx <= FBVBS_MAX_CPUS;
         loop invariant ioapic_idx <= FBVBS_MAX_IOAPICS;
         loop assigns offset, cpu_idx, ioapic_idx,
@@ -245,24 +471,13 @@ static int madt_parse_entries(
             case MADT_TYPE_LOCAL_APIC:
                 /* Length must be 8 bytes */
                 if (entry_length >= 8U && cpu_idx < FBVBS_MAX_CPUS) {
-                    uint8_t acpi_uid = table_data[offset + 2U];
-                    uint8_t apic_id_byte = table_data[offset + 3U];
-                    uint32_t flags = (uint32_t)table_data[offset + 4U] |
-                                     ((uint32_t)table_data[offset + 5U] << 8) |
-                                     ((uint32_t)table_data[offset + 6U] << 16) |
-                                     ((uint32_t)table_data[offset + 7U] << 24);
+                    uint32_t flags = mp_read_le32(table_data + offset + 4U);
 
                     /* Only record enabled or online-capable CPUs */
                     if ((flags & (MADT_LAPIC_ENABLED | MADT_LAPIC_ONLINE_CAPABLE)) != 0U) {
-                        mp->cpus[cpu_idx].apic_id = (uint32_t)apic_id_byte;
-                        mp->cpus[cpu_idx].acpi_uid = (uint32_t)acpi_uid;
-                        mp->cpus[cpu_idx].state = CPU_STATE_OFFLINE;
-                        mp->cpus[cpu_idx].socket_id = 0U;
-                        mp->cpus[cpu_idx].numa_domain = 0U;
-                        mp->cpus[cpu_idx].is_bsp = 0U;
-                        mp->cpus[cpu_idx].stack_base = 0ULL;
-                        mp->cpus[cpu_idx].vmx_enabled = 0U;
-                        mp->cpus[cpu_idx].reserved0 = 0U;
+                        mp_init_cpu_slot(&mp->cpus[cpu_idx],
+                                         (uint32_t)table_data[offset + 3U],
+                                         (uint32_t)table_data[offset + 2U]);
                         cpu_idx += 1U;
                     }
                 }
@@ -271,32 +486,12 @@ static int madt_parse_entries(
             case MADT_TYPE_LOCAL_X2APIC:
                 /* Length must be 16 bytes; handles APIC IDs >= 256 */
                 if (entry_length >= 16U && cpu_idx < FBVBS_MAX_CPUS) {
-                    uint32_t x2apic_id =
-                        (uint32_t)table_data[offset + 4U] |
-                        ((uint32_t)table_data[offset + 5U] << 8) |
-                        ((uint32_t)table_data[offset + 6U] << 16) |
-                        ((uint32_t)table_data[offset + 7U] << 24);
-                    uint32_t flags =
-                        (uint32_t)table_data[offset + 8U] |
-                        ((uint32_t)table_data[offset + 9U] << 8) |
-                        ((uint32_t)table_data[offset + 10U] << 16) |
-                        ((uint32_t)table_data[offset + 11U] << 24);
-                    uint32_t acpi_uid2 =
-                        (uint32_t)table_data[offset + 12U] |
-                        ((uint32_t)table_data[offset + 13U] << 8) |
-                        ((uint32_t)table_data[offset + 14U] << 16) |
-                        ((uint32_t)table_data[offset + 15U] << 24);
+                    uint32_t x2apic_id = mp_read_le32(table_data + offset + 4U);
+                    uint32_t flags = mp_read_le32(table_data + offset + 8U);
+                    uint32_t acpi_uid2 = mp_read_le32(table_data + offset + 12U);
 
                     if ((flags & (MADT_LAPIC_ENABLED | MADT_LAPIC_ONLINE_CAPABLE)) != 0U) {
-                        mp->cpus[cpu_idx].apic_id = x2apic_id;
-                        mp->cpus[cpu_idx].acpi_uid = acpi_uid2;
-                        mp->cpus[cpu_idx].state = CPU_STATE_OFFLINE;
-                        mp->cpus[cpu_idx].socket_id = 0U;
-                        mp->cpus[cpu_idx].numa_domain = 0U;
-                        mp->cpus[cpu_idx].is_bsp = 0U;
-                        mp->cpus[cpu_idx].stack_base = 0ULL;
-                        mp->cpus[cpu_idx].vmx_enabled = 0U;
-                        mp->cpus[cpu_idx].reserved0 = 0U;
+                        mp_init_cpu_slot(&mp->cpus[cpu_idx], x2apic_id, acpi_uid2);
                         cpu_idx += 1U;
                     }
                 }
@@ -305,20 +500,10 @@ static int madt_parse_entries(
             case MADT_TYPE_IO_APIC:
                 /* Length must be 12 bytes */
                 if (entry_length >= 12U && ioapic_idx < FBVBS_MAX_IOAPICS) {
-                    mp->ioapics[ioapic_idx].ioapic_id =
-                        (uint32_t)table_data[offset + 2U];
-                    mp->ioapics[ioapic_idx].mmio_base =
-                        (uint64_t)(
-                            (uint32_t)table_data[offset + 4U] |
-                            ((uint32_t)table_data[offset + 5U] << 8) |
-                            ((uint32_t)table_data[offset + 6U] << 16) |
-                            ((uint32_t)table_data[offset + 7U] << 24)
-                        );
-                    mp->ioapics[ioapic_idx].gsi_base =
-                        (uint32_t)table_data[offset + 8U] |
-                        ((uint32_t)table_data[offset + 9U] << 8) |
-                        ((uint32_t)table_data[offset + 10U] << 16) |
-                        ((uint32_t)table_data[offset + 11U] << 24);
+                    mp_init_ioapic_slot(&mp->ioapics[ioapic_idx],
+                                        (uint32_t)table_data[offset + 2U],
+                                        (uint64_t)mp_read_le32(table_data + offset + 4U),
+                                        mp_read_le32(table_data + offset + 8U));
                     ioapic_idx += 1U;
                 }
                 break;
@@ -326,15 +511,7 @@ static int madt_parse_entries(
             case MADT_TYPE_LOCAL_APIC_OVERRIDE:
                 /* Length must be 12 bytes; overrides LAPIC base address */
                 if (entry_length >= 12U) {
-                    mp->lapic_base =
-                        (uint64_t)table_data[offset + 4U] |
-                        ((uint64_t)table_data[offset + 5U] << 8) |
-                        ((uint64_t)table_data[offset + 6U] << 16) |
-                        ((uint64_t)table_data[offset + 7U] << 24) |
-                        ((uint64_t)table_data[offset + 8U] << 32) |
-                        ((uint64_t)table_data[offset + 9U] << 40) |
-                        ((uint64_t)table_data[offset + 10U] << 48) |
-                        ((uint64_t)table_data[offset + 11U] << 56);
+                    mp->lapic_base = mp_read_le64(table_data + offset + 4U);
                     mp->lapic_base_overridden = 1U;
                 }
                 break;
@@ -360,12 +537,12 @@ static int madt_parse_entries(
  * ================================================================ */
 
 /*@ requires \valid(mp);
+    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+    requires \valid_read(table_data + (0 .. table_length - 1));
     assigns mp->numa_ranges[0 .. FBVBS_MAX_NUMA_MEMORY_RANGES - 1],
             mp->numa_range_count, mp->numa_domain_count,
             mp->cpus[0 .. FBVBS_MAX_CPUS - 1].numa_domain,
             mp->cpus[0 .. FBVBS_MAX_CPUS - 1].socket_id;
-    ensures mp->numa_range_count <= FBVBS_MAX_NUMA_MEMORY_RANGES;
-    ensures mp->numa_domain_count <= FBVBS_MAX_NUMA_DOMAINS;
     ensures \result == 0 || \result == -1;
 */
 static int srat_parse_entries(
@@ -386,6 +563,7 @@ static int srat_parse_entries(
     offset = 48U;
 
     /*@ loop invariant 48U <= offset;
+        loop invariant offset <= table_length;
         loop invariant range_idx <= FBVBS_MAX_NUMA_MEMORY_RANGES;
         loop assigns offset, range_idx, domain_bitmap,
                      mp->numa_ranges[0 .. FBVBS_MAX_NUMA_MEMORY_RANGES - 1],
@@ -414,24 +592,12 @@ static int srat_parse_entries(
                         ((uint32_t)table_data[offset + 13U] << 16) |
                         ((uint32_t)table_data[offset + 14U] << 24);
                     uint32_t apic_id = (uint32_t)table_data[offset + 3U];
-                    uint32_t flags =
-                        (uint32_t)table_data[offset + 4U] |
-                        ((uint32_t)table_data[offset + 5U] << 8) |
-                        ((uint32_t)table_data[offset + 6U] << 16) |
-                        ((uint32_t)table_data[offset + 7U] << 24);
+                    uint32_t flags = mp_read_le32(table_data + offset + 4U);
 
                     if ((flags & 1U) != 0U) {  /* Enabled */
-                        /* Find matching CPU and set NUMA domain */
-                        uint32_t ci;
-                        for (ci = 0U; ci < mp->cpu_count && ci < FBVBS_MAX_CPUS; ++ci) {
-                            if (mp->cpus[ci].apic_id == apic_id) {
-                                mp->cpus[ci].numa_domain = prox_domain;
-                                mp->cpus[ci].socket_id = prox_domain;
-                                break;
-                            }
-                        }
+                        mp_assign_cpu_domain(mp, apic_id, prox_domain);
                         if (prox_domain < 32U) {
-                            domain_bitmap |= (1U << prox_domain);
+                            domain_bitmap |= mp_bit_mask(prox_domain);
                         }
                     }
                 }
@@ -440,42 +606,10 @@ static int srat_parse_entries(
             case SRAT_TYPE_MEMORY_AFFINITY:
                 /* Length 40: memory range affinity */
                 if (entry_length >= 40U && range_idx < FBVBS_MAX_NUMA_MEMORY_RANGES) {
-                    uint32_t prox_domain =
-                        (uint32_t)table_data[offset + 2U] |
-                        ((uint32_t)table_data[offset + 3U] << 8) |
-                        ((uint32_t)table_data[offset + 4U] << 16) |
-                        ((uint32_t)table_data[offset + 5U] << 24);
-                    uint64_t base =
-                        (uint64_t)(
-                            (uint32_t)table_data[offset + 8U] |
-                            ((uint32_t)table_data[offset + 9U] << 8) |
-                            ((uint32_t)table_data[offset + 10U] << 16) |
-                            ((uint32_t)table_data[offset + 11U] << 24)
-                        ) |
-                        ((uint64_t)(
-                            (uint32_t)table_data[offset + 12U] |
-                            ((uint32_t)table_data[offset + 13U] << 8) |
-                            ((uint32_t)table_data[offset + 14U] << 16) |
-                            ((uint32_t)table_data[offset + 15U] << 24)
-                        ) << 32);
-                    uint64_t length =
-                        (uint64_t)(
-                            (uint32_t)table_data[offset + 16U] |
-                            ((uint32_t)table_data[offset + 17U] << 8) |
-                            ((uint32_t)table_data[offset + 18U] << 16) |
-                            ((uint32_t)table_data[offset + 19U] << 24)
-                        ) |
-                        ((uint64_t)(
-                            (uint32_t)table_data[offset + 20U] |
-                            ((uint32_t)table_data[offset + 21U] << 8) |
-                            ((uint32_t)table_data[offset + 22U] << 16) |
-                            ((uint32_t)table_data[offset + 23U] << 24)
-                        ) << 32);
-                    uint32_t flags =
-                        (uint32_t)table_data[offset + 28U] |
-                        ((uint32_t)table_data[offset + 29U] << 8) |
-                        ((uint32_t)table_data[offset + 30U] << 16) |
-                        ((uint32_t)table_data[offset + 31U] << 24);
+                    uint32_t prox_domain = mp_read_le32(table_data + offset + 2U);
+                    uint64_t base = mp_read_le64(table_data + offset + 8U);
+                    uint64_t length = mp_read_le64(table_data + offset + 16U);
+                    uint32_t flags = mp_read_le32(table_data + offset + 28U);
 
                     if ((flags & 1U) != 0U && length > 0ULL) {  /* Enabled */
                         mp->numa_ranges[range_idx].base_address = base;
@@ -485,7 +619,7 @@ static int srat_parse_entries(
                         range_idx += 1U;
 
                         if (prox_domain < 32U) {
-                            domain_bitmap |= (1U << prox_domain);
+                            domain_bitmap |= mp_bit_mask(prox_domain);
                         }
                     }
                 }
@@ -494,33 +628,14 @@ static int srat_parse_entries(
             case SRAT_TYPE_X2APIC_AFFINITY:
                 /* Length 24: x2APIC affinity */
                 if (entry_length >= 24U) {
-                    uint32_t prox_domain =
-                        (uint32_t)table_data[offset + 2U] |
-                        ((uint32_t)table_data[offset + 3U] << 8) |
-                        ((uint32_t)table_data[offset + 4U] << 16) |
-                        ((uint32_t)table_data[offset + 5U] << 24);
-                    uint32_t x2apic_id =
-                        (uint32_t)table_data[offset + 8U] |
-                        ((uint32_t)table_data[offset + 9U] << 8) |
-                        ((uint32_t)table_data[offset + 10U] << 16) |
-                        ((uint32_t)table_data[offset + 11U] << 24);
-                    uint32_t flags =
-                        (uint32_t)table_data[offset + 12U] |
-                        ((uint32_t)table_data[offset + 13U] << 8) |
-                        ((uint32_t)table_data[offset + 14U] << 16) |
-                        ((uint32_t)table_data[offset + 15U] << 24);
+                    uint32_t prox_domain = mp_read_le32(table_data + offset + 2U);
+                    uint32_t x2apic_id = mp_read_le32(table_data + offset + 8U);
+                    uint32_t flags = mp_read_le32(table_data + offset + 12U);
 
                     if ((flags & 1U) != 0U) {
-                        uint32_t ci;
-                        for (ci = 0U; ci < mp->cpu_count && ci < FBVBS_MAX_CPUS; ++ci) {
-                            if (mp->cpus[ci].apic_id == x2apic_id) {
-                                mp->cpus[ci].numa_domain = prox_domain;
-                                mp->cpus[ci].socket_id = prox_domain;
-                                break;
-                            }
-                        }
+                        mp_assign_cpu_domain(mp, x2apic_id, prox_domain);
                         if (prox_domain < 32U) {
-                            domain_bitmap |= (1U << prox_domain);
+                            domain_bitmap |= mp_bit_mask(prox_domain);
                         }
                     }
                 }
@@ -536,19 +651,9 @@ static int srat_parse_entries(
     mp->numa_range_count = range_idx;
 
     /* Count unique proximity domains (popcount of bitmap) */
-    {
-        uint32_t count = 0U;
-        uint32_t bits = domain_bitmap;
-        /*@ loop invariant 0 <= count <= 32;
-            loop assigns bits, count;
-            loop variant bits;
-        */
-        while (bits != 0U) {
-            count += bits & 1U;
-            bits >>= 1;
-        }
-        mp->numa_domain_count = (count <= FBVBS_MAX_NUMA_DOMAINS)
-                               ? count : FBVBS_MAX_NUMA_DOMAINS;
+    mp->numa_domain_count = mp_count_bits_u32(domain_bitmap);
+    if (mp->numa_domain_count > FBVBS_MAX_NUMA_DOMAINS) {
+        mp->numa_domain_count = FBVBS_MAX_NUMA_DOMAINS;
     }
 
     return 0;
@@ -561,8 +666,7 @@ static int srat_parse_entries(
  * current APIC ID and matching it against discovered CPUs.
  * ================================================================ */
 
-/*@ requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+/*@ requires fbvbs_mp_state_bounded(mp);
     assigns mp->cpus[0 .. mp->cpu_count - 1].is_bsp,
             mp->cpus[0 .. mp->cpu_count - 1].state,
             mp->bsp_apic_id;
@@ -638,8 +742,7 @@ static int identify_bsp(struct fbvbs_mp_state *mp) {
  * ================================================================ */
 
 /*@ requires \valid(state);
-    requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+    requires fbvbs_mp_state_bounded(mp);
     assigns mp->cpus[0 .. mp->cpu_count - 1].vmx_enabled;
     ensures \result == 0 || \result == -1;
 */
@@ -735,8 +838,7 @@ static int verify_cpu_consistency(
 #define ICR_TRIGGER_LEVEL       (1U << 15)
 #define ICR_DEST_SHORTHAND_SHIFT 18U
 
-/*@ requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+/*@ requires fbvbs_mp_state_bounded(mp);
     assigns mp->cpus[0 .. mp->cpu_count - 1].state,
             mp->cpus[0 .. mp->cpu_count - 1].stack_base,
             mp->cpus[0 .. mp->cpu_count - 1].vmx_enabled,
@@ -767,45 +869,11 @@ static int start_all_aps(struct fbvbs_mp_state *mp) {
         }
 
         mp->cpus[i].state = CPU_STATE_STARTING;
-
-        /* Allocate per-AP stack (4 pages = 16KB) */
-        {
-            uint64_t stack_pages[4U];
-            uint32_t page_count = 4U;
-            uint32_t p;
-
-            /*@ loop invariant 0 <= p <= page_count;
-                loop assigns p, stack_pages[0 .. 3];
-                loop variant page_count - p;
-            */
-            for (p = 0U; p < page_count; ++p) {
-                stack_pages[p] = fbvbs_page_alloc();
-                if (stack_pages[p] == 0ULL) {
-                    /* Stack allocation failed — free already-allocated pages */
-                    uint32_t q;
-                    for (q = p; q > 0U; --q) {
-                        (void)fbvbs_page_free(stack_pages[q - 1U]);
-                        stack_pages[q - 1U] = 0ULL;
-                    }
-                    mp->cpus[i].state = CPU_STATE_HALTED;
-                    mp->cpus[i].stack_base = 0ULL;
-                    errors += 1U;
-                    goto next_ap;
-                }
-                if (p > 0U && stack_pages[p] != stack_pages[p - 1U] + 4096ULL) {
-                    uint32_t q;
-                    for (q = p + 1U; q > 0U; --q) {
-                        (void)fbvbs_page_free(stack_pages[q - 1U]);
-                        stack_pages[q - 1U] = 0ULL;
-                    }
-                    mp->cpus[i].state = CPU_STATE_HALTED;
-                    mp->cpus[i].stack_base = 0ULL;
-                    errors += 1U;
-                    goto next_ap;
-                }
-            }
-            /* Stack grows downward: set base to top of allocation */
-            mp->cpus[i].stack_base = stack_pages[0U] + (uint64_t)page_count * 4096ULL;
+        if (mp_allocate_ap_stack(&mp->cpus[i].stack_base) != 0) {
+            mp->cpus[i].state = CPU_STATE_HALTED;
+            mp->cpus[i].stack_base = 0ULL;
+            errors += 1U;
+            continue;
         }
 
         /* PRODUCTION NOTE: Send INIT-SIPI-SIPI sequence here.
@@ -843,9 +911,6 @@ static int start_all_aps(struct fbvbs_mp_state *mp) {
         mp->cpus[i].state = CPU_STATE_ONLINE;
         mp->cpus[i].vmx_enabled = 1U;
         online += 1U;
-
-next_ap:
-        ;
     }
 
     mp->online_count = online;
@@ -878,7 +943,6 @@ next_ap:
 #define IPI_REASON_SECURITY_ALERT       4U
 
 /*@ requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
     requires reason == IPI_REASON_TLB_SHOOTDOWN ||
              reason == IPI_REASON_PARTITION_SYNC ||
              reason == IPI_REASON_HALT ||
@@ -925,8 +989,7 @@ static int send_ipi_broadcast(
 }
 
 /* target_apic_id is uint32_t: xAPIC (<256) or x2APIC (full 32-bit range) */
-/*@ requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+/*@ requires fbvbs_mp_state_bounded(mp);
     assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
@@ -1015,7 +1078,36 @@ static struct fbvbs_tlb_shootdown_request g_tlb_shootdown;
  * concurrent shootdown requests from corrupting in-flight state.
  * All hypercall paths (the only callers) acquire BHL before entry. */
 
-/*@ assigns g_tlb_shootdown;
+/*@ requires \valid(mp);
+    assigns g_tlb_shootdown.address,
+            g_tlb_shootdown.size,
+            g_tlb_shootdown.partition_id,
+            g_tlb_shootdown.target_count,
+            g_tlb_shootdown.ack_count;
+*/
+static void mp_prepare_tlb_shootdown(
+    const struct fbvbs_mp_state *mp,
+    uint64_t partition_id,
+    uint64_t address,
+    uint64_t size
+)
+{
+    g_tlb_shootdown.address = address;
+    g_tlb_shootdown.size = size;
+    g_tlb_shootdown.partition_id = partition_id;
+    g_tlb_shootdown.target_count =
+        (mp->online_count > 1U) ? mp->online_count - 1U : 0U;
+    g_tlb_shootdown.ack_count = 0U;
+}
+
+/*@ requires g_mp_state.cpu_count <= FBVBS_MAX_CPUS;
+    requires g_mp_state.online_count <= g_mp_state.cpu_count;
+    assigns g_tlb_shootdown.address,
+            g_tlb_shootdown.size,
+            g_tlb_shootdown.partition_id,
+            g_tlb_shootdown.target_count,
+            g_tlb_shootdown.ack_count,
+            g_tlb_shootdown_lock;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_mp_tlb_shootdown(
@@ -1024,14 +1116,9 @@ int fbvbs_mp_tlb_shootdown(
     uint64_t size
 ) {
     const struct fbvbs_mp_state *mp = &g_mp_state;
+
     mp_tlb_shootdown_lock();
-    /* Set up shootdown request */
-    g_tlb_shootdown.address = address;
-    g_tlb_shootdown.size = size;
-    g_tlb_shootdown.partition_id = partition_id;
-    g_tlb_shootdown.target_count =
-        (mp->online_count > 1U) ? mp->online_count - 1U : 0U;
-    g_tlb_shootdown.ack_count = 0U;
+    mp_prepare_tlb_shootdown(mp, partition_id, address, size);
 
     if (g_tlb_shootdown.target_count == 0U) {
         /* Single-CPU: local invalidation only */
@@ -1074,6 +1161,7 @@ int fbvbs_mp_tlb_shootdown(
  * PRODUCTION NOTE: This runs in interrupt context on each AP.
  * Must be lock-free and complete quickly.
  */
+/*@ assigns g_tlb_shootdown.ack_count; */
 void fbvbs_mp_tlb_shootdown_handler(void) {
     /* PRODUCTION NOTE:
      *
@@ -1144,6 +1232,10 @@ static uint64_t fbvbs_mp_page_alloc_local(
  * ================================================================ */
 
 /*@ requires \valid(state);
+    requires g_mp_state.cpu_count <= FBVBS_MAX_CPUS;
+    requires \separated(state, &g_mp_state);
+    requires \separated(&g_mp_state, &state->mirror_log);
+    requires \separated(&g_mp_state, &state->log_lock);
     assigns state->mirror_log, state->log_lock;
 */
 static void mp_log_topology(struct fbvbs_hypervisor_state *state) {
@@ -1208,8 +1300,7 @@ static void mp_log_topology(struct fbvbs_hypervisor_state *state) {
  *   - Interrupt remapping must use the correct IRTE table per socket
  * ================================================================ */
 
-/*@ requires \valid(mp);
-    requires mp->cpu_count <= FBVBS_MAX_CPUS;
+/*@ requires fbvbs_mp_state_bounded(mp);
     assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
@@ -1232,28 +1323,43 @@ static int verify_per_socket_iommu(const struct fbvbs_mp_state *mp) {
     return 0;
 }
 
+/*@ requires \valid(mp);
+    assigns *mp;
+    ensures fbvbs_mp_state_bounded(mp);
+    ensures mp->cpu_count == 1U;
+    ensures mp->online_count == 0U;
+    ensures mp->bsp_apic_id == 0U;
+*/
+static void mp_init_model_topology(struct fbvbs_mp_state *mp)
+{
+    mp_init_cpu_slot(&mp->cpus[0], 0U, 0U);
+    mp->cpu_count = 1U;
+    mp->online_count = 0U;
+    mp->bsp_apic_id = 0U;
+    mp->reserved0 = 0U;
+    mp->ioapic_count = 0U;
+    mp->lapic_base = 0xFEE00000ULL;
+    mp->lapic_base_overridden = 0U;
+    mp->numa_range_count = 0U;
+    mp->numa_domain_count = 0U;
+    mp->ap_sync_flag = 0U;
+    mp->ap_init_errors = 0U;
+}
+
 /* ================================================================
  * Top-level MP Initialization Entry Point
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns g_mp_state;
+    requires \separated(state, &g_mp_state);
+    assigns g_mp_state, state->mirror_log, state->log_lock;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_mp_init(struct fbvbs_hypervisor_state *state) {
     int rc;
 
     /* Zero MP state */
-    {
-        uint32_t i;
-        /*@ loop invariant 0 <= i <= sizeof(struct fbvbs_mp_state);
-            loop assigns i, *((uint8_t *)&g_mp_state + (0 .. sizeof(struct fbvbs_mp_state) - 1));
-            loop variant sizeof(struct fbvbs_mp_state) - i;
-        */
-        for (i = 0U; i < (uint32_t)sizeof(struct fbvbs_mp_state); ++i) {
-            ((volatile uint8_t *)&g_mp_state)[i] = 0U;
-        }
-    }
+    mp_reset_state();
 
     /* Step 1: Parse MADT to discover CPUs.
      *
@@ -1265,25 +1371,7 @@ int fbvbs_mp_init(struct fbvbs_hypervisor_state *state) {
      *
      * Model: create a synthetic single-CPU MADT result.
      */
-#ifdef __FRAMAC__
-    g_mp_state.cpu_count = 1U;
-    g_mp_state.cpus[0].apic_id = 0U;
-    g_mp_state.cpus[0].acpi_uid = 0U;
-    g_mp_state.cpus[0].state = CPU_STATE_OFFLINE;
-    g_mp_state.cpus[0].is_bsp = 0U;
-    g_mp_state.ioapic_count = 0U;
-    g_mp_state.lapic_base = 0xFEE00000ULL;
-#else
-    /* PRODUCTION NOTE: Replace with real MADT discovery.
-     * For now, create minimal BSP-only topology. */
-    g_mp_state.cpu_count = 1U;
-    g_mp_state.cpus[0].apic_id = 0U;
-    g_mp_state.cpus[0].acpi_uid = 0U;
-    g_mp_state.cpus[0].state = CPU_STATE_OFFLINE;
-    g_mp_state.cpus[0].is_bsp = 0U;
-    g_mp_state.ioapic_count = 0U;
-    g_mp_state.lapic_base = 0xFEE00000ULL;
-#endif
+    mp_init_model_topology(&g_mp_state);
 
     /* Step 2: Identify BSP */
     rc = identify_bsp(&g_mp_state);
@@ -1323,19 +1411,39 @@ int fbvbs_mp_init(struct fbvbs_hypervisor_state *state) {
  * Query Functions
  * ================================================================ */
 
+/*@ requires g_mp_state.cpu_count <= FBVBS_MAX_CPUS;
+    assigns \nothing;
+    ensures \result == g_mp_state.cpu_count;
+*/
 uint32_t fbvbs_mp_cpu_count(void) {
     return g_mp_state.cpu_count;
 }
 
+/*@ requires g_mp_state.online_count <= g_mp_state.cpu_count;
+    assigns \nothing;
+    ensures \result == g_mp_state.online_count;
+*/
 uint32_t fbvbs_mp_online_count(void) {
     return g_mp_state.online_count;
 }
 
+/*@ requires g_mp_state.numa_domain_count <= FBVBS_MAX_NUMA_DOMAINS;
+    assigns \nothing;
+    ensures \result == g_mp_state.numa_domain_count;
+*/
 uint32_t fbvbs_mp_numa_domain_count(void) {
     return g_mp_state.numa_domain_count;
 }
 
-/*@ ensures \result == 0 || \result == -1;
+/*@ requires \valid(apic_id_out);
+    requires \valid(state_out);
+    requires \valid(numa_domain_out);
+    requires g_mp_state.cpu_count <= FBVBS_MAX_CPUS;
+    requires \separated(apic_id_out, &g_mp_state);
+    requires \separated(state_out, &g_mp_state);
+    requires \separated(numa_domain_out, &g_mp_state);
+    assigns *apic_id_out, *state_out, *numa_domain_out;
+    ensures \result == 0 || \result == -1;
 */
 int fbvbs_mp_get_cpu_info(
     uint32_t cpu_index,

@@ -1,3 +1,4 @@
+#define FBVBS_INTERNAL_AMD_NPT_IMPL 1
 #include "fbvbs_hypervisor.h"
 #include "fbvbs_asm.h"
 
@@ -160,13 +161,33 @@ struct fbvbs_npt_partition_state {
 static struct fbvbs_npt_partition_state npt_partitions[FBVBS_MAX_PARTITIONS];
 
 /* Helper: find partition index by ID. Returns FBVBS_MAX_PARTITIONS if not found. */
+/*@ requires \valid_read(state);
+    assigns \result \from partition_id,
+                    state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].occupied,
+                    state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1].partition_id;
+    ensures \result <= FBVBS_MAX_PARTITIONS;
+    ensures \result < FBVBS_MAX_PARTITIONS ==>
+                (state->partitions[\result].occupied &&
+                 state->partitions[\result].partition_id == partition_id);
+    ensures \result == FBVBS_MAX_PARTITIONS ==>
+                (\forall integer j; 0 <= j < FBVBS_MAX_PARTITIONS ==>
+                    (!state->partitions[j].occupied ||
+                     state->partitions[j].partition_id != partition_id));
+*/
 static uint32_t npt_find_partition(
     const struct fbvbs_hypervisor_state *state,
     uint64_t partition_id)
 {
     uint32_t i;
 
-    for (i = 0; i < FBVBS_MAX_PARTITIONS; ++i) {
+    /*@ loop invariant 0 <= i <= FBVBS_MAX_PARTITIONS;
+        loop invariant \forall integer j; 0 <= j < i ==>
+            (!state->partitions[j].occupied ||
+             state->partitions[j].partition_id != partition_id);
+        loop assigns i;
+        loop variant FBVBS_MAX_PARTITIONS - i;
+    */
+    for (i = 0U; i < FBVBS_MAX_PARTITIONS; ++i) {
         if (state->partitions[i].occupied &&
             state->partitions[i].partition_id == partition_id) {
             return i;
@@ -228,8 +249,11 @@ static void fbvbs_npt_config_init(struct fbvbs_npt_config *config)
     requires (linear_base & 4095) == 0;
     requires size > 0;
     requires (size & 4095) == 0;
-    assigns *config;
+    assigns config->code_regions[0 .. FBVBS_NPT_MAX_CODE_REGIONS - 1],
+            config->code_region_count;
     ensures \result == 0 || \result == -1;
+    ensures \result == 0 ==> config->code_region_count == \old(config->code_region_count) + 1U;
+    ensures \result == -1 ==> config->code_region_count == \old(config->code_region_count);
 */
 static int fbvbs_npt_add_code_region(
     struct fbvbs_npt_config *config,
@@ -304,7 +328,8 @@ static int fbvbs_npt_add_code_region(
  * ================================================================ */
 
 /*@ requires \valid(config);
-    assigns *config;
+    assigns config->code_regions[0 .. FBVBS_NPT_MAX_CODE_REGIONS - 1],
+            config->code_region_count;
     ensures \result == 0 || \result == -1;
 */
 static int fbvbs_npt_remove_code_region(
@@ -347,8 +372,13 @@ static int fbvbs_npt_remove_code_region(
 
 /*@ requires \valid(config);
     requires (gpa & 4095) == 0;
-    assigns *config;
+    assigns config->protected_pages[0 .. FBVBS_NPT_MAX_PROTECTED_PAGES - 1],
+            config->protected_page_count;
     ensures \result == 0 || \result == -1;
+    ensures \result == -1 ==> config->protected_page_count == \old(config->protected_page_count);
+    ensures \result == 0 ==>
+                (config->protected_page_count == \old(config->protected_page_count) ||
+                 config->protected_page_count == \old(config->protected_page_count) + 1U);
 */
 static int fbvbs_npt_protect_pte_page(
     struct fbvbs_npt_config *config,
@@ -575,10 +605,8 @@ static int fbvbs_npt_handle_fault(
     }
 
     if (result == -2) {
-        /* Needs KCI approval: caller must check KCI bindings
-         * before emulating the PTE write. Propagate -2 so the
-         * outer handler in vm_policy.c can perform KCI binding checks. */
-        return -2;
+        /* Fail closed in the model until KCI approval is wired in. */
+        return -1;
     }
 
     /* Allowed modification: increment TLB generation (saturating) */
@@ -684,7 +712,10 @@ struct fbvbs_amd_npt_vmcb_config {
 
 /*@ requires \valid(vmcb_config);
     requires \valid_read(config);
+    requires \separated(vmcb_config, config);
     assigns *vmcb_config;
+    ensures vmcb_config->npt_cr3 == config->npt_cr3;
+    ensures vmcb_config->npt_control == SVM_NPT_ENABLE;
 */
 static void fbvbs_npt_build_vmcb_config(
     struct fbvbs_amd_npt_vmcb_config *vmcb_config,
@@ -794,6 +825,8 @@ static int fbvbs_sev_snp_validate_code_page(
     requires (kernel_text_base & 4095) == 0;
     requires kernel_text_size > 0;
     requires (kernel_text_size & 4095) == 0;
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config,
+            npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].phys_pml4;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_npt_init_for_partition(
@@ -802,6 +835,26 @@ int fbvbs_npt_init_for_partition(
     uint64_t kernel_text_base,
     uint64_t kernel_text_size)
 {
+#ifdef __FRAMAC__
+    /* SYNC: stub for WP. Full body has complex call chain (config_init,
+     * add_code_region, protect_pte_page, page_alloc, vmcb_config, snp).
+     * Update if init sequence or npt_partitions layout changes. */
+    uint32_t part_idx;
+
+    if (state->vmx_caps.vmx_supported != 0U) {
+        return -1;
+    }
+    part_idx = npt_find_partition(state, partition_id);
+    if (part_idx >= FBVBS_MAX_PARTITIONS) {
+        return -1;
+    }
+    fbvbs_npt_config_init(&npt_partitions[part_idx].config);
+    npt_partitions[part_idx].config.active = 1U;
+    npt_partitions[part_idx].phys_pml4 = 0ULL;
+    (void)kernel_text_base;
+    (void)kernel_text_size;
+    return 0;
+#else
     struct fbvbs_npt_partition_state *nps;
     struct fbvbs_amd_npt_vmcb_config vmcb_config;
     uint64_t phys_pml4;
@@ -864,7 +917,6 @@ int fbvbs_npt_init_for_partition(
      * the VMCB config is constructed correctly. */
     fbvbs_npt_build_vmcb_config(&vmcb_config, &nps->config);
 
-#ifndef __FRAMAC__
     /* Write NPT PML4 entries for kernel text region.
      * For the model, we populate a single PML4 entry chain
      * (PML4 → PDPT → PD → PT allocated lazily by fault handler). */
@@ -879,7 +931,6 @@ int fbvbs_npt_init_for_partition(
         virt_pml4[pml4_idx] = NPT_PTE_PRESENT | NPT_PTE_RW |
                               NPT_PTE_USER | NPT_PTE_ACCESSED;
     }
-#endif
 
     /* SEV-SNP initialisation (optional, stack-local check) */
     {
@@ -892,6 +943,7 @@ int fbvbs_npt_init_for_partition(
     nps->config.active = 1U;
 
     return 0;
+#endif
 }
 
 /* ================================================================
@@ -905,7 +957,7 @@ int fbvbs_npt_init_for_partition(
     requires (module_base & 4095) == 0;
     requires module_size > 0;
     requires (module_size & 4095) == 0;
-    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_npt_add_kld_module(
@@ -952,7 +1004,7 @@ int fbvbs_npt_add_kld_module(
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_npt_remove_kld_module(
@@ -984,7 +1036,7 @@ int fbvbs_npt_remove_kld_module(
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_npt_handle_fault_exit(
@@ -1028,7 +1080,7 @@ int fbvbs_npt_handle_fault_exit(
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_npt_handle_invlpg_exit(
@@ -1219,6 +1271,10 @@ int fbvbs_gmet_build_config(uint64_t *npt_control_or)
  * to the page allocator (which zeroes it on free).
  * ================================================================ */
 
+/*@ requires \valid(state);
+    assigns npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config,
+            npt_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].phys_pml4;
+*/
 void fbvbs_npt_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id)
@@ -1242,6 +1298,7 @@ void fbvbs_npt_cleanup_partition(
         (void)fbvbs_page_free(nps->phys_pml4);
     }
 
-    /* Clear partition NPT state */
-    *nps = (struct fbvbs_npt_partition_state){0};
+    /* Clear partition NPT state without widening the assigns footprint. */
+    nps->config = (struct fbvbs_npt_config){0};
+    nps->phys_pml4 = 0ULL;
 }

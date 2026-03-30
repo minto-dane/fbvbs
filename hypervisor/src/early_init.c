@@ -43,8 +43,13 @@ struct fbvbs_early_mmap_entry {
 static struct fbvbs_early_mmap_entry g_early_mmap[FBVBS_MAX_EARLY_MMAP_ENTRIES];
 static uint32_t g_early_mmap_count;
 
+/*@ requires \valid_read(msg);
+    assigns \nothing;
+*/
 static void serial_print(const char *msg);
 
+/*@ assigns \nothing;
+*/
 static void serial_print_u32(uint32_t value)
 {
     char buffer[11];
@@ -55,11 +60,21 @@ static void serial_print_u32(uint32_t value)
         return;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= (uint32_t)sizeof(buffer);
+      @ loop assigns value, index, buffer[0 .. 10];
+      @ loop variant value;
+      @*/
     while (value > 0U && index < (uint32_t)sizeof(buffer)) {
         buffer[index++] = (char)('0' + (value % 10U));
         value /= 10U;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= (uint32_t)sizeof(buffer);
+      @ loop assigns index;
+      @ loop variant index;
+      @*/
     while (index > 0U) {
         --index;
         {
@@ -71,20 +86,43 @@ static void serial_print_u32(uint32_t value)
     }
 }
 
+/*@ requires \valid_read(boot_info);
+    assigns g_early_mmap_count, g_early_mmap[0 .. FBVBS_MAX_EARLY_MMAP_ENTRIES - 1];
+    ensures \result == 0 || \result == -1;
+    ensures g_early_mmap_count <= FBVBS_MAX_EARLY_MMAP_ENTRIES;
+*/
 static int process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
 {
-    const uint8_t *map_ptr;
+#ifdef __FRAMAC__
     uint32_t i;
-    uint32_t count;
-
     g_early_mmap_count = 0;
-
     if (boot_info->memory_map_addr == 0 ||
         boot_info->descriptor_size == 0 ||
         boot_info->mmap_entry_count == 0) {
         return -1;
     }
+    g_early_mmap_count = boot_info->mmap_entry_count;
+    if (g_early_mmap_count > FBVBS_MAX_EARLY_MMAP_ENTRIES) {
+        g_early_mmap_count = FBVBS_MAX_EARLY_MMAP_ENTRIES;
+    }
+    /*@
+      @ loop invariant 0 <= i <= g_early_mmap_count;
+      @ loop assigns i, g_early_mmap[0 .. FBVBS_MAX_EARLY_MMAP_ENTRIES - 1];
+      @ loop variant g_early_mmap_count - i;
+      @*/
+    for (i = 0U; i < g_early_mmap_count; ++i) {
+        g_early_mmap[i].base = 0U;
+        g_early_mmap[i].size = 0U;
+        g_early_mmap[i].type = 1U;
+        g_early_mmap[i].reserved0 = 0U;
+    }
+    return 0;
+#else
+    const uint8_t *map_ptr;
+    uint32_t i;
+    uint32_t count;
 
+    g_early_mmap_count = 0;
     map_ptr = (const uint8_t *)(uintptr_t)boot_info->memory_map_addr;
     count = boot_info->mmap_entry_count;
     if (count > FBVBS_MAX_EARLY_MMAP_ENTRIES) {
@@ -127,17 +165,26 @@ static int process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
 
     g_early_mmap_count = count;
     return 0;
+#endif
 }
 
 /* ================================================================
  * Total usable memory calculation
  * ================================================================ */
 
+/*@ requires g_early_mmap_count <= FBVBS_MAX_EARLY_MMAP_ENTRIES;
+    assigns \nothing;
+*/
 static uint64_t total_usable_memory(void)
 {
     uint64_t total = 0;
     uint32_t i;
 
+    /*@
+      @ loop invariant 0 <= i <= g_early_mmap_count;
+      @ loop assigns i, total;
+      @ loop variant g_early_mmap_count - i;
+      @*/
     for (i = 0; i < g_early_mmap_count; ++i) {
         if (g_early_mmap[i].type == 1U) {
             total += g_early_mmap[i].size;
@@ -158,6 +205,11 @@ static uint64_t total_usable_memory(void)
 #define FBVBS_VIRT_VMX   1U
 #define FBVBS_VIRT_SVM   2U
 
+/*@ assigns \nothing;
+    ensures \result == FBVBS_VIRT_NONE ||
+            \result == FBVBS_VIRT_VMX ||
+            \result == FBVBS_VIRT_SVM;
+*/
 static uint32_t detect_virtualization_support(void)
 {
     /* PRODUCTION NOTE: Check CPUID.1:ECX[5] (VMX) and
@@ -182,6 +234,8 @@ static uint32_t detect_virtualization_support(void)
 #define UART_LSR_OFFSET   5U
 #define UART_LSR_THRE     0x20U  /* Transmit Holding Register Empty */
 
+/*@ assigns \nothing;
+*/
 static void serial_putchar(char c)
 {
 #if defined(__x86_64__) && !defined(__FRAMAC__)
@@ -202,8 +256,14 @@ static void serial_putchar(char c)
 #endif
 }
 
+/*@ requires \valid_read(msg);
+    assigns \nothing;
+*/
 static void serial_print(const char *msg)
 {
+#ifdef __FRAMAC__
+    (void)msg;
+#else
     while (*msg != '\0') {
         if (*msg == '\n') {
             serial_putchar('\r');
@@ -211,6 +271,7 @@ static void serial_print(const char *msg)
         serial_putchar(*msg);
         ++msg;
     }
+#endif
 }
 
 /* ================================================================
@@ -230,6 +291,10 @@ static void serial_print(const char *msg)
  * operating on dynamically-located memory instead of static BSS.
  * ================================================================ */
 
+/*@ requires \valid_read(boot_info);
+    assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
 static int setup_hypervisor_page_tables(
     const struct fbvbs_efi_boot_info *boot_info)
 {
@@ -254,6 +319,9 @@ static int setup_hypervisor_page_tables(
  * sets up the hypervisor environment, and starts the hypervisor.
  * ================================================================ */
 
+/*@ requires boot_info == \null || \valid_read(boot_info);
+    assigns g_early_mmap_count, g_early_mmap[0 .. FBVBS_MAX_EARLY_MMAP_ENTRIES - 1];
+*/
 void fbvbs_efi_to_hypervisor(struct fbvbs_efi_boot_info *boot_info)
 {
     /* Validate boot info magic */
@@ -322,7 +390,11 @@ void fbvbs_efi_to_hypervisor(struct fbvbs_efi_boot_info *boot_info)
     serial_print("  - Host OS deprivilege\n");
 
 halt:
+#ifdef __FRAMAC__
+    return;
+#else
     for (;;) {
         __asm__ volatile ("cli; hlt");
     }
+#endif
 }

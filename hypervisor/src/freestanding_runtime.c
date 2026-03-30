@@ -23,15 +23,28 @@ int memcmp(const void *lhs, const void *rhs, size_t length);
 
 uintptr_t __stack_chk_guard;
 
+/*@ terminates \false;
+    assigns \nothing;
+*/
 static void fbvbs_boot_halt_forever(void) {
+#ifdef __FRAMAC__
+    return;
+#else
     for (;;) {
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("cli; hlt" : : : "memory");
 #endif
     }
+#endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == 0U || \result > 0U;
+*/
 static uint64_t fbvbs_boot_read_tsc(void) {
+#ifdef __FRAMAC__
+    return 0U;
+#else
 #if defined(__x86_64__) || defined(__i386__)
     uint32_t low;
     uint32_t high;
@@ -41,9 +54,16 @@ static uint64_t fbvbs_boot_read_tsc(void) {
 #else
     return 0U;
 #endif
+#endif
 }
 
+/*@ terminates \true;
+    assigns \nothing;
+*/
 static void fbvbs_serial_init(void) {
+#ifdef __FRAMAC__
+    return;
+#else
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_IER), 0x00U);
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_LCR), FBVBS_UART_LCR_DLAB);
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_THR), 0x01U);
@@ -51,9 +71,17 @@ static void fbvbs_serial_init(void) {
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_LCR), 0x03U);
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_FCR), 0xC7U);
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_MCR), 0x0BU);
+#endif
 }
 
+/*@ terminates \true;
+    assigns \nothing;
+*/
 static void fbvbs_serial_putchar(char ch) {
+#ifdef __FRAMAC__
+    (void)ch;
+    return;
+#else
     uint32_t spins = 0U;
 
     while (((uint32_t)fbvbs_asm_inb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_LSR)) &
@@ -63,13 +91,20 @@ static void fbvbs_serial_putchar(char ch) {
     }
 
     fbvbs_asm_outb((uint16_t)(FBVBS_COM1_PORT + FBVBS_UART_THR), (uint8_t)ch);
+#endif
 }
 
+/*@ requires message == \null || \valid_read(message);
+    terminates \true;
+    assigns \nothing;
+*/
 void fbvbs_boot_console_puts(const char *message) {
     if (message == NULL) {
         return;
     }
-
+#ifdef __FRAMAC__
+    (void)message;
+#else
     while (*message != '\0') {
         if (*message == '\n') {
             fbvbs_serial_putchar('\r');
@@ -77,8 +112,12 @@ void fbvbs_boot_console_puts(const char *message) {
         fbvbs_serial_putchar(*message);
         ++message;
     }
+#endif
 }
 
+/*@ terminates \true;
+    assigns __stack_chk_guard;
+*/
 __attribute__((no_stack_protector))
 void fbvbs_boot_runtime_init(void) {
     uint64_t seed;
@@ -93,37 +132,74 @@ void fbvbs_boot_runtime_init(void) {
     __stack_chk_guard = (uintptr_t)seed;
 }
 
+/*@ terminates \false;
+    assigns \nothing;
+*/
 __attribute__((noreturn, no_stack_protector))
 void __stack_chk_fail(void) {
     fbvbs_boot_console_puts("FATAL: stack protector violation\n");
     fbvbs_boot_halt_forever();
-    __builtin_unreachable();
 }
 
+/*@ behavior null_destination:
+      assumes destination == \null;
+      assigns \nothing;
+      ensures \result == \null;
+    behavior valid_destination:
+      assumes destination != \null;
+      requires \valid(((char *)destination) + (0 .. length - 1));
+      assigns ((char *)destination)[0 .. length - 1];
+      ensures \result == destination;
+    complete behaviors;
+    disjoint behaviors;
+*/
 void *memset(void *destination, int value, size_t length) {
-    unsigned char *bytes = (unsigned char *)destination;
+    char *bytes = (char *)destination;
     size_t index;
 
     if (destination == NULL) {
         return NULL;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop assigns index, bytes[0 .. length - 1];
+      @ loop variant length - index;
+      @*/
     for (index = 0U; index < length; ++index) {
-        bytes[index] = (unsigned char)value;
+        bytes[index] = (char)((unsigned char)value);
     }
 
     return destination;
 }
 
+/*@ behavior null_input:
+      assumes destination == \null || source == \null;
+      assigns \nothing;
+      ensures \result == destination;
+    behavior valid_input:
+      assumes destination != \null && source != \null;
+      requires \valid(((char *)destination) + (0 .. length - 1));
+      requires \valid_read(((const char *)source) + (0 .. length - 1));
+      assigns ((char *)destination)[0 .. length - 1];
+      ensures \result == destination;
+    complete behaviors;
+    disjoint behaviors;
+*/
 void *memcpy(void *destination, const void *source, size_t length) {
-    unsigned char *dest_bytes = (unsigned char *)destination;
-    const unsigned char *src_bytes = (const unsigned char *)source;
+    char *dest_bytes = (char *)destination;
+    const char *src_bytes = (const char *)source;
     size_t index;
 
     if (destination == NULL || source == NULL) {
         return destination;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop assigns index, dest_bytes[0 .. length - 1];
+      @ loop variant length - index;
+      @*/
     for (index = 0U; index < length; ++index) {
         dest_bytes[index] = src_bytes[index];
     }
@@ -131,9 +207,22 @@ void *memcpy(void *destination, const void *source, size_t length) {
     return destination;
 }
 
+/*@ behavior null_input:
+      assumes destination == \null || source == \null;
+      assigns \nothing;
+      ensures \result == destination;
+    behavior valid_input:
+      assumes destination != \null && source != \null;
+      requires \valid(((char *)destination) + (0 .. length - 1));
+      requires \valid_read(((const char *)source) + (0 .. length - 1));
+      assigns ((char *)destination)[0 .. length - 1];
+      ensures \result == destination;
+    complete behaviors;
+    disjoint behaviors;
+*/
 void *memmove(void *destination, const void *source, size_t length) {
-    unsigned char *dest_bytes = (unsigned char *)destination;
-    const unsigned char *src_bytes = (const unsigned char *)source;
+    char *dest_bytes = (char *)destination;
+    const char *src_bytes = (const char *)source;
     size_t index;
 
     if (destination == NULL || source == NULL) {
@@ -141,12 +230,22 @@ void *memmove(void *destination, const void *source, size_t length) {
     }
 
     if (dest_bytes <= src_bytes || dest_bytes >= src_bytes + length) {
+        /*@
+          @ loop invariant 0 <= index <= length;
+          @ loop assigns index, dest_bytes[0 .. length - 1];
+          @ loop variant length - index;
+          @*/
         for (index = 0U; index < length; ++index) {
             dest_bytes[index] = src_bytes[index];
         }
         return destination;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop assigns index, dest_bytes[0 .. length - 1];
+      @ loop variant index;
+      @*/
     for (index = length; index > 0U; --index) {
         dest_bytes[index - 1U] = src_bytes[index - 1U];
     }
@@ -154,18 +253,28 @@ void *memmove(void *destination, const void *source, size_t length) {
     return destination;
 }
 
+/*@ requires lhs == \null || rhs == \null ||
+              (\valid_read(((const char *)lhs) + (0 .. length - 1)) &&
+               \valid_read(((const char *)rhs) + (0 .. length - 1)));
+    assigns \nothing;
+*/
 int memcmp(const void *lhs, const void *rhs, size_t length) {
-    const unsigned char *left = (const unsigned char *)lhs;
-    const unsigned char *right = (const unsigned char *)rhs;
+    const char *left = (const char *)lhs;
+    const char *right = (const char *)rhs;
     size_t index;
 
     if (lhs == NULL || rhs == NULL) {
         return 0;
     }
 
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop assigns index;
+      @ loop variant length - index;
+      @*/
     for (index = 0U; index < length; ++index) {
         if (left[index] != right[index]) {
-            return (left[index] < right[index]) ? -1 : 1;
+            return ((uint8_t)left[index] < (uint8_t)right[index]) ? -1 : 1;
         }
     }
 

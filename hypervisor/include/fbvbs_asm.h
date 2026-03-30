@@ -37,6 +37,9 @@
  * A. VMCS Operations
  * ================================================================ */
 
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
 static inline int fbvbs_asm_vmxon(uint64_t vmxon_region_phys) {
 #ifdef __FRAMAC__
     (void)vmxon_region_phys;
@@ -54,12 +57,16 @@ static inline int fbvbs_asm_vmxon(uint64_t vmxon_region_phys) {
 #endif
 }
 
+/*@ assigns \nothing; */
 static inline void fbvbs_asm_vmxoff(void) {
 #if defined(__x86_64__) && !defined(__FRAMAC__)
     __asm__ volatile("vmxoff" : : : "cc", "memory");
 #endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
 static inline int fbvbs_asm_vmclear(uint64_t vmcs_phys) {
 #ifdef __FRAMAC__
     (void)vmcs_phys;
@@ -77,6 +84,9 @@ static inline int fbvbs_asm_vmclear(uint64_t vmcs_phys) {
 #endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
 static inline int fbvbs_asm_vmptrld(uint64_t vmcs_phys) {
 #ifdef __FRAMAC__
     (void)vmcs_phys;
@@ -94,6 +104,9 @@ static inline int fbvbs_asm_vmptrld(uint64_t vmcs_phys) {
 #endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
 static inline int fbvbs_asm_vmwrite(uint64_t field, uint64_t value) {
 #ifdef __FRAMAC__
     (void)field;
@@ -113,6 +126,10 @@ static inline int fbvbs_asm_vmwrite(uint64_t field, uint64_t value) {
 #endif
 }
 
+/*@ requires value == \null || \valid(value);
+    assigns *value;
+    ensures \result == 0 || \result == -1;
+*/
 static inline int fbvbs_asm_vmread(uint64_t field, uint64_t *value) {
 #ifdef __FRAMAC__
     (void)field;
@@ -138,6 +155,8 @@ static inline int fbvbs_asm_vmread(uint64_t field, uint64_t *value) {
  * B. MSR Operations
  * ================================================================ */
 
+/*@ assigns \nothing;
+*/
 static inline uint64_t fbvbs_asm_rdmsr(uint32_t msr) {
 #ifdef __FRAMAC__
     (void)msr;
@@ -324,6 +343,9 @@ static inline void fbvbs_asm_compiler_barrier(void) {
 #endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == value;
+*/
 static inline uint32_t fbvbs_asm_observe_u32(uint32_t value) {
 #ifdef __FRAMAC__
     return value;
@@ -333,6 +355,9 @@ static inline uint32_t fbvbs_asm_observe_u32(uint32_t value) {
 #endif
 }
 
+/*@ assigns \nothing;
+    ensures \result == value;
+*/
 static inline uint64_t fbvbs_asm_observe_u64(uint64_t value) {
 #ifdef __FRAMAC__
     return value;

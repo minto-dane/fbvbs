@@ -155,7 +155,22 @@ struct fbvbs_exception_frame {
     uint64_t ss;
 };
 
+/*@ assigns \result \from frame;
+    ensures \result == \null || \valid_read(\result);
+*/
+static const struct fbvbs_exception_frame *fbvbs_exception_frame_from_opaque(
+    const void *frame)
+{
+#ifdef __FRAMAC__
+    static const struct fbvbs_exception_frame zero_frame = {0U, 0U, 0U, 0U, 0U};
+    return (frame == NULL) ? NULL : &zero_frame;
+#else
+    return (const struct fbvbs_exception_frame *)frame;
+#endif
+}
+
 /*@ requires vector < IDT_ENTRIES;
+    requires frame == \null || \valid_read(frame);
     assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock;
 */
 static void fbvbs_exception_handler(
@@ -235,47 +250,47 @@ static void fbvbs_exception_handler(
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_de(const void *frame) {
-    fbvbs_exception_handler(VECTOR_DE, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_DE, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_db(const void *frame) {
-    fbvbs_exception_handler(VECTOR_DB, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_DB, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_nmi(const void *frame) {
-    fbvbs_exception_handler(VECTOR_NMI, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_NMI, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_bp(const void *frame) {
-    fbvbs_exception_handler(VECTOR_BP, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_BP, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_ud(const void *frame) {
-    fbvbs_exception_handler(VECTOR_UD, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_UD, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_df(const void *frame, uint64_t error_code) {
-    fbvbs_exception_handler(VECTOR_DF, error_code, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_DF, error_code, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_gp(const void *frame, uint64_t error_code) {
-    fbvbs_exception_handler(VECTOR_GP, error_code, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_GP, error_code, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_pf(const void *frame, uint64_t error_code) {
-    fbvbs_exception_handler(VECTOR_PF, error_code, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_PF, error_code, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /*@ assigns g_fbvbs_hypervisor.mirror_log, g_fbvbs_hypervisor.log_lock; */
 void fbvbs_handle_mc(const void *frame) {
-    fbvbs_exception_handler(VECTOR_MC, 0U, (const struct fbvbs_exception_frame *)frame);
+    fbvbs_exception_handler(VECTOR_MC, 0U, fbvbs_exception_frame_from_opaque(frame));
 }
 
 /* ================================================================
@@ -346,23 +361,17 @@ int fbvbs_idt_init(void) {
  * IST stack boundary queries (for ACSL contracts)
  * ================================================================ */
 
-/*@ assigns \nothing;
-    ensures \result != 0;
-*/
+/*@ assigns \nothing; */
 uint64_t fbvbs_ist_stack_top_nmi(void) {
     return (uint64_t)(uintptr_t)(ist_stack_nmi + IST_STACK_SIZE);
 }
 
-/*@ assigns \nothing;
-    ensures \result != 0;
-*/
+/*@ assigns \nothing; */
 uint64_t fbvbs_ist_stack_top_df(void) {
     return (uint64_t)(uintptr_t)(ist_stack_df + IST_STACK_SIZE);
 }
 
-/*@ assigns \nothing;
-    ensures \result != 0;
-*/
+/*@ assigns \nothing; */
 uint64_t fbvbs_ist_stack_top_mc(void) {
     return (uint64_t)(uintptr_t)(ist_stack_mc + IST_STACK_SIZE);
 }

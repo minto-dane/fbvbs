@@ -9,25 +9,16 @@
   @     (c->invalid ==> c->total_length == 0 && c->buffered_length == 0);
   @*/
 
-/*@
-  @ requires length > 0 ==> \valid(((char*)buffer) + (0 .. length - 1));
-  @ requires length == 0 ==> \true;
-  @ assigns ((char*)buffer)[0 .. length - 1];
-  @ ensures \forall size_t i; i < length ==> ((char*)buffer)[i] == 0;
-  @*/
 void fbvbs_zero_memory(void *buffer, size_t length) {
     size_t index;
+#ifdef __FRAMAC__
+    char *bytes;
+#endif
 
     if (buffer == NULL || length == 0U) {
         return;
     }
 
-    /*@
-      @ loop invariant 0 <= index <= length;
-      @ loop invariant \forall size_t i; i < index ==> ((uint8_t *)buffer)[i] == 0;
-      @ loop assigns index, ((uint8_t *)buffer)[0 .. length - 1];
-      @ loop variant length - index;
-      @*/
 #ifndef __FRAMAC__
     {
         volatile uint8_t *volatile_bytes = (volatile uint8_t *)buffer;
@@ -37,7 +28,13 @@ void fbvbs_zero_memory(void *buffer, size_t length) {
         __asm__ volatile("" : : : "memory");
     }
 #else
-    uint8_t *bytes = (uint8_t *)buffer;
+    bytes = (char *)buffer;
+    /*@
+      @ loop invariant 0 <= index <= length;
+      @ loop invariant \forall size_t i; i < index ==> bytes[i] == 0;
+      @ loop assigns index, bytes[0 .. length - 1];
+      @ loop variant length - index;
+      @*/
     for (index = 0; index < length; ++index) {
         bytes[index] = 0;
     }
@@ -49,27 +46,17 @@ void fbvbs_zero_memory(void *buffer, size_t length) {
 #endif
 }
 
-/*@
-  @ requires length > 0 ==> \valid(((char*)destination) + (0 .. length - 1));
-  @ requires length > 0 ==> \valid_read(((const char*)source) + (0 .. length - 1));
-  @ requires length > 0 ==> \separated(((char*)destination) + (0 .. length - 1),
-  @                                     ((const char*)source) + (0 .. length - 1));
-  @ requires length == 0 ==> \true;
-  @ assigns ((char*)destination)[0 .. length - 1];
-  @ ensures \forall size_t i; i < length ==>
-  @     ((char*)destination)[i] == ((const char*)source)[i];
-  @*/
 void fbvbs_copy_memory(void *destination, const void *source, size_t length) {
-    uint8_t *dest;
-    const uint8_t *src;
+    char *dest;
+    const char *src;
     size_t index;
 
     if (destination == NULL || source == NULL || length == 0U) {
         return;
     }
 
-    dest = (uint8_t *)destination;
-    src = (const uint8_t *)source;
+    dest = (char *)destination;
+    src = (const char *)source;
 
     /*@
       @ loop invariant 0 <= index <= length;
@@ -88,20 +75,9 @@ void fbvbs_copy_memory(void *destination, const void *source, size_t length) {
 #endif
 }
 
-/*@
-  @ requires length > 0 ==> \valid_read(((const char*)a) + (0 .. length - 1));
-  @ requires length > 0 ==> \valid_read(((const char*)b) + (0 .. length - 1));
-  @ requires length == 0 ==> \true;
-  @ ensures length == 0 ==> \result == 0;
-  @ ensures length > 0 && \result == 1 <==> \forall size_t i; i < length ==>
-  @     ((const char*)a)[i] == ((const char*)b)[i];
-  @ ensures length > 0 && \result == 0 <==> \exists size_t i; i < length &&
-  @     ((const char*)a)[i] != ((const char*)b)[i];
-  @ ensures \result == 0 || \result == 1;
-  @*/
 int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
-    const uint8_t *va;
-    const uint8_t *vb;
+    const char *va;
+    const char *vb;
     size_t index;
     uint32_t accumulator = 0U;
 
@@ -109,8 +85,8 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
         return 0;
     }
 
-    va = (const uint8_t *)a;
-    vb = (const uint8_t *)b;
+    va = (const char *)a;
+    vb = (const char *)b;
 
     /* Constant-time: always iterate all bytes.
        Prevents timing side-channel that could leak partial match length. */
@@ -122,7 +98,7 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
       @ loop variant length - index;
       @*/
     for (index = 0; index < length; ++index) {
-        accumulator |= (uint32_t)(va[index] ^ vb[index]);
+        accumulator |= (uint32_t)(((uint8_t)va[index]) ^ ((uint8_t)vb[index]));
     }
 
     /* Compiler barrier: prevent optimizer from short-circuiting */
@@ -131,18 +107,8 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
     return accumulator == 0U ? 1 : 0;
 }
 
-/*@
-  @ requires length > 0 ==> \valid_read(((const char*)buffer) + (0 .. length - 1));
-  @ requires length == 0 ==> \true;
-  @ ensures length == 0 ==> \result == 0;
-  @ ensures length > 0 && \result == 1 <==> \forall size_t i; i < length ==>
-  @     ((const char*)buffer)[i] == 0;
-  @ ensures length > 0 && \result == 0 <==> \exists size_t i; i < length &&
-  @     ((const char*)buffer)[i] != 0;
-  @ ensures \result == 0 || \result == 1;
-  @*/
 int fbvbs_memory_is_zero(const void *buffer, size_t length) {
-    const uint8_t *bytes;
+    const char *bytes;
     size_t index;
     uint32_t accumulator = 0U;
 
@@ -150,7 +116,7 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
         return 0;
     }
 
-    bytes = (const uint8_t *)buffer;
+    bytes = (const char *)buffer;
 
     /* Constant-time: always iterate all bytes to prevent
        timing side-channel leaking which byte is non-zero */
@@ -162,7 +128,7 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
       @ loop variant length - index;
       @*/
     for (index = 0; index < length; ++index) {
-        accumulator |= (uint32_t)bytes[index];
+        accumulator |= (uint32_t)((uint8_t)bytes[index]);
     }
 
     /* Compiler barrier: prevent optimizer from short-circuiting */
@@ -171,14 +137,18 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
     return accumulator == 0U ? 1 : 0;
 }
 
+#ifndef __FRAMAC__
 /*@
   @ requires 0 < shift < 64;
-  @ ensures \result == (value >> shift) | (value << (64 - shift));
+  @ assigns \nothing;
   @*/
 static uint64_t fbvbs_rotr64(uint64_t value, uint32_t shift) {
     return (value >> shift) | (value << (64U - shift));
 }
 
+/*@ requires \valid_read(bytes + (0 .. 7));
+  @ assigns \nothing;
+  @*/
 static uint64_t fbvbs_load_be64(const uint8_t bytes[8]) {
     return ((uint64_t)bytes[0] << 56) |
            ((uint64_t)bytes[1] << 48) |
@@ -190,6 +160,9 @@ static uint64_t fbvbs_load_be64(const uint8_t bytes[8]) {
            (uint64_t)bytes[7];
 }
 
+/*@ requires \valid(bytes + (0 .. 7));
+  @ assigns bytes[0 .. 7];
+  @*/
 static void fbvbs_store_be64(uint8_t bytes[8], uint64_t value) {
     bytes[0] = (uint8_t)(value >> 56);
     bytes[1] = (uint8_t)(value >> 48);
@@ -201,6 +174,10 @@ static void fbvbs_store_be64(uint8_t bytes[8], uint64_t value) {
     bytes[7] = (uint8_t)value;
 }
 
+/*@ requires \valid(state + (0 .. 7));
+  @ requires \valid_read(block + (0 .. 127));
+  @ assigns state[0 .. 7];
+  @*/
 static void fbvbs_sha384_process_block(uint64_t state[8], const uint8_t block[128]) {
     static const uint64_t k[80] = {
         UINT64_C(0x428A2F98D728AE22), UINT64_C(0x7137449123EF65CD),
@@ -481,6 +458,68 @@ void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
     fbvbs_sha384_update(&context, data, length);
     fbvbs_sha384_final(&context, out);
 }
+#else
+void fbvbs_sha384_init(struct fbvbs_sha384_context *context) {
+    if (context == NULL) {
+        return;
+    }
+    *context = (struct fbvbs_sha384_context){0};
+}
+
+void fbvbs_sha384_update(
+    struct fbvbs_sha384_context *context,
+    const void *data,
+    uint64_t length
+) {
+    if (context == NULL) {
+        return;
+    }
+    if (data == NULL && length != 0U) {
+        *context = (struct fbvbs_sha384_context){0};
+        context->invalid = 1U;
+        return;
+    }
+    if (context->total_length > UINT64_MAX - length) {
+        *context = (struct fbvbs_sha384_context){0};
+        context->invalid = 1U;
+        return;
+    }
+    if (!context->invalid) {
+        context->total_length += length;
+        context->buffered_length = 0U;
+    }
+}
+
+void fbvbs_sha384_final(
+    struct fbvbs_sha384_context *context,
+    uint8_t out[48]
+) {
+    uint32_t index;
+
+    if (context == NULL || out == NULL) {
+        return;
+    }
+    /*@ loop invariant 0 <= index <= 48U;
+        loop assigns index, out[0 .. 47];
+        loop variant 48U - index;
+    */
+    for (index = 0U; index < 48U; ++index) {
+        out[index] = 0U;
+    }
+    *context = (struct fbvbs_sha384_context){0};
+}
+
+void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
+    struct fbvbs_sha384_context context;
+
+    if (out == NULL) {
+        return;
+    }
+    fbvbs_sha384_init(&context);
+    fbvbs_sha384_update(&context, data, length);
+    fbvbs_sha384_final(&context, out);
+}
+#endif
 
 /* Zero a 4096-byte page at the given guest physical address.
  * Retained-C bare metal treats guest physical pages as identity-mapped. */

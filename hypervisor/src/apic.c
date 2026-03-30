@@ -236,7 +236,7 @@ static int apic_handle_eoi(struct fbvbs_apic_state *apic) {
     /* Find highest-priority in-service interrupt */
     /*@ loop invariant 0 <= word <= 8;
         loop assigns word, bit, highest_isr;
-        loop variant 8 - word;
+        loop variant word;
     */
     for (word = 8U; word > 0U; --word) {
         uint32_t idx = word - 1U;
@@ -244,7 +244,7 @@ static int apic_handle_eoi(struct fbvbs_apic_state *apic) {
             /* Find highest set bit */
             /*@ loop invariant 0 <= bit <= 32;
                 loop assigns bit, highest_isr;
-                loop variant 32 - bit;
+                loop variant bit;
             */
             for (bit = 32U; bit > 0U; --bit) {
                 if ((apic->isr[idx] >> (bit - 1U)) & 1U) {

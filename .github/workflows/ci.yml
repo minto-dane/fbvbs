@@ -74,7 +74,7 @@ jobs:
         run: make -C hypervisor cppcheck CC=gcc-13
 
   unit-tests:
-    name: Unit tests (3 suites)
+    name: Unit tests (8 suites)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -111,6 +111,13 @@ jobs:
 
       - name: Run fuzz smoke corpus
         run: make -C hypervisor fuzz-smoke CC=gcc-13
+
+      - name: Run fuzz campaign (60s per harness)
+        run: make -C hypervisor fuzz-campaign CC=gcc-13
+
+      - name: Triage any crashes
+        if: failure()
+        run: make -C hypervisor fuzz-triage CC=gcc-13
 
       - name: Upload fuzz binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -248,9 +255,8 @@ jobs:
   frama-c-wp:
     name: Frama-C WP formal proof
     runs-on: ubuntu-24.04
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/hypervisor-v')
-    continue-on-error: true
-    timeout-minutes: 60
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/hypervisor-v') || github.event_name == 'pull_request'
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -270,8 +276,45 @@ jobs:
           mkdir -p hypervisor/build
           make -C hypervisor proof 2>&1 | tee hypervisor/build/frama-c-wp.log
 
+      - name: Run per-file WP shards
+        run: |
+          eval $(opam env)
+          make -C hypervisor proof-shards PROOF_SHARD_TIMEOUT=600 2>&1 | tee hypervisor/build/frama-c-shards.log
+
       - name: Upload WP log
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: frama-c-wp-log
-          path: hypervisor/build/frama-c-wp.log
+          path: |
+            hypervisor/build/frama-c-wp.log
+            hypervisor/build/frama-c-shards.log
+            hypervisor/build/proof-shards/
+            hypervisor/build/proof-shards-summary.txt
+
+  release-gate:
+    name: Release gate (all checks)
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - static-analysis
+      - unit-tests
+      - fuzz-build
+      - coverage
+      - reproducible-build
+      - baremetal-smoke
+      - traceability
+    timeout-minutes: 5
+    steps:
+      - name: Verify all required gates passed
+        run: |
+          echo "Checking required gate results..."
+          results='${{ toJSON(needs) }}'
+          echo "$results" | python3 -c "
+          import json, sys
+          needs = json.load(sys.stdin)
+          failed = [k for k, v in needs.items() if v['result'] != 'success']
+          if failed:
+              print(f'FAIL: Required gates failed: {failed}')
+              sys.exit(1)
+          print(f'PASS: All {len(needs)} required gates succeeded.')
+          "

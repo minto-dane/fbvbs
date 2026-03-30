@@ -2054,6 +2054,10 @@ static void fbvbs_partition_sanitize_memory(
      *    explicitly zero each register file via MOV/VZEROALL. */
 }
 
+/*@ requires state == \null || \valid(state);
+    requires partition == \null || \valid(partition);
+    assigns *state, *partition;
+*/
 static int fbvbs_partition_destroy_common(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition
@@ -2066,6 +2070,9 @@ static int fbvbs_partition_destroy_common(
     uint32_t index;
 
 #ifdef __FRAMAC__
+    /* SYNC: field list must match struct fbvbs_partition in fbvbs_hypervisor.h.
+     * If fields are added/removed, update both this stub and the production
+     * compound-literal zeroing below. */
     if (state == NULL || partition == NULL) {
         return INVALID_PARAMETER;
     }
@@ -2074,14 +2081,34 @@ static int fbvbs_partition_destroy_common(
     kind = partition->kind;
     service_kind = partition->service_kind;
     vcpu_count = partition->vcpu_count;
-    *partition = (struct fbvbs_partition){0};
+    partition->occupied = false;
+    partition->tombstone = true;
     partition->partition_id = partition_id;
     partition->kind = kind;
     partition->service_kind = service_kind;
     partition->state = FBVBS_PARTITION_STATE_DESTROYED;
-    partition->measurement_epoch = measurement_epoch;
     partition->vcpu_count = vcpu_count;
-    partition->tombstone = true;
+    partition->vm_flags = 0U;
+    partition->reserved0 = 0U;
+    partition->memory_limit_bytes = 0ULL;
+    partition->capability_mask = 0ULL;
+    partition->image_object_id = 0ULL;
+    partition->manifest_object_id = 0ULL;
+    partition->measurement_epoch = measurement_epoch;
+    partition->measurement_digest_id = 0ULL;
+    partition->mapped_bytes = 0ULL;
+    partition->bootstrap_bytes = 0ULL;
+    partition->entry_ip = 0ULL;
+    partition->initial_sp = 0ULL;
+    partition->last_fault_code = 0U;
+    partition->last_fault_source_component = 0U;
+    partition->last_fault_detail0 = 0ULL;
+    partition->last_fault_detail1 = 0ULL;
+    partition->assigned_device_count = 0U;
+    partition->reserved1 = 0U;
+    partition->iommu_domain_id = 0ULL;
+    partition->consecutive_timer_exits = 0U;
+    partition->watchdog_faults_total = 0U;
     return OK;
 #endif
 

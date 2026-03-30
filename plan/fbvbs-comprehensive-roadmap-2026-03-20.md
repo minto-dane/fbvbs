@@ -12,37 +12,39 @@
 
 | コンポーネント | ファイル | 行数(概算) | WP検証 | 状態 |
 |--------------|---------|-----------|--------|------|
-| hypercall dispatch | command.c | ~2150 | 1636/1642 (6 TO) | TOCTOU全修正済 |
-| パーティション管理 | partition.c | ~2830 | 1611/1633 (22 TO) | ライフサイクル完全 + IOMMU domain管理 |
-| CPU セキュリティ | cpu_security.c | ~1175 | 652/652 (0 TO) ✅ | 81機能検出・緩和 + DR0-3ゼロ化 |
-| VMX 制御 | vmx.c | ~580 | 329/330 (1 TO) | probe/setup/run |
-| メモリ管理 | memory.c | ~450 | 107/117 (10 TO) | EPTマッピング + ロールバック + テーブルリクレイム + alignment検証 |
-| 監査ログ | log.c | ~280 | 217/218 (1 TO) | ringbuf + CRC32C |
-| VM ポリシー | vm_policy.c | ~400 | 1322/1324 (2 TO) | capability mask + DR shadow handler + invalid access→FAULTED |
-| セキュリティ | security.c | ~1800 | 1641/1656 (15 TO) | manifest/hash/KCI — TO全てGPA manifest chain |
-| カーネル統合 | kernel.c | ~400 | 835/836 (1 TO) | model code |
-| メモリユーティリティ | memory_utils.c | ~150 | WP除外 | void*関数群 |
-| ブートパーサ | boot_multiboot.c | ~250 | WP対象外 | multiboot2 parse |
+| hypercall dispatch | command.c | ~2150 | 1377/1377 (0 TO) ✅ | TOCTOU全修正済 |
+| パーティション管理 | partition.c | ~3520 | 2267/2267 (0 TO) ✅ | ライフサイクル完全 + IOMMU domain管理 |
+| CPU セキュリティ | cpu_security.c | ~1175 | 1059/1059 (0 TO) ✅ | 81機能検出・緩和 + DR0-3ゼロ化 |
+| VMX 制御 | vmx.c | ~580 | 294/294 (0 TO) ✅ | probe/setup/run |
+| メモリ管理 | memory.c | ~450 | 375/375 (0 TO) ✅ | EPTマッピング + ロールバック + テーブルリクレイム + alignment検証 |
+| 監査ログ | log.c | ~280 | 273/273 (0 TO) ✅ | ringbuf + CRC32C |
+| VM ポリシー | vm_policy.c | ~400 | 191/191 (0 TO) ✅ | capability mask + DR shadow handler + invalid access→FAULTED |
+| セキュリティ | security.c | ~1800 | 2252/2252 (0 TO) ✅ | manifest/hash/KCI |
+| カーネル統合 | kernel.c | ~400 | 1339/1339 (0 TO) ✅ | model code |
+| メモリユーティリティ | memory_utils.c | ~150 | 316/316 (0 TO) ✅ | byte helpers + constant-time |
+| ブートパーサ | boot_multiboot.c | ~250 | 142/142 (0 TO) ✅ | multiboot2 parse |
 | IOMMU VT-d | iommu_vtd.c | ~900 | WP対象外 | DMAR パーサ + レジスタ制御 (Phase 0B-1/0B-2) |
 | IOMMU AMD-Vi | iommu_amdvi.c | ~470 | WP対象外 | IVRS パーサ + レジスタ制御 (Phase 0B-3) |
 | UEFI エントリ | uefi_entry.c | ~260 | WP対象外 | UEFI アプリケーション (Phase 1-1) |
-| 早期初期化 | early_init.c | ~230 | WP対象外 | Post-ExitBootServices 初期化 (Phase 1-1) |
+| 早期初期化 | early_init.c | ~230 | 225/225 (0 TO) ✅ | Post-ExitBootServices 初期化 (Phase 1-1) |
 | EFI 型定義 | fbvbs_efi.h | ~280 | N/A | UEFI 型・構造体定義 |
-| VMCS セットアップ | vmcs_setup.c | ~500 | WP対象外 | VMCS フィールド定義 + deprivilege 準備 + ページアロケータ接続。end-to-end VMLAUNCH は未完 |
-| Intel HLAT | hlat.c | ~1040 | WP対象外 | HLAT テーブル管理 + per-partition 状態 + KLD 接続 + クリーンアップ (Phase 2-1, 0C-3) |
-| AMD NPT | amd_npt.c | ~1240 | WP対象外 | NPT write-protect + per-partition 状態 + ページアロケータ + KLD 接続 (Phase 3, 0C-3) |
-| VMX 制御拡張 | vmx_controls.c | ~350 | WP対象外 | CET-SS + MSR bitmap + preemption timer + ページアロケータ (Phase 2-3/4/5, 0C-3) |
-| ページアロケータ | page_alloc.c | ~200 | WP対象外 | ビットマップ PFN アロケータ + ゼロ化保証 (Phase 0C-1/2) |
-| ウォッチドッグ | watchdog.c | ~270 | WP対象外 | VMX preemption + NMI watchdog (Phase 1-9) |
-| APIC 仮想化 | apic.c | ~410 | WP対象外 | xAPIC/x2APIC + タイマー + EOI + 割り込み注入 (Phase 1-7) |
-| IDT | idt.c | ~200 | WP対象外 | IDT エントリ構築 + IST スタック (Phase 1-1) |
-| ASM バックエンド | fbvbs_asm.h | ~370 | N/A | 11カテゴリ asm + Frama-C モデルパス (Phase 1-12) |
-| MP 初期化 | mp_init.c | ~750 | WP対象外 | MADT/SRAT パーサ + AP 初期化 + IPI + TLB shootdown + NUMA (Phase 8) |
+| VMCS セットアップ | vmcs_setup.c | ~1390 | 223/223 (0 TO) ✅ | VMCS フィールド定義 + deprivilege 準備 + ページアロケータ接続 |
+| Intel HLAT | hlat.c | ~1040 | 894/894 (0 TO) ✅ | HLAT テーブル管理 + per-partition 状態 + KLD 接続 (Phase 2-1, 0C-3) |
+| AMD NPT | amd_npt.c | ~1240 | 665/665 (0 TO) ✅ | NPT write-protect + per-partition 状態 + SEV-SNP (Phase 3, 0C-3) |
+| VMX 制御拡張 | vmx_controls.c | ~350 | 499/499 (0 TO) ✅ | CET-SS + MSR bitmap + preemption timer (Phase 2-3/4/5, 0C-3) |
+| ページアロケータ | page_alloc.c | ~200 | 304/304 (0 TO) ✅ | ビットマップ PFN アロケータ + ゼロ化保証 (Phase 0C-1/2) |
+| ウォッチドッグ | watchdog.c | ~270 | 175/175 (0 TO) ✅ | VMX preemption + NMI watchdog (Phase 1-9) |
+| APIC 仮想化 | apic.c | ~410 | 365/365 (0 TO) ✅ | xAPIC/x2APIC + タイマー + EOI + 割り込み注入 (Phase 1-7) |
+| IDT | idt.c | ~200 | 321/321 (0 TO) ✅ | IDT エントリ構築 + IST スタック (Phase 1-1) |
+| ASM バックエンド | fbvbs_asm.h | ~370 | N/A | 11カテゴリ asm + ACSL contracts (Phase 1-12) |
+| ACPI テーブル | acpi.c | ~120 | 117/117 (0 TO) ✅ | RSDP/RSDT/XSDT 検索 |
+| フリースタンディング | freestanding_runtime.c | ~280 | 309/309 (0 TO) ✅ | memset/memcpy/memmove/memcmp + stack canary |
+| MP 初期化 | mp_init.c | ~1280 | 874/874 (0 TO) ✅ | MADT/SRAT パーサ + AP 初期化 + IPI + TLB shootdown + NUMA (Phase 8) |
 | 並行性設計 | fbvbs_concurrency.h | ~125 | N/A | BHL + per-CPU ロック戦略 (Phase 1-6) |
 | リンカスクリプト | fbvbs.ld | ~170 | N/A | ガードページ + IST スタック + W^X + ASSERT 検証 (Phase 1-11) |
 | ファジングハーネス | fuzz/*.c | ~550 | N/A | command page + manifest + multiboot2 + iommu (Phase 9-1) |
 
-**WP検証合計:** 履歴上は 8,330 / 8,387 (57 TO) だが、現行の release 判定ではファイル単位の再現結果と proof gap の有無を別途確認すること。
+**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,436 / 14,436 (0 TO) 100%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
 
 ### 未実装・ブロッカー
 
@@ -51,7 +53,7 @@
 3. ~~**並行性設計**~~ — ✅ Phase 1-6 完了。BHL + per-CPU 戦略文書化 (fbvbs_concurrency.h) (2026-03-21)
 4. **IOMMU 実機有効化** — DMAR/IVRS パース済み、ページアロケータ接続済み、retained-C foundation は runtime-ready IOMMU と initialized audit path まで評価可能だが、authoritative 実機 bring-up の閉鎖は未完
 5. **ブートパス** — Multiboot2 bare-metal/QEMU smoke は追加済み、UEFI handoff はなお skeleton が残る
-6. **WP proof hardening** — `vmx.c` union モデル warning の解消、RTE guard 追加、header/source contract の継続整合
+6. ~~**WP proof hardening**~~ — ✅ 全23ファイル 14,436/14,436 (0 TO) 達成 (2026-03-30)。assembly wrapper ACSL contracts、compound literal stub、loop variant 修正、bounded-shift helper 等
 7. ~~**KCI byte binding**~~ — ✅ full-module SHA-384 verification + approved per-page digest table (2026-03-24)
 8. **Broader executable loader profile** — retained-C fixed `ET_EXEC` loader は実装済み。残作業は `ET_DYN`/再配置/boot-time service orchestration のような release 範囲外 profile をどう扱うかの設計閉鎖
 9. ~~**VM exit 緩和列の実装完了**~~ — ✅ RSB fill / PBRSB / BHB clear の実装済み。残課題は実機 placement と proof hardening

@@ -83,7 +83,7 @@ static void fbvbs_copy_boot_modules(
     }
 }
 
-#ifndef FBVBS_BAREMETAL_BUILD
+#if !defined(FBVBS_BAREMETAL_BUILD) && !defined(__FRAMAC__)
 /* Hosted/coverage/proof builds do not have a hardware UART path.
  * Keep the symbol available so fail-closed diagnostics in low-level code
  * link cleanly without pretending that a real bare-metal sink exists. */

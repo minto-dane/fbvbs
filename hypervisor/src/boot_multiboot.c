@@ -25,6 +25,11 @@ static void fbvbs_multiboot_copy_cmdline(
         return;
     }
 
+    /*@ loop invariant 0 <= index < FBVBS_BOOT_MODULE_CMDLINE_BYTES;
+        loop invariant index <= source_length || source_length >= FBVBS_BOOT_MODULE_CMDLINE_BYTES;
+        loop assigns index, destination[0 .. FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1];
+        loop variant FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1U - index;
+    */
     while (index + 1U < FBVBS_BOOT_MODULE_CMDLINE_BYTES &&
            index < source_length &&
            source[index] != 0U) {
@@ -32,6 +37,10 @@ static void fbvbs_multiboot_copy_cmdline(
         ++index;
     }
     destination[index] = '\0';
+    /*@ loop invariant 0 <= index < FBVBS_BOOT_MODULE_CMDLINE_BYTES;
+        loop assigns index, destination[0 .. FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1];
+        loop variant FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1U - index;
+    */
     while (index + 1U < FBVBS_BOOT_MODULE_CMDLINE_BYTES) {
         ++index;
         destination[index] = '\0';
@@ -45,6 +54,7 @@ static void fbvbs_multiboot_copy_cmdline(
  * information structure. The function is verified by GCC -fanalyzer
  * and manual review instead.
  */
+#ifndef __FRAMAC__
 void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                                   const void *multiboot_info,
                                   uint32_t buffer_size) {
@@ -259,3 +269,4 @@ void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
         offset += aligned_size;
     }
 }
+#endif

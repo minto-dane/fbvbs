@@ -142,6 +142,11 @@ static void mark_allocated(uint32_t pfn) {
     bitmap_clear(word, bit);
 }
 
+/*@ requires map == \null || \valid_read(map + (0 .. map_count - 1));
+    assigns page_bitmap[0 .. BITMAP_WORDS - 1],
+            total_pages, free_count, alloc_hint, initialized;
+    ensures \result == 0 || \result == -1;
+*/
 int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
                           uint32_t map_count) {
     uint32_t i;
@@ -250,6 +255,9 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
 
 /* Reserve a range of pages (e.g., hypervisor own memory, IOMMU tables).
  * Prevents the allocator from handing out pages in this range. */
+/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count;
+    ensures \result == 0 || \result == -1;
+*/
 int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size) {
     uint64_t end_addr, start_pfn_64, end_pfn_64;
     uint32_t start_pfn, end_pfn, pfn;
@@ -279,8 +287,15 @@ int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size) {
         end_pfn_64 = FBVBS_MAX_PHYS_PAGES;
     }
 
+    if (start_pfn_64 > end_pfn_64) {
+        return 0;
+    }
     start_pfn = (uint32_t)start_pfn_64;
     end_pfn = (uint32_t)end_pfn_64;
+
+    if (start_pfn > end_pfn) {
+        return 0;
+    }
 
     /*@ loop invariant start_pfn <= pfn <= end_pfn;
         loop assigns pfn, page_bitmap[0 .. BITMAP_WORDS - 1], free_count;
@@ -301,6 +316,7 @@ int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size) {
 /* Allocate one physical page frame.
  * Returns physical address (page-aligned), or 0 on failure.
  * The page is zeroed before return (REQ-0203). */
+/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count, alloc_hint; */
 uint64_t fbvbs_page_alloc(void) {
     uint32_t pfn;
     uint32_t scanned = 0;
@@ -368,6 +384,9 @@ uint64_t fbvbs_page_alloc(void) {
 
 /* Free a physical page frame, returning it to the pool.
  * The page is zeroed before free (REQ-0903 — reuse-before-zero). */
+/*@ assigns page_bitmap[0 .. BITMAP_WORDS - 1], free_count, alloc_hint;
+    ensures \result == 0 || \result == -1;
+*/
 int fbvbs_page_free(uint64_t phys_addr) {
     uint32_t pfn;
 

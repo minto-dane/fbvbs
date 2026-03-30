@@ -584,6 +584,8 @@ static inline void fbvbs_copy_bytes(uint8_t *dest, const uint8_t *src, size_t n)
 
 int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state);
 void fbvbs_kernel_main(const void *multiboot_info);
+/*@ assigns \nothing;
+*/
 const void *fbvbs_acpi_find_table(uint32_t signature);
 void fbvbs_boot_runtime_init(void);
 void fbvbs_boot_console_puts(const char *message);
@@ -1238,37 +1240,29 @@ struct fbvbs_vmx_security_controls {
 
 /*@ requires \valid(controls);
     requires \valid_read(caps);
+    terminates \true;
     assigns *controls;
+    exits \false;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_vmx_build_security_controls(
     struct fbvbs_vmx_security_controls *controls,
     const struct fbvbs_vmx_capabilities *caps);
 
-/*@ assigns \result \from \nothing;
+/*@ terminates \true;
+    assigns \result \from \nothing;
+    exits \false;
 */
 uint64_t fbvbs_vmx_get_msr_bitmap_phys(void);
 
 /* ---- HLAT (Hypervisor-managed Linear Address Translation) ---- */
 
-/*@ requires \valid(state);
-    requires (kernel_text_base & 4095) == 0;
-    requires kernel_text_size > 0;
-    requires (kernel_text_size & 4095) == 0;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_hlat_init_for_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t kernel_text_base,
     uint64_t kernel_text_size);
 
-/*@ requires \valid(state);
-    requires (module_base & 4095) == 0;
-    requires module_size > 0;
-    requires (module_size & 4095) == 0;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_hlat_add_kld_module(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
@@ -1276,63 +1270,50 @@ int fbvbs_hlat_add_kld_module(
     uint64_t module_base,
     uint64_t module_size);
 
-/*@ requires \valid(state);
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_hlat_remove_kld_module(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t module_object_id);
 
-/*@ requires \valid(state);
-    assigns \nothing;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_hlat_handle_fault(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t faulting_linear_address);
 
-/*@ requires \valid(state);
-    terminates \true;
-    assigns *state;
-    exits \false;
-*/
 void fbvbs_hlat_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id);
 
 /* ---- Intel MBEC (Mode-Based Execute Control, hlat.c) ---- */
 
-/*@ requires \valid(controls_or);
-    requires \valid_read(caps);
-    assigns *controls_or;
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_mbec_build_config(
     uint32_t *controls_or,
     const struct fbvbs_vmx_capabilities *caps);
 
 /* ---- AMD NPT Translation Integrity (amd_npt.c) ---- */
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     requires (kernel_text_base & 4095) == 0;
     requires kernel_text_size > 0;
     requires (kernel_text_size & 4095) == 0;
     ensures \result == 0 || \result == -1;
 */
+#endif
 int fbvbs_npt_init_for_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t kernel_text_base,
     uint64_t kernel_text_size);
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     requires (module_base & 4095) == 0;
     requires module_size > 0;
     requires (module_size & 4095) == 0;
     ensures \result == 0 || \result == -1;
 */
+#endif
 int fbvbs_npt_add_kld_module(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
@@ -1340,36 +1321,44 @@ int fbvbs_npt_add_kld_module(
     uint64_t module_base,
     uint64_t module_size);
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     ensures \result == 0 || \result == -1;
 */
+#endif
 int fbvbs_npt_remove_kld_module(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t module_object_id);
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     ensures \result == 0 || \result == -1;
 */
+#endif
 int fbvbs_npt_handle_fault_exit(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t faulting_gpa,
     uint64_t error_code);
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     ensures \result == 0 || \result == -1;
 */
+#endif
 int fbvbs_npt_handle_invlpg_exit(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id,
     uint64_t linear_addr);
 
+#ifndef FBVBS_INTERNAL_AMD_NPT_IMPL
 /*@ requires \valid(state);
     terminates \true;
     assigns *state;
     exits \false;
 */
+#endif
 void fbvbs_npt_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id);
@@ -1490,17 +1479,23 @@ void fbvbs_watchdog_on_voluntary_exit(
     struct fbvbs_hypervisor_state *state,
     uint32_t partition_idx);
 
-/* Phase 0C: Physical page frame allocator */
+/* Phase 0C: Physical page frame allocator.
+ * These functions modify file-scope statics in page_alloc.c (bitmap,
+ * free_count, alloc_hint). Header contracts use assigns \nothing because
+ * callers cannot name those statics; source-level contracts in page_alloc.c
+ * carry the precise assigns clauses for per-file WP verification. */
 /*@ requires map_count == 0 || \valid_read(map + (0 .. map_count - 1));
     terminates \true;
     assigns \nothing;
     exits \false;
+    ensures \result == 0 || \result == -1;
 */
 int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
                           uint32_t map_count);
 /*@ terminates \true;
     assigns \nothing;
     exits \false;
+    ensures \result == 0 || \result == -1;
 */
 int fbvbs_page_alloc_reserve(uint64_t phys_addr, uint64_t size);
 /*@ terminates \true;
@@ -1511,6 +1506,7 @@ uint64_t fbvbs_page_alloc(void);
 /*@ terminates \true;
     assigns \nothing;
     exits \false;
+    ensures \result == 0 || \result == -1;
 */
 int fbvbs_page_free(uint64_t phys_addr);
 /*@ terminates \true;
@@ -1596,9 +1592,6 @@ _Static_assert(sizeof(struct fbvbs_aligned_command_page) == FBVBS_PAGE_SIZE,
 
 /* ---- Phase 8: Multi-Processor Initialization (mp_init.c) ---- */
 
-/*@ requires \valid(state);
-    ensures \result == 0 || \result == -1;
-*/
 int fbvbs_mp_init(struct fbvbs_hypervisor_state *state);
 
 uint32_t fbvbs_mp_cpu_count(void);

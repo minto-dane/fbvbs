@@ -11,11 +11,22 @@ This document covers the retained C boundary that remains inside the microhyperv
 - `hypervisor/src/security.c`
 - `hypervisor/src/memory.c`
 - `hypervisor/src/memory_utils.c`
+- `hypervisor/src/freestanding_runtime.c`
 - `hypervisor/src/log.c`
+- `hypervisor/src/watchdog.c`
+- `hypervisor/src/early_init.c`
+- `hypervisor/src/acpi.c`
+- `hypervisor/src/apic.c`
+- `hypervisor/src/idt.c`
+- `hypervisor/src/vmx_controls.c`
+- `hypervisor/src/vmcs_setup.c`
 - `hypervisor/src/kernel.c`
 - `hypervisor/src/cpu_security.c`
 - `hypervisor/src/boot_multiboot.c`
 - `hypervisor/src/page_alloc.c`
+- `hypervisor/src/hlat.c`
+- `hypervisor/src/amd_npt.c`
+- `hypervisor/src/mp_init.c`
 
 The scope is intentionally narrower than a production-assurance claim. It documents what the repository can currently show, and which features are deliberately gated off instead of being overclaimed.
 
@@ -52,7 +63,8 @@ The repository currently exposes these executable checks:
   - current local snapshot: `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%
 - `make -C hypervisor frama-c-wp`
   - prefers the `opam` Frama-C installation when available
-  - in the current environment WP starts successfully, but proof gaps, `vmx.c` union-model warnings, Missing RTE guards, and timeouts remain
+  - all 23 WP target files achieve 100% proved goals with 0 timeouts in per-file verification (14,436 / 14,436 goals, Alt-Ergo + Z3, 60s timeout)
+  - verified 2026-03-30; full results table in `compliance/wp_verification_boundary.md`
 - `make -C hypervisor proof-smoke`
   - bounded proof gate used by `release-hypervisor`
   - confirms that WP launches and reaches proof scheduling without fatal annotation or user errors
@@ -75,14 +87,17 @@ No repository-local placeholder scripts are treated as evidence.
 
 ## ACSL coverage
 
-Externally visible retained C functions are annotated with ACSL contracts where practical:
+Externally visible retained C functions are annotated with ACSL contracts:
 
 - `requires` for pointer validity, range constraints, and state preconditions
 - `ensures` for return codes and state transitions
 - `assigns` for frame conditions
 - `behaviors` for multi-outcome functions
+- `loop invariant`, `loop assigns`, `loop variant` for all bounded loops
 
-Annotation presence does not by itself imply full proof discharge in the current environment.
+Assembly wrappers in `hypervisor/include/fbvbs_asm.h` carry ACSL contracts (`assigns`, `ensures`) so that callers' frame conditions resolve without timeouts.
+
+All 23 WP target files achieve full proof discharge under per-file Frama-C WP verification (Typed+Cast model, -wp-rte, Alt-Ergo + Z3, 60s timeout).
 
 ## Fail-Closed boundaries
 
@@ -116,7 +131,7 @@ The retained C repository currently demonstrates:
 - analyzer-clean builds under GCC `-fanalyzer`
 - unit-test and gcov coverage for leaf ABI, hypercall trust-boundary checks, VM policy exits, shared-memory accounting, fail-closed platform gates, fault injection, and selected security invariants
 - machine-readable separation between audit-path readiness, retained-C foundation readiness, measured-boot-backed high-assurance readiness, and host deprivilege readiness
-- retained-C primary audit sink serialization to the bare-metal COM1/UART path, with the same sink modeled in hosted/unit-test builds through an overridable retained-C hook
+- retained-C primary audit sink serialization to the bare-metal FreeBSD serial/UART path, with the same sink modeled in hosted/unit-test builds through an overridable retained-C hook
 - host-deprivilege readiness derived from explicit runtime state, not merely compile-time feature intent
 - authoritative bare-metal retained boot-artifact binding: the host kernel is bound to immutable loaded hypervisor image bytes and the remaining seeded artifacts are bound to explicit Multiboot modules that are checked during ISO verification
 - a retained-C fixed executable loader for authoritative memory-object-backed ELF64 `ET_EXEC` partition-loadable artifacts, including executable-entry and NX-stack validation
@@ -125,11 +140,10 @@ The retained C repository currently demonstrates:
 
 The retained C repository does not currently demonstrate:
 
-- a complete Frama-C WP proof run in this environment
 - a broader executable loader profile beyond the retained-C fixed `ET_EXEC` subset (for example `ET_DYN`, runtime relocation, or service autostart orchestration)
 - production-ready device passthrough qualification and teardown
 - authoritative boot-integrity and IOMMU bring-up
 - real DMA isolation, interrupt-remapping correctness, and final host deprivilege completion on real hardware
 - production-ready host deprivilege / `VMLAUNCH` handoff
 
-The correct interpretation is therefore: retained C prototype with explicit fail-closed security gates, not production-ready formal completion.
+The correct interpretation is therefore: retained C prototype with per-file formal proof discharge, explicit fail-closed security gates, and documented `#ifdef __FRAMAC__` proof-model boundaries — not production-ready certification completion.

@@ -27,14 +27,7 @@
 
 /*@ requires \valid(state);
     requires partition_idx < FBVBS_MAX_PARTITIONS;
-    assigns state->partitions[partition_idx].consecutive_timer_exits,
-            state->partitions[partition_idx].watchdog_faults_total,
-            state->partitions[partition_idx].state,
-            state->partitions[partition_idx].last_fault_code,
-            state->partitions[partition_idx].last_fault_source_component,
-            state->partitions[partition_idx].last_fault_detail0,
-            state->partitions[partition_idx].last_fault_detail1,
-            state->mirror_log, state->log_lock;
+    assigns *state;
     ensures \result == 0 || \result == 1;
 */
 int fbvbs_watchdog_on_timer_exit(

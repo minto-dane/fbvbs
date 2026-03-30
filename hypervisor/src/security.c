@@ -1879,6 +1879,11 @@ static int fbvbs_kci_verify_page_hash(
 #endif
 }
 
+/*@ requires \valid(state);
+    assigns state->kci_bindings[0 .. FBVBS_MAX_KCI_PAGE_BINDINGS - 1],
+            state->kci_binding_count;
+    ensures \result == 0 || \result == 1;
+*/
 static int fbvbs_kci_record_binding(
     struct fbvbs_hypervisor_state *state,
     uint64_t module_object_id,

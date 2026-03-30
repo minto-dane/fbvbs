@@ -253,6 +253,8 @@ static const struct fbvbs_acpi_sdt_header *fbvbs_find_table_in_root(
     return NULL;
 }
 
+/*@ assigns \nothing;
+*/
 const void *fbvbs_acpi_find_table(uint32_t signature) {
     const struct fbvbs_rsdp_v1 *rsdp;
     const struct fbvbs_rsdp_v2 *rsdp2;
@@ -288,6 +290,8 @@ const void *fbvbs_acpi_find_table(uint32_t signature) {
 
 #else
 
+/*@ assigns \nothing;
+*/
 const void *fbvbs_acpi_find_table(uint32_t signature) {
     (void)signature;
     return NULL;

@@ -132,6 +132,10 @@ static int fbvbs_hlat_is_available(const struct fbvbs_vmx_capabilities *caps)
 
 /*@ requires \valid(config);
     assigns *config;
+    ensures config->active == 0U;
+    ensures config->prefix_size == FBVBS_HLAT_DEFAULT_PREFIX_SIZE;
+    ensures config->hlat_pml4_phys == 0U;
+    ensures config->region_count == 0U;
 */
 static void fbvbs_hlat_config_init(struct fbvbs_hlat_config *config)
 {
@@ -166,6 +170,10 @@ static int fbvbs_hlat_add_region(
     uint64_t module_object_id)
 {
     struct fbvbs_hlat_region *region;
+
+    if (config->region_count > FBVBS_HLAT_MAX_REGIONS) {
+        return -1;
+    }
 
     if (config->region_count >= FBVBS_HLAT_MAX_REGIONS) {
         return -1;
@@ -221,6 +229,10 @@ static int fbvbs_hlat_add_region(
         /* Check existing regions for PML4 consistency */
         {
             uint32_t k;
+            /*@ loop invariant 0 <= k <= config->region_count;
+                loop assigns k;
+                loop variant config->region_count - k;
+            */
             for (k = 0U; k < config->region_count; ++k) {
                 if (config->regions[k].active != 0U) {
                     uint32_t existing_pml4 =
@@ -281,8 +293,7 @@ static int fbvbs_hlat_add_region(
  * ================================================================ */
 
 /*@ requires \valid(config);
-    assigns config->regions[0 .. FBVBS_HLAT_MAX_REGIONS - 1],
-            config->region_count;
+    assigns *config;
     ensures \result == 0 || \result == -1;
 */
 static int fbvbs_hlat_remove_region(
@@ -292,35 +303,66 @@ static int fbvbs_hlat_remove_region(
     uint32_t i;
     int found = 0;
 
+    if (config->region_count > FBVBS_HLAT_MAX_REGIONS) {
+        return -1;
+    }
+
     if (module_object_id == 0U) {
         /* Cannot remove base kernel region */
         return -1;
     }
 
-    /*@ loop invariant 0 <= i <= FBVBS_HLAT_MAX_REGIONS;
+#if defined(__FRAMAC__)
+    /*@ loop invariant 0 <= i <= config->region_count;
+        loop assigns i, found;
+        loop variant config->region_count - i;
+    */
+    for (i = 0U; i < config->region_count; ++i) {
+        if (config->regions[i].active != 0U &&
+            config->regions[i].module_object_id == module_object_id) {
+            found = 1;
+            break;
+        }
+    }
+#else
+    /*@ loop invariant 0 <= i <= config->region_count;
         loop assigns i, found, config->regions[0 .. FBVBS_HLAT_MAX_REGIONS - 1],
                      config->region_count;
-        loop variant FBVBS_HLAT_MAX_REGIONS - i;
+        loop variant config->region_count - i;
     */
-    for (i = 0U; i < FBVBS_HLAT_MAX_REGIONS; ++i) {
+    for (i = 0U; i < config->region_count; ++i) {
         if (config->regions[i].active != 0U &&
             config->regions[i].module_object_id == module_object_id) {
             uint32_t j;
+            uint32_t limit = config->region_count - 1U;
 
             /* Compact the array so region_count stays equal to the
              * number of active entries. */
-            for (j = i; j + 1U < config->region_count; ++j) {
-                config->regions[j] = config->regions[j + 1U];
+            /*@ loop invariant i <= j <= limit;
+                loop assigns j, config->regions[i .. limit];
+                loop variant limit - j;
+            */
+            for (j = i; j < limit; ++j) {
+                config->regions[j].active = config->regions[j + 1U].active;
+                config->regions[j].flags = config->regions[j + 1U].flags;
+                config->regions[j].linear_base = config->regions[j + 1U].linear_base;
+                config->regions[j].size = config->regions[j + 1U].size;
+                config->regions[j].module_object_id =
+                    config->regions[j + 1U].module_object_id;
             }
             if (config->region_count > 0U) {
-                config->regions[config->region_count - 1U] =
-                    (struct fbvbs_hlat_region){0};
+                config->regions[config->region_count - 1U].active = 0U;
+                config->regions[config->region_count - 1U].flags = 0U;
+                config->regions[config->region_count - 1U].linear_base = 0U;
+                config->regions[config->region_count - 1U].size = 0U;
+                config->regions[config->region_count - 1U].module_object_id = 0U;
                 config->region_count -= 1U;
             }
             found = 1;
             break;
         }
     }
+#endif
 
     return found ? 0 : -1;
 }
@@ -369,7 +411,157 @@ struct fbvbs_hlat_partition_state {
 static struct fbvbs_hlat_partition_state hlat_partitions[FBVBS_MAX_PARTITIONS];
 static volatile uint32_t hlat_partition_locks[FBVBS_MAX_PARTITIONS];
 static struct fbvbs_hlat_model_tables hlat_model_tables[FBVBS_MAX_PARTITIONS];
+static const uint8_t g_hlat_cleanup_vmwrite_msg[] = "hlat_cleanup:vmwrite";
+static const uint8_t g_hlat_cleanup_vmread_msg[] = "hlat_cleanup:vmread";
 
+/*@ requires \valid_read(state);
+    requires \valid(part_idx_out);
+    requires \separated(part_idx_out, state);
+    assigns *part_idx_out;
+    ensures \result == 0 || \result == -1;
+    ensures \result == 0 ==> *part_idx_out < FBVBS_MAX_PARTITIONS;
+    ensures \result == -1 ==> *part_idx_out == FBVBS_MAX_PARTITIONS;
+*/
+static int fbvbs_hlat_find_partition_index(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint32_t *part_idx_out)
+{
+    uint32_t part_idx;
+
+    *part_idx_out = FBVBS_MAX_PARTITIONS;
+
+    /*@ loop invariant 0 <= part_idx <= FBVBS_MAX_PARTITIONS;
+        loop invariant \forall integer j; 0 <= j < part_idx ==>
+            !(state->partitions[j].occupied != 0U &&
+              state->partitions[j].partition_id == partition_id);
+        loop assigns part_idx;
+        loop variant FBVBS_MAX_PARTITIONS - part_idx;
+    */
+    for (part_idx = 0U; part_idx < FBVBS_MAX_PARTITIONS; ++part_idx) {
+        if (state->partitions[part_idx].occupied != 0U &&
+            state->partitions[part_idx].partition_id == partition_id) {
+            *part_idx_out = part_idx;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+/*@ requires \valid_read(config);
+    requires \valid(base_out);
+    requires \valid(size_out);
+    requires \separated(base_out, size_out);
+    requires \separated(base_out, config);
+    requires \separated(size_out, config);
+    assigns *base_out, *size_out;
+    ensures \result == 0 || \result == -1;
+*/
+static int fbvbs_hlat_find_module_region_bounds(
+    const struct fbvbs_hlat_config *config,
+    uint64_t module_object_id,
+    uint64_t *base_out,
+    uint64_t *size_out)
+{
+    uint32_t i;
+
+    *base_out = 0U;
+    *size_out = 0U;
+
+    if (config->region_count > FBVBS_HLAT_MAX_REGIONS) {
+        return -1;
+    }
+
+    /*@ loop invariant 0 <= i <= config->region_count;
+        loop invariant \forall integer j; 0 <= j < i ==>
+            !(config->regions[j].active != 0U &&
+              config->regions[j].module_object_id == module_object_id);
+        loop assigns i;
+        loop variant config->region_count - i;
+    */
+    for (i = 0U; i < config->region_count; ++i) {
+        if (config->regions[i].active != 0U &&
+            config->regions[i].module_object_id == module_object_id) {
+            *base_out = config->regions[i].linear_base;
+            *size_out = config->regions[i].size;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+/*@ requires \valid(hps);
+    assigns hps->phys_pml4,
+            hps->phys_pdpt,
+            hps->phys_pd,
+            hps->phys_pt,
+            hps->config.hlat_pml4_phys,
+            hps->config.active;
+    ensures hps->phys_pml4 == 0U;
+    ensures hps->phys_pdpt == 0U;
+    ensures hps->phys_pd == 0U;
+    ensures hps->phys_pt == 0U;
+    ensures hps->config.hlat_pml4_phys == 0U;
+    ensures hps->config.active == 0U;
+*/
+static void fbvbs_hlat_reset_partition_pages(
+    struct fbvbs_hlat_partition_state *hps)
+{
+    if (hps->phys_pml4 != 0U) {
+        (void)fbvbs_page_free(hps->phys_pml4);
+    }
+    if (hps->phys_pdpt != 0U) {
+        (void)fbvbs_page_free(hps->phys_pdpt);
+    }
+    if (hps->phys_pd != 0U) {
+        (void)fbvbs_page_free(hps->phys_pd);
+    }
+    if (hps->phys_pt != 0U) {
+        (void)fbvbs_page_free(hps->phys_pt);
+    }
+
+    hps->phys_pml4 = 0U;
+    hps->phys_pdpt = 0U;
+    hps->phys_pd = 0U;
+    hps->phys_pt = 0U;
+    hps->config.hlat_pml4_phys = 0U;
+    hps->config.active = 0U;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == -1;
+*/
+static int fbvbs_hlat_vmwrite(uint64_t field, uint64_t value)
+{
+#if defined(__FRAMAC__)
+    (void)field;
+    (void)value;
+    return 0;
+#else
+    return fbvbs_asm_vmwrite(field, value);
+#endif
+}
+
+/*@ requires \valid(value);
+    assigns *value;
+    ensures \result == 0 || \result == -1;
+*/
+static int fbvbs_hlat_vmread(uint64_t field, uint64_t *value)
+{
+#if defined(__FRAMAC__)
+    (void)field;
+    *value = 0U;
+    return 0;
+#else
+    return fbvbs_asm_vmread(field, value);
+#endif
+}
+
+/*@ requires part_idx < FBVBS_MAX_PARTITIONS;
+    assigns \nothing;
+*/
 static void fbvbs_hlat_partition_lock(uint32_t part_idx)
 {
 #if defined(__FRAMAC__)
@@ -381,6 +573,9 @@ static void fbvbs_hlat_partition_lock(uint32_t part_idx)
 #endif
 }
 
+/*@ requires part_idx < FBVBS_MAX_PARTITIONS;
+    assigns \nothing;
+*/
 static void fbvbs_hlat_partition_unlock(uint32_t part_idx)
 {
 #if defined(__FRAMAC__)
@@ -390,6 +585,9 @@ static void fbvbs_hlat_partition_unlock(uint32_t part_idx)
 #endif
 }
 
+/*@ requires \valid_read(hps);
+    assigns \nothing;
+*/
 static void fbvbs_hlat_sync_partition_tables(
     const struct fbvbs_hlat_partition_state *hps)
 {
@@ -401,7 +599,8 @@ static void fbvbs_hlat_sync_partition_tables(
     uint32_t i;
 
     if (hps == NULL || hps->phys_pml4 == 0U || hps->phys_pdpt == 0U ||
-        hps->phys_pd == 0U || hps->phys_pt == 0U) {
+        hps->phys_pd == 0U || hps->phys_pt == 0U ||
+        hps->config.region_count > FBVBS_HLAT_MAX_REGIONS) {
         return;
     }
 
@@ -451,6 +650,8 @@ static void fbvbs_hlat_sync_partition_tables(
 #endif
 }
 
+/*@ assigns \nothing;
+*/
 static void fbvbs_hlat_invlpg_range(uint64_t base, uint64_t size)
 {
 #if defined(__x86_64__) && !defined(__FRAMAC__)
@@ -474,21 +675,33 @@ static void fbvbs_hlat_invlpg_range(uint64_t base, uint64_t size)
 }
 
 /* Extract page table indices from a linear address */
+/*@ assigns \result \from addr;
+    ensures \result < HLAT_ENTRIES_PER_TABLE;
+*/
 static uint32_t hlat_pml4_index(uint64_t addr)
 {
     return (uint32_t)((addr >> 39) & 0x1FFU);
 }
 
+/*@ assigns \result \from addr;
+    ensures \result < HLAT_ENTRIES_PER_TABLE;
+*/
 static uint32_t hlat_pdpt_index(uint64_t addr)
 {
     return (uint32_t)((addr >> 30) & 0x1FFU);
 }
 
+/*@ assigns \result \from addr;
+    ensures \result < HLAT_ENTRIES_PER_TABLE;
+*/
 static uint32_t hlat_pd_index(uint64_t addr)
 {
     return (uint32_t)((addr >> 21) & 0x1FFU);
 }
 
+/*@ assigns \result \from addr;
+    ensures \result < HLAT_ENTRIES_PER_TABLE;
+*/
 static uint32_t hlat_pt_index(uint64_t addr)
 {
     return (uint32_t)((addr >> 12) & 0x1FFU);
@@ -496,6 +709,7 @@ static uint32_t hlat_pt_index(uint64_t addr)
 
 /*@ requires \valid(tables);
     requires \valid_read(config);
+    requires \separated(tables, config);
     assigns tables->pml4[0 .. HLAT_MODEL_PML4_ENTRIES - 1],
             tables->pdpt[0 .. HLAT_MODEL_PDPT_ENTRIES - 1],
             tables->pd[0 .. HLAT_MODEL_PD_ENTRIES - 1],
@@ -507,7 +721,10 @@ static int fbvbs_hlat_populate_tables(
     const struct fbvbs_hlat_config *config)
 {
     uint32_t i;
-    uint32_t j;
+
+    if (config->region_count > FBVBS_HLAT_MAX_REGIONS) {
+        return -1;
+    }
 
     /* Zero all tables — everything starts as not-present */
     /*@ loop invariant 0 <= i <= HLAT_MODEL_PML4_ENTRIES;
@@ -541,7 +758,7 @@ static int fbvbs_hlat_populate_tables(
 
     /* Populate entries for each active region */
     /*@ loop invariant 0 <= i <= config->region_count;
-        loop assigns i, j,
+        loop assigns i,
                      tables->pml4[0 .. HLAT_MODEL_PML4_ENTRIES - 1],
                      tables->pdpt[0 .. HLAT_MODEL_PDPT_ENTRIES - 1],
                      tables->pd[0 .. HLAT_MODEL_PD_ENTRIES - 1],
@@ -550,30 +767,30 @@ static int fbvbs_hlat_populate_tables(
     */
     for (i = 0U; i < config->region_count; ++i) {
         const struct fbvbs_hlat_region *region = &config->regions[i];
-        uint64_t addr;
-        uint64_t end_addr;
+        uint64_t page;
+        uint64_t page_count;
 
         if (region->active == 0U) {
             continue;
         }
 
-        addr = region->linear_base;
         /* Re-validate stored region to guard against corruption */
         if (region->linear_base + region->size < region->linear_base) {
             continue;  /* Corrupted region — skip */
         }
-        end_addr = region->linear_base + region->size;
+        page_count = region->size / HLAT_PAGE_SIZE;
 
         /* Walk each page in the region */
-        /*@ loop invariant region->linear_base <= addr;
-            loop assigns j, addr,
+        /*@ loop invariant 0 <= page <= page_count;
+            loop assigns page,
                          tables->pml4[0 .. HLAT_MODEL_PML4_ENTRIES - 1],
                          tables->pdpt[0 .. HLAT_MODEL_PDPT_ENTRIES - 1],
                          tables->pd[0 .. HLAT_MODEL_PD_ENTRIES - 1],
                          tables->pt[0 .. HLAT_MODEL_PT_ENTRIES - 1];
-            loop variant end_addr - addr;
+            loop variant page_count - page;
         */
-        while (addr < end_addr) {
+        for (page = 0U; page < page_count; ++page) {
+            uint64_t addr = region->linear_base + (page * HLAT_PAGE_SIZE);
             uint32_t pml4_idx = hlat_pml4_index(addr);
             uint32_t pdpt_idx = hlat_pdpt_index(addr);
             uint32_t pd_idx   = hlat_pd_index(addr);
@@ -587,11 +804,8 @@ static int fbvbs_hlat_populate_tables(
             /* Mark the 4KB page as present (executable) —
              * note: XD bit is NOT set, so instruction fetch is allowed */
             tables->pt[pt_idx] |= HLAT_PTE_PRESENT;
-
-            addr += HLAT_PAGE_SIZE;
         }
 
-        (void)j;
     }
 
     return 0;
@@ -608,6 +822,7 @@ static int fbvbs_hlat_populate_tables(
 
 /*@ requires \valid_read(tables);
     requires \valid_read(config);
+    requires \separated(tables, config);
     assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
@@ -616,6 +831,10 @@ static int fbvbs_hlat_verify_tables(
     const struct fbvbs_hlat_config *config)
 {
     uint32_t pt_idx;
+
+    if (config->region_count > FBVBS_HLAT_MAX_REGIONS) {
+        return -1;
+    }
 
     /*@ loop invariant 0 <= pt_idx <= HLAT_MODEL_PT_ENTRIES;
         loop assigns pt_idx;
@@ -694,6 +913,7 @@ struct fbvbs_hlat_vmcs_fields {
 
 /*@ requires \valid(fields);
     requires \valid_read(config);
+    requires \separated(fields, config);
     assigns *fields;
     ensures \result == 0 || \result == -1;
 */
@@ -736,6 +956,8 @@ static int fbvbs_hlat_build_vmcs_fields(
     requires (kernel_text_base & (HLAT_PAGE_SIZE - 1)) == 0;
     requires kernel_text_size > 0;
     requires (kernel_text_size & (HLAT_PAGE_SIZE - 1)) == 0;
+    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1],
+            hlat_model_tables[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_hlat_init_for_partition(
@@ -747,29 +969,26 @@ int fbvbs_hlat_init_for_partition(
     struct fbvbs_hlat_model_tables *tables;
     struct fbvbs_hlat_vmcs_fields vmcs_fields;
     struct fbvbs_hlat_partition_state *hps;
-    uint64_t phys_pml4, phys_pdpt, phys_pd, phys_pt;
+    uint64_t phys_pml4 = 0U;
+    uint64_t phys_pdpt = 0U;
+    uint64_t phys_pd = 0U;
+    uint64_t phys_pt = 0U;
     uint32_t part_idx;
-    int found = 0;
 
     /* Verify HLAT hardware support */
     if (!fbvbs_hlat_is_available(&state->vmx_caps)) {
         return -1;
     }
 
-    /* Find partition index by partition_id */
-    for (part_idx = 0; part_idx < FBVBS_MAX_PARTITIONS; ++part_idx) {
-        if (state->partitions[part_idx].occupied &&
-            state->partitions[part_idx].partition_id == partition_id) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found || part_idx >= FBVBS_MAX_PARTITIONS) {
+    if (fbvbs_hlat_find_partition_index(state, partition_id, &part_idx) != 0) {
         return -1;
     }
 
+    /*@ assert part_idx < FBVBS_MAX_PARTITIONS; */
     hps = &hlat_partitions[part_idx];
     tables = &hlat_model_tables[part_idx];
+    /*@ assert \valid(hps); */
+    /*@ assert \valid(tables); */
     fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active != 0U) {
         fbvbs_hlat_partition_unlock(part_idx);
@@ -878,17 +1097,7 @@ int fbvbs_hlat_init_for_partition(
     /* Build VMCS fields */
     hps->config.active = 1;
     if (fbvbs_hlat_build_vmcs_fields(&vmcs_fields, &hps->config) != 0) {
-        /* Free the 4 pages we just allocated */
-        (void)fbvbs_page_free(phys_pml4);
-        (void)fbvbs_page_free(phys_pdpt);
-        (void)fbvbs_page_free(phys_pd);
-        (void)fbvbs_page_free(phys_pt);
-        hps->phys_pml4 = 0U;
-        hps->phys_pdpt = 0U;
-        hps->phys_pd = 0U;
-        hps->phys_pt = 0U;
-        hps->config.hlat_pml4_phys = 0U;
-        hps->config.active = 0U;
+        fbvbs_hlat_reset_partition_pages(hps);
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;
     }
@@ -897,54 +1106,27 @@ int fbvbs_hlat_init_for_partition(
      * PRODUCTION NOTE: These VMWRITE calls require the partition's
      * VMCS to be the active VMCS (via VMPTRLD). The caller must
      * ensure this. */
-    if (fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
-                          vmcs_fields.tertiary_proc_controls) != 0) {
-        (void)fbvbs_page_free(phys_pml4);
-        (void)fbvbs_page_free(phys_pdpt);
-        (void)fbvbs_page_free(phys_pd);
-        (void)fbvbs_page_free(phys_pt);
-        hps->phys_pml4 = 0U;
-        hps->phys_pdpt = 0U;
-        hps->phys_pd = 0U;
-        hps->phys_pt = 0U;
-        hps->config.hlat_pml4_phys = 0U;
-        hps->config.active = 0U;
+    if (fbvbs_hlat_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                           vmcs_fields.tertiary_proc_controls) != 0) {
+        fbvbs_hlat_reset_partition_pages(hps);
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;  /* VMWRITE failed: tertiary proc controls */
     }
-    if (fbvbs_asm_vmwrite(VMCS_HLAT_PREFIX_SIZE,
-                          vmcs_fields.hlat_prefix_size) != 0) {
-        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
-                                vmcs_fields.tertiary_proc_controls &
-                                ~PROC3_HLAT_ENABLE);
-        (void)fbvbs_page_free(phys_pml4);
-        (void)fbvbs_page_free(phys_pdpt);
-        (void)fbvbs_page_free(phys_pd);
-        (void)fbvbs_page_free(phys_pt);
-        hps->phys_pml4 = 0U;
-        hps->phys_pdpt = 0U;
-        hps->phys_pd = 0U;
-        hps->phys_pt = 0U;
-        hps->config.hlat_pml4_phys = 0U;
-        hps->config.active = 0U;
+    if (fbvbs_hlat_vmwrite(VMCS_HLAT_PREFIX_SIZE,
+                           vmcs_fields.hlat_prefix_size) != 0) {
+        (void)fbvbs_hlat_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                                 vmcs_fields.tertiary_proc_controls &
+                                 ~PROC3_HLAT_ENABLE);
+        fbvbs_hlat_reset_partition_pages(hps);
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;  /* VMWRITE failed: HLAT prefix size */
     }
-    if (fbvbs_asm_vmwrite(VMCS_HLAT_POINTER,
-                          vmcs_fields.hlat_pointer) != 0) {
-        (void)fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
-                                vmcs_fields.tertiary_proc_controls &
-                                ~PROC3_HLAT_ENABLE);
-        (void)fbvbs_page_free(phys_pml4);
-        (void)fbvbs_page_free(phys_pdpt);
-        (void)fbvbs_page_free(phys_pd);
-        (void)fbvbs_page_free(phys_pt);
-        hps->phys_pml4 = 0U;
-        hps->phys_pdpt = 0U;
-        hps->phys_pd = 0U;
-        hps->phys_pt = 0U;
-        hps->config.hlat_pml4_phys = 0U;
-        hps->config.active = 0U;
+    if (fbvbs_hlat_vmwrite(VMCS_HLAT_POINTER,
+                           vmcs_fields.hlat_pointer) != 0) {
+        (void)fbvbs_hlat_vmwrite(VMCS_TERTIARY_PROC_CONTROLS,
+                                 vmcs_fields.tertiary_proc_controls &
+                                 ~PROC3_HLAT_ENABLE);
+        fbvbs_hlat_reset_partition_pages(hps);
         fbvbs_hlat_partition_unlock(part_idx);
         return -1;  /* VMWRITE failed: HLAT pointer */
     }
@@ -968,7 +1150,7 @@ int fbvbs_hlat_init_for_partition(
     requires (module_base & (HLAT_PAGE_SIZE - 1)) == 0;
     requires module_size > 0;
     requires (module_size & (HLAT_PAGE_SIZE - 1)) == 0;
-    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_hlat_add_kld_module(
@@ -980,24 +1162,16 @@ int fbvbs_hlat_add_kld_module(
 {
     struct fbvbs_hlat_partition_state *hps;
     uint32_t part_idx;
-    int found = 0;
 
     if (!fbvbs_hlat_is_available(&state->vmx_caps)) {
         return -1;
     }
 
-    /* Find partition by ID */
-    for (part_idx = 0; part_idx < FBVBS_MAX_PARTITIONS; ++part_idx) {
-        if (state->partitions[part_idx].occupied &&
-            state->partitions[part_idx].partition_id == partition_id) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found || part_idx >= FBVBS_MAX_PARTITIONS) {
+    if (fbvbs_hlat_find_partition_index(state, partition_id, &part_idx) != 0) {
         return -1;
     }
 
+    /*@ assert part_idx < FBVBS_MAX_PARTITIONS; */
     hps = &hlat_partitions[part_idx];
     fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active == 0U) {
@@ -1032,7 +1206,7 @@ int fbvbs_hlat_add_kld_module(
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1].config;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_hlat_remove_kld_module(
@@ -1042,7 +1216,6 @@ int fbvbs_hlat_remove_kld_module(
 {
     struct fbvbs_hlat_partition_state *hps;
     uint32_t part_idx;
-    int found = 0;
     uint64_t removed_base = 0U;
     uint64_t removed_size = 0U;
 
@@ -1050,18 +1223,11 @@ int fbvbs_hlat_remove_kld_module(
         return -1;
     }
 
-    /* Find partition by ID */
-    for (part_idx = 0; part_idx < FBVBS_MAX_PARTITIONS; ++part_idx) {
-        if (state->partitions[part_idx].occupied &&
-            state->partitions[part_idx].partition_id == partition_id) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found || part_idx >= FBVBS_MAX_PARTITIONS) {
+    if (fbvbs_hlat_find_partition_index(state, partition_id, &part_idx) != 0) {
         return -1;
     }
 
+    /*@ assert part_idx < FBVBS_MAX_PARTITIONS; */
     hps = &hlat_partitions[part_idx];
     fbvbs_hlat_partition_lock(part_idx);
     if (hps->config.active == 0U) {
@@ -1069,17 +1235,8 @@ int fbvbs_hlat_remove_kld_module(
         return -1;
     }
 
-    {
-        uint32_t i;
-        for (i = 0U; i < hps->config.region_count; ++i) {
-            if (hps->config.regions[i].active != 0U &&
-                hps->config.regions[i].module_object_id == module_object_id) {
-                removed_base = hps->config.regions[i].linear_base;
-                removed_size = hps->config.regions[i].size;
-                break;
-            }
-        }
-    }
+    (void)fbvbs_hlat_find_module_region_bounds(
+        &hps->config, module_object_id, &removed_base, &removed_size);
 
     /* PRODUCTION NOTE: After removing the region, clear the physical
      * HLAT page table entries and issue INVLPG for each page in the
@@ -1110,7 +1267,7 @@ int fbvbs_hlat_remove_kld_module(
  * ================================================================ */
 
 /*@ requires \valid(state);
-    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
+    assigns \nothing;
     ensures \result == 0 || \result == -1;
 */
 int fbvbs_hlat_handle_fault(
@@ -1185,6 +1342,7 @@ struct fbvbs_mbec_config {
 
 /*@ requires \valid(config);
     requires \valid_read(caps);
+    requires \separated(config, caps);
     assigns *config;
 */
 static void fbvbs_mbec_init(
@@ -1272,6 +1430,7 @@ static uint64_t fbvbs_mbec_ept_permissions(
  */
 /*@ requires \valid(controls_or);
     requires \valid_read(caps);
+    requires \separated(controls_or, caps);
     assigns *controls_or;
     ensures \result == 0 || \result == -1;
 */
@@ -1322,25 +1481,34 @@ int fbvbs_mbec_build_config(
  * back to the page allocator (which zeroes them on free).
  * ================================================================ */
 
+/*@ requires \valid(state);
+    requires \separated(
+        state,
+        g_hlat_cleanup_vmwrite_msg + (0 .. sizeof(g_hlat_cleanup_vmwrite_msg) - 1),
+        g_hlat_cleanup_vmread_msg + (0 .. sizeof(g_hlat_cleanup_vmread_msg) - 1));
+    requires \separated(
+        g_hlat_cleanup_vmwrite_msg + (0 .. sizeof(g_hlat_cleanup_vmwrite_msg) - 1),
+        g_hlat_cleanup_vmread_msg + (0 .. sizeof(g_hlat_cleanup_vmread_msg) - 1),
+        &state->mirror_log);
+    requires \separated(
+        g_hlat_cleanup_vmwrite_msg + (0 .. sizeof(g_hlat_cleanup_vmwrite_msg) - 1),
+        g_hlat_cleanup_vmread_msg + (0 .. sizeof(g_hlat_cleanup_vmread_msg) - 1),
+        &state->log_lock);
+    assigns hlat_partitions[0 .. FBVBS_MAX_PARTITIONS - 1],
+            state->mirror_log, state->log_lock;
+*/
 void fbvbs_hlat_cleanup_partition(
     struct fbvbs_hypervisor_state *state,
     uint64_t partition_id)
 {
     struct fbvbs_hlat_partition_state *hps;
     uint32_t part_idx;
-    int found = 0;
 
-    for (part_idx = 0; part_idx < FBVBS_MAX_PARTITIONS; ++part_idx) {
-        if (state->partitions[part_idx].occupied &&
-            state->partitions[part_idx].partition_id == partition_id) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found || part_idx >= FBVBS_MAX_PARTITIONS) {
+    if (fbvbs_hlat_find_partition_index(state, partition_id, &part_idx) != 0) {
         return;
     }
 
+    /*@ assert part_idx < FBVBS_MAX_PARTITIONS; */
     hps = &hlat_partitions[part_idx];
     fbvbs_hlat_partition_lock(part_idx);
 
@@ -1353,19 +1521,19 @@ void fbvbs_hlat_cleanup_partition(
      * to avoid dangling VMCS references to freed pages. */
     {
         uint64_t tertiary = 0;
-        int vmread_rc = fbvbs_asm_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
+        int vmread_rc = fbvbs_hlat_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
         if (vmread_rc == 0) {
             int vmwrite_rc;
             tertiary &= ~PROC3_HLAT_ENABLE;
-            vmwrite_rc = fbvbs_asm_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
+            vmwrite_rc = fbvbs_hlat_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
             if (vmwrite_rc != 0) {
                 (void)fbvbs_log_append(
                     state, 0U,
                     FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
                     (uint16_t)FBVBS_SEVERITY_ERROR,
                     (uint16_t)FBVBS_EVENT_VM_PLATFORM_GATE,
-                    (const uint8_t *)"hlat_cleanup:vmwrite",
-                    19U
+                    g_hlat_cleanup_vmwrite_msg,
+                    (uint32_t)(sizeof(g_hlat_cleanup_vmwrite_msg) - 1U)
                 );
             }
         } else {
@@ -1374,8 +1542,8 @@ void fbvbs_hlat_cleanup_partition(
                 FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
                 (uint16_t)FBVBS_SEVERITY_ERROR,
                 (uint16_t)FBVBS_EVENT_VM_PLATFORM_GATE,
-                (const uint8_t *)"hlat_cleanup:vmread",
-                18U
+                g_hlat_cleanup_vmread_msg,
+                (uint32_t)(sizeof(g_hlat_cleanup_vmread_msg) - 1U)
             );
         }
     }

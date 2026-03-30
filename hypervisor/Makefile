@@ -59,20 +59,31 @@ ALL_SOURCES := $(CORE_SOURCES) \
 # UEFI sources (MS ABI, separate compilation flags)
 UEFI_SOURCES := src/uefi_entry.c
 
-# Frama-C WP sources: excludes memory_utils.c (void* incompatible
-# with Typed+Cast model) and boot_multiboot.c (void* casts for
-# Multiboot2 binary structure parsing)
+# Frama-C WP sources.
 FRAMA_C_WP_SOURCES := \
-    src/cpu_security.c \
-    src/vmx.c \
-    src/memory.c \
-    src/log.c \
-    src/vm_policy.c \
-    src/kernel.c \
-    src/command.c \
-    src/security.c \
+	src/cpu_security.c \
+	src/vmx.c \
+	src/memory.c \
+	src/memory_utils.c \
+	src/freestanding_runtime.c \
+	src/log.c \
+	src/vm_policy.c \
+	src/boot_multiboot.c \
+	src/watchdog.c \
+	src/early_init.c \
+	src/acpi.c \
+	src/apic.c \
+	src/idt.c \
+	src/vmx_controls.c \
+	src/vmcs_setup.c \
+	src/hlat.c \
+	src/kernel.c \
+	src/command.c \
+	src/security.c \
     src/partition.c \
-    src/page_alloc.c
+    src/page_alloc.c \
+    src/amd_npt.c \
+    src/mp_init.c
 
 # ---------- compiler flags ----------
 
@@ -105,7 +116,12 @@ DEPFILES := $(ANALYZER_OBJECTS:.o=.d) \
 TEST_BINS := \
 	$(BUILD_DIR)/fbvbs_leaf_boundary_tests \
 	$(BUILD_DIR)/fbvbs_policy_security_tests \
-	$(BUILD_DIR)/fbvbs_fault_injection_tests
+	$(BUILD_DIR)/fbvbs_fault_injection_tests \
+	$(BUILD_DIR)/fbvbs_vmcs_setup_tests \
+	$(BUILD_DIR)/fbvbs_vmx_controls_tests \
+	$(BUILD_DIR)/fbvbs_early_init_tests \
+	$(BUILD_DIR)/fbvbs_iommu_tests \
+	$(BUILD_DIR)/fbvbs_vmx_handoff_tests
 
 # ---------- Frama-C ----------
 
@@ -121,7 +137,7 @@ FRAMAC_WP_FLAGS := \
     -wp-rte \
     -kernel-warn-key annot-error=abort \
     -cpp-extra-args="-D__FRAMAC__ -Iinclude"
-PROOF_SHARD_TIMEOUT ?= 360
+PROOF_SHARD_TIMEOUT ?= 1200
 QEMU_MATRIX_SCRIPT := tools/qemu_smoke_matrix.py
 
 # ---------- targets ----------
@@ -137,6 +153,11 @@ test: $(TEST_BINS)
 	$(BUILD_DIR)/fbvbs_leaf_boundary_tests
 	$(BUILD_DIR)/fbvbs_policy_security_tests
 	$(BUILD_DIR)/fbvbs_fault_injection_tests
+	$(BUILD_DIR)/fbvbs_vmcs_setup_tests
+	$(BUILD_DIR)/fbvbs_vmx_controls_tests
+	$(BUILD_DIR)/fbvbs_early_init_tests
+	$(BUILD_DIR)/fbvbs_iommu_tests
+	$(BUILD_DIR)/fbvbs_vmx_handoff_tests
 
 proof: frama-c-wp
 
@@ -187,11 +208,12 @@ proof-shards: | $(BUILD_DIR)
 		! grep -q "Missing specification" "$$log" || exit 1; \
 		! grep -q "Missing RTE guards" "$$log" || exit 1; \
 		! grep -q "\\[kernel:asm:clobber\\]" "$$log" || exit 1; \
+		! grep -q "\\[Timeout\\]" "$$log" || { echo "FAIL: $$base has WP timeouts"; exit 1; }; \
 		goals=$$(awk '/Computing \[/{gsub(/.*Computing \[/,""); gsub(/ goals.*/,""); print}' "$$log" | tail -n 1); \
 		if [ -z "$$goals" ]; then goals=0; fi; \
 		printf "%s status=%s goals=%s log=%s\n" "$$base" "$$status" "$$goals" "$$log" >> $(BUILD_DIR)/proof-shards-summary.txt; \
-		if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then \
-			exit $$status; \
+		if [ $$status -ne 0 ]; then \
+			echo "FAIL: $$base exited with status $$status"; exit $$status; \
 		fi; \
 	done
 	cat $(BUILD_DIR)/proof-shards-summary.txt
@@ -233,6 +255,21 @@ $(BUILD_DIR)/fbvbs_policy_security_tests: $(HOST_OBJECTS) tests/test_policy_secu
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
 $(BUILD_DIR)/fbvbs_fault_injection_tests: $(HOST_OBJECTS) tests/test_fault_injection.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_vmcs_setup_tests: $(HOST_OBJECTS) tests/test_vmcs_setup.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_vmx_controls_tests: $(HOST_OBJECTS) tests/test_vmx_controls.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_early_init_tests: $(HOST_OBJECTS) tests/test_early_init.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_iommu_tests: $(HOST_OBJECTS) tests/test_iommu.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_vmx_handoff_tests: $(HOST_OBJECTS) tests/test_vmx_handoff.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
 -include $(DEPFILES)
@@ -409,25 +446,62 @@ $(BUILD_DIR)/cov_fault_injection_tests: $(COV_OBJECTS) tests/test_fault_injectio
 $(BUILD_DIR)/cov_leaf_boundary_tests: $(BUILD_DIR)/cov_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
+$(BUILD_DIR)/cov_vmcs_setup_tests: $(COV_OBJECTS) tests/test_vmcs_setup.c | $(BUILD_DIR)
+	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
+
+$(BUILD_DIR)/cov_vmx_controls_tests: $(COV_OBJECTS) tests/test_vmx_controls.c | $(BUILD_DIR)
+	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
+
+$(BUILD_DIR)/cov_early_init_tests: $(COV_OBJECTS) tests/test_early_init.c | $(BUILD_DIR)
+	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
+
+$(BUILD_DIR)/cov_iommu_tests: $(COV_OBJECTS) tests/test_iommu.c | $(BUILD_DIR)
+	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
+
+$(BUILD_DIR)/cov_vmx_handoff_tests: $(COV_OBJECTS) tests/test_vmx_handoff.c | $(BUILD_DIR)
+	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
+
+COV_TEST_BINS := \
+	$(BUILD_DIR)/cov_leaf_boundary_tests \
+	$(BUILD_DIR)/cov_policy_security_tests \
+	$(BUILD_DIR)/cov_fault_injection_tests \
+	$(BUILD_DIR)/cov_vmcs_setup_tests \
+	$(BUILD_DIR)/cov_vmx_controls_tests \
+	$(BUILD_DIR)/cov_early_init_tests \
+	$(BUILD_DIR)/cov_iommu_tests \
+	$(BUILD_DIR)/cov_vmx_handoff_tests
+
 coverage-clean:
 	rm -f $(BUILD_DIR)/cov_* $(BUILD_DIR)/*.gcda $(BUILD_DIR)/*.gcno $(BUILD_DIR)/*.gcov
 
-coverage: coverage-clean $(BUILD_DIR)/cov_leaf_boundary_tests $(BUILD_DIR)/cov_policy_security_tests $(BUILD_DIR)/cov_fault_injection_tests
+coverage: coverage-clean $(COV_TEST_BINS)
 	$(BUILD_DIR)/cov_leaf_boundary_tests
 	$(BUILD_DIR)/cov_policy_security_tests
 	$(BUILD_DIR)/cov_fault_injection_tests
+	$(BUILD_DIR)/cov_vmcs_setup_tests
+	$(BUILD_DIR)/cov_vmx_controls_tests
+	$(BUILD_DIR)/cov_early_init_tests
+	$(BUILD_DIR)/cov_iommu_tests
+	$(BUILD_DIR)/cov_vmx_handoff_tests
 	@echo "--- Branch coverage summary (security-critical files) ---"
 	@cd $(BUILD_DIR) && for f in cov_partition.gcno cov_security.gcno cov_command.gcno \
-		cov_log.gcno cov_vm_policy.gcno cov_vmx.gcno cov_watchdog.gcno cov_memory.gcno; do \
+		cov_log.gcno cov_vm_policy.gcno cov_vmx.gcno cov_watchdog.gcno cov_memory.gcno \
+		cov_vmcs_setup.gcno cov_vmx_controls.gcno cov_early_init.gcno \
+		cov_iommu_vtd.gcno cov_iommu_amdvi.gcno cov_kernel.gcno; do \
 		[ -f "$$f" ] && gcov -bc "$$f" 2>/dev/null | head -4; \
 	done
-	@cd $(BUILD_DIR) && for f in cov_command.gcno cov_vm_policy.gcno cov_vmx.gcno; do \
+	@echo "--- Regression gate: no 0% line coverage on core modules ---"
+	@cd $(BUILD_DIR) && fail=0; \
+	for f in cov_command.gcno cov_vm_policy.gcno cov_vmx.gcno \
+		cov_vmcs_setup.gcno cov_vmx_controls.gcno cov_kernel.gcno \
+		cov_iommu_vtd.gcno cov_iommu_amdvi.gcno; do \
+		[ -f "$$f" ] || continue; \
 		summary=$$(gcov -bc "$$f" 2>/dev/null | head -4); \
-		echo "$$summary" | grep -q "Lines executed:"; \
-		echo "$$summary" | grep -qv "Lines executed:0.00%"; \
-		echo "$$summary" | grep -q "Branches executed:"; \
-		echo "$$summary" | grep -qv "Branches executed:0.00%"; \
-	done
+		if echo "$$summary" | grep -q "Lines executed:0.00%"; then \
+			echo "FAIL: $$f has 0% line coverage"; fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi
 	@echo "--- Full .gcov files in $(BUILD_DIR)/ ---"
 
 # ---------- reproducible build (Phase 9-3, REQ-1006) ----------
@@ -517,6 +591,15 @@ $(BUILD_DIR)/fuzz_log_decoder: fuzz/fuzz_log_decoder.c src/log.c src/memory_util
 
 $(BUILD_DIR)/fuzz_partition_loader: $(HOST_OBJECTS) fuzz/fuzz_partition_loader.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
+
+# ---------- fuzz campaign (Phase 9-1, REQ-1004) ----------
+# Long-running fuzz campaign with crash triage.
+
+fuzz-campaign: fuzz-build
+	bash tools/fuzz_campaign.sh --duration 60 --output-dir $(BUILD_DIR)/fuzz-campaign
+
+fuzz-triage:
+	bash tools/fuzz_triage.sh --campaign-dir $(BUILD_DIR)/fuzz-campaign
 
 # ---------- CI gate (Phase 9-8, REQ-1000) ----------
 # Runs all verification gates in sequence. Equivalent to the GitHub Actions pipeline.
