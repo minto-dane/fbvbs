@@ -395,6 +395,8 @@ static void fbvbs_vmcs_build_host_config(
      * causes goal explosion. Update stub if struct fbvbs_vmcs_config
      * or function signature changes. Correctness verified via unit tests
      * and QEMU smoke tests. */
+    _Static_assert(sizeof(struct fbvbs_vmcs_config) == 520U,
+                   "struct changed -- update __FRAMAC__ stub");
     config->pin_based_controls = 0U;
     config->vpid = 0U;
     g_next_vpid = 1U;
@@ -679,6 +681,8 @@ static void fbvbs_host_ept_release(struct fbvbs_host_ept_state *ept)
     }
 #ifdef __FRAMAC__
     /* SYNC: field list must match struct fbvbs_host_ept_state. */
+    _Static_assert(sizeof(struct fbvbs_host_ept_state) == 784U,
+                   "struct changed -- update __FRAMAC__ stub");
     {
         uint32_t z;
         ept->root_phys = 0ULL;
@@ -831,6 +835,8 @@ static int fbvbs_build_host_identity_ept(
 
 #ifdef __FRAMAC__
     /* SYNC: field list must match struct fbvbs_host_ept_state. */
+    _Static_assert(sizeof(struct fbvbs_host_ept_state) == 784U,
+                   "struct changed -- update __FRAMAC__ stub");
     {
         uint32_t z;
         g_host_ept_state.root_phys = 0ULL;

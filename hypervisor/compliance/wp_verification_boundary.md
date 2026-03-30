@@ -113,7 +113,7 @@ Reasons include:
 
 All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file verification, 60s timeout, Alt-Ergo + Z3 provers).
 
-**Total: 14,436 goals proved, 0 timeouts.**
+**Total: 14,866 goals proved, 0 timeouts.**
 
 | File | Goals |
 |------|-------|
@@ -121,7 +121,7 @@ All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file v
 | vmx.c | 294/294 |
 | memory.c | 375/375 |
 | memory_utils.c | 316/316 |
-| freestanding_runtime.c | 309/309 |
+| freestanding_runtime.c | 308/308 |
 | log.c | 273/273 |
 | vm_policy.c | 191/191 |
 | boot_multiboot.c | 142/142 |
@@ -135,8 +135,8 @@ All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file v
 | hlat.c | 894/894 |
 | kernel.c | 1339/1339 |
 | command.c | 1377/1377 |
-| security.c | 2252/2252 |
-| partition.c | 2267/2267 |
+| security.c | 2253/2253 |
+| partition.c | 2277/2277 |
 | page_alloc.c | 304/304 |
 | amd_npt.c | 665/665 |
 | mp_init.c | 874/874 |

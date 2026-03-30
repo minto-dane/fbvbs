@@ -25,6 +25,12 @@
 /* Watchdog expiry payload: 8 bytes packed as partition_idx + count */
 #define WATCHDOG_PAYLOAD_SIZE 8U
 
+/* Note: assigns *state is intentionally broad.  This function calls
+ * fbvbs_partition_fault which itself has assigns *state (it modifies
+ * partitions[], log, and other state fields).  Narrowing to specific
+ * fields breaks WP verification.  See fbvbs_watchdog_on_voluntary_exit
+ * for comparison — that function does NOT call partition_fault and
+ * therefore uses a precise field-level assigns clause. */
 /*@ requires \valid(state);
     requires partition_idx < FBVBS_MAX_PARTITIONS;
     assigns *state;

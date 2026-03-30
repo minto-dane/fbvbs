@@ -28,6 +28,9 @@ static void fbvbs_vmx_external_interrupt_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_external_interrupt) == 8U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_EXTERNAL_INTERRUPT;
     response->exit_length = 0U;
@@ -56,6 +59,9 @@ static void fbvbs_vmx_cr_access_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_cr_access) == 16U,
+                   "struct changed -- update __FRAMAC__ stub");
     uint64_t requested = FBVBS_LEAF_EXIT_CR_VALUE(leaf_exit);
     uint32_t cr_num = FBVBS_LEAF_EXIT_CR_NUMBER(leaf_exit);
 
@@ -141,6 +147,9 @@ static void fbvbs_vmx_pio_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_pio) == 16U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_PIO;
     response->exit_length = 0U;
@@ -176,6 +185,9 @@ static void fbvbs_vmx_mmio_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_mmio) == 24U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_MMIO;
     response->exit_length = 0U;
@@ -211,6 +223,9 @@ static void fbvbs_vmx_msr_access_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_msr_access) == 16U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_MSR_ACCESS;
     response->exit_length = 0U;
@@ -236,6 +251,9 @@ static int fbvbs_vmx_unclassified_fault_exit(
     struct fbvbs_vm_run_response *response
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_unclassified_fault) == 24U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)state;
     if (vcpu_id < partition->vcpu_count) {
         partition->vcpus[vcpu_id].state = FBVBS_VCPU_STATE_FAULTED;
@@ -279,6 +297,9 @@ static void fbvbs_vmx_ept_violation_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_ept_violation) == 16U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_EPT_VIOLATION;
     response->exit_length = 0U;
@@ -327,6 +348,9 @@ static void fbvbs_vmx_dr_access_exit(
     const struct fbvbs_vmx_leaf_exit *leaf_exit
 ) {
 #ifdef __FRAMAC__
+    /* SYNC: stub skips overlay union encoding.  Update if struct changes. */
+    _Static_assert(sizeof(struct fbvbs_vm_exit_dr_access) == 16U,
+                   "struct changed -- update __FRAMAC__ stub");
     (void)state;
     (void)leaf_exit;
     response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;

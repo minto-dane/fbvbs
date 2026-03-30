@@ -593,15 +593,20 @@ $(BUILD_DIR)/fuzz_partition_loader: $(HOST_OBJECTS) fuzz/fuzz_partition_loader.c
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
 # ---------- fuzz campaign (Phase 9-1, REQ-1004) ----------
-# Long-running fuzz campaign with crash triage.
+# Fuzz campaign with crash triage.  --duration is in seconds (60s CI smoke).
 
 fuzz-campaign: fuzz-build
 	bash tools/fuzz_campaign.sh --duration 60 --output-dir $(BUILD_DIR)/fuzz-campaign
 
-fuzz-triage:
+fuzz-triage: fuzz-campaign
 	bash tools/fuzz_triage.sh --campaign-dir $(BUILD_DIR)/fuzz-campaign
+
+# ---------- __FRAMAC__ stub sync check ----------
+# Detects drift between __FRAMAC__ stubs and production code.
+framac-sync:
+	python3 tools/check_framac_stubs.py --strict
 
 # ---------- CI gate (Phase 9-8, REQ-1000) ----------
 # Runs all verification gates in sequence. Equivalent to the GitHub Actions pipeline.
-ci: analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom provenance
+ci: analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom provenance framac-sync
 	@echo "CI: All gates passed."

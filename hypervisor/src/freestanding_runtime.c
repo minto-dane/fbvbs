@@ -139,6 +139,10 @@ __attribute__((noreturn, no_stack_protector))
 void __stack_chk_fail(void) {
     fbvbs_boot_console_puts("FATAL: stack protector violation\n");
     fbvbs_boot_halt_forever();
+#ifdef __FRAMAC__
+    /* fbvbs_boot_halt_forever returns under __FRAMAC__; satisfy noreturn. */
+    while (1) {}
+#endif
 }
 
 /*@ behavior null_destination:

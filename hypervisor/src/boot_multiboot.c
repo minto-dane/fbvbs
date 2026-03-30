@@ -47,13 +47,9 @@ static void fbvbs_multiboot_copy_cmdline(
     }
 }
 
-/* Process Multiboot information structure.
- *
- * This function is excluded from Frama-C WP analysis because it
- * necessarily uses void* casts to parse the Multiboot2 binary
- * information structure. The function is verified by GCC -fanalyzer
- * and manual review instead.
- */
+/* SYNC: entire function excluded from WP — void* casts for Multiboot2
+ * parsing.  Verified by gcc -fanalyzer.  Update if signature or
+ * struct fbvbs_boot_module changes. */
 #ifndef __FRAMAC__
 void fbvbs_process_multiboot_info(struct fbvbs_hypervisor_state *state,
                                   const void *multiboot_info,

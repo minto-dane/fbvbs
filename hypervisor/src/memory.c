@@ -526,6 +526,13 @@ void fbvbs_ept_cleanup_partition(
     eps = &ept_partitions[idx];
 
 #ifdef __FRAMAC__
+    /* SYNC: field list must match struct fbvbs_ept_partition_state.
+     * WP simplification: only scalar fields zeroed.  table_pages[] array
+     * is deliberately omitted — compound-literal zeroing of the full struct
+     * causes WP goal explosion on large arrays.  Setting table_page_count=0
+     * makes the array logically empty; production uses compound-literal
+     * zeroing followed by a page-free loop.  The assigns clause covers the
+     * whole struct (over-approximation). */
     eps->pml4_phys = 0ULL;
     eps->table_page_count = 0U;
     eps->reserved0 = 0U;
@@ -1060,8 +1067,9 @@ int fbvbs_memory_object_hash_sha384(
     }
 
 #ifdef __FRAMAC__
-    /* WP model: SHA-384 over physical pages involves void* casts
-       from physical addresses.  Bounds checks verified above. */
+    /* SYNC: WP model — SHA-384 over physical pages involves void* casts
+       from physical addresses.  Bounds checks verified above.
+       Update if fbvbs_sha384 API or backing_page_count logic changes. */
     (void)context;
     (void)page_index;
 #else

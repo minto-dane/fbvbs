@@ -13,13 +13,13 @@
 | コンポーネント | ファイル | 行数(概算) | WP検証 | 状態 |
 |--------------|---------|-----------|--------|------|
 | hypercall dispatch | command.c | ~2150 | 1377/1377 (0 TO) ✅ | TOCTOU全修正済 |
-| パーティション管理 | partition.c | ~3520 | 2267/2267 (0 TO) ✅ | ライフサイクル完全 + IOMMU domain管理 |
+| パーティション管理 | partition.c | ~3520 | 2277/2277 (0 TO) ✅ | ライフサイクル完全 + IOMMU domain管理 |
 | CPU セキュリティ | cpu_security.c | ~1175 | 1059/1059 (0 TO) ✅ | 81機能検出・緩和 + DR0-3ゼロ化 |
 | VMX 制御 | vmx.c | ~580 | 294/294 (0 TO) ✅ | probe/setup/run |
 | メモリ管理 | memory.c | ~450 | 375/375 (0 TO) ✅ | EPTマッピング + ロールバック + テーブルリクレイム + alignment検証 |
 | 監査ログ | log.c | ~280 | 273/273 (0 TO) ✅ | ringbuf + CRC32C |
 | VM ポリシー | vm_policy.c | ~400 | 191/191 (0 TO) ✅ | capability mask + DR shadow handler + invalid access→FAULTED |
-| セキュリティ | security.c | ~1800 | 2252/2252 (0 TO) ✅ | manifest/hash/KCI |
+| セキュリティ | security.c | ~1800 | 2253/2253 (0 TO) ✅ | manifest/hash/KCI |
 | カーネル統合 | kernel.c | ~400 | 1339/1339 (0 TO) ✅ | model code |
 | メモリユーティリティ | memory_utils.c | ~150 | 316/316 (0 TO) ✅ | byte helpers + constant-time |
 | ブートパーサ | boot_multiboot.c | ~250 | 142/142 (0 TO) ✅ | multiboot2 parse |
@@ -38,13 +38,13 @@
 | IDT | idt.c | ~200 | 321/321 (0 TO) ✅ | IDT エントリ構築 + IST スタック (Phase 1-1) |
 | ASM バックエンド | fbvbs_asm.h | ~370 | N/A | 11カテゴリ asm + ACSL contracts (Phase 1-12) |
 | ACPI テーブル | acpi.c | ~120 | 117/117 (0 TO) ✅ | RSDP/RSDT/XSDT 検索 |
-| フリースタンディング | freestanding_runtime.c | ~280 | 309/309 (0 TO) ✅ | memset/memcpy/memmove/memcmp + stack canary |
-| MP 初期化 | mp_init.c | ~1280 | 874/874 (0 TO) ✅ | MADT/SRAT パーサ + AP 初期化 + IPI + TLB shootdown + NUMA (Phase 8) |
+| フリースタンディング | freestanding_runtime.c | ~280 | 308/308 (0 TO) ✅ | memset/memcpy/memmove/memcmp + stack canary |
+| MP 初期化 | mp_init.c | ~1470 | 874/874 (0 TO) ✅ | MADT/SRAT パーサ + AP 初期化 + IPI + TLB shootdown + NUMA (Phase 8) |
 | 並行性設計 | fbvbs_concurrency.h | ~125 | N/A | BHL + per-CPU ロック戦略 (Phase 1-6) |
 | リンカスクリプト | fbvbs.ld | ~170 | N/A | ガードページ + IST スタック + W^X + ASSERT 検証 (Phase 1-11) |
 | ファジングハーネス | fuzz/*.c | ~550 | N/A | command page + manifest + multiboot2 + iommu (Phase 9-1) |
 
-**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,436 / 14,436 (0 TO) 100%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
+**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,866 / 14,866 (0 TO) 100%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
 
 ### 未実装・ブロッカー
 
@@ -603,7 +603,7 @@
 
 ### Phase 8: マルチソケット対応 ✅ (2026-03-22) — モデル実装 + PRODUCTION NOTE
 
-**新規ファイル:** `hypervisor/src/mp_init.c` (~750行)
+**新規ファイル:** `hypervisor/src/mp_init.c` (~1470行)
 
 **目標:** UPI リンク接続のマルチソケット環境での正常動作。
 

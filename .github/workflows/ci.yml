@@ -306,12 +306,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Verify all required gates passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "Checking required gate results..."
-          results='${{ toJSON(needs) }}'
-          echo "$results" | python3 -c "
-          import json, sys
-          needs = json.load(sys.stdin)
+          python3 -c "
+          import json, os, sys
+          needs = json.loads(os.environ['RESULTS'])
           failed = [k for k, v in needs.items() if v['result'] != 'success']
           if failed:
               print(f'FAIL: Required gates failed: {failed}')

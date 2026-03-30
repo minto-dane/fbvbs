@@ -86,6 +86,12 @@ static void test_msr_bitmap_phys_stable(void) {
     phys1 = fbvbs_vmx_get_msr_bitmap_phys();
     phys2 = fbvbs_vmx_get_msr_bitmap_phys();
     assert(phys1 == phys2);
+    /* In hosted test environment the page allocator is not initialised,
+     * so phys1 == phys2 == 0 is expected.  When a real allocator is
+     * available, verify alignment. */
+    if (phys1 != 0U) {
+        assert((phys1 & 0xFFFU) == 0U);
+    }
 }
 
 int main(void) {

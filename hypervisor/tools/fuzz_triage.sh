@@ -8,10 +8,16 @@
 set -euo pipefail
 
 CAMPAIGN_DIR="build/fuzz-campaign"
+REPLAY_TIMEOUT=10
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --campaign-dir) CAMPAIGN_DIR="$2"; shift 2 ;;
+        --campaign-dir)
+            if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+                echo "Error: Missing value for --campaign-dir" >&2
+                exit 1
+            fi
+            CAMPAIGN_DIR="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -31,7 +37,7 @@ UNIQUE=0
 for harness_dir in "$CAMPAIGN_DIR"/fuzz_*; do
     [[ -d "$harness_dir/crashes" ]] || continue
     HARNESS=$(basename "$harness_dir")
-    CRASH_FILES=($(find "$harness_dir/crashes" -type f 2>/dev/null))
+    mapfile -d '' CRASH_FILES < <(find "$harness_dir/crashes" -type f -print0 2>/dev/null)
     COUNT=${#CRASH_FILES[@]}
 
     if [[ $COUNT -eq 0 ]]; then
@@ -57,12 +63,14 @@ for harness_dir in "$CAMPAIGN_DIR"/fuzz_*; do
             BINARY="build/$HARNESS"
             if [[ -x "$BINARY" ]]; then
                 set +e
-                "$BINARY" < "$crash" > /dev/null 2>&1
+                timeout "$REPLAY_TIMEOUT" "$BINARY" < "$crash" > /dev/null 2>&1
                 EXIT_CODE=$?
                 set -e
-                if [[ $EXIT_CODE -gt 128 ]]; then
+                if [[ $EXIT_CODE -eq 124 || $EXIT_CODE -eq 137 ]]; then
+                    echo "    Timed out after ${REPLAY_TIMEOUT}s" | tee -a "$REPORT"
+                elif [[ $EXIT_CODE -gt 128 ]]; then
                     SIG=$((EXIT_CODE - 128))
-                    echo "    Signal: $SIG ($(kill -l $SIG 2>/dev/null || echo 'unknown'))" | tee -a "$REPORT"
+                    echo "    Signal: $SIG ($(kill -l "$SIG" 2>/dev/null || echo 'unknown'))" | tee -a "$REPORT"
                 else
                     echo "    Exit code: $EXIT_CODE" | tee -a "$REPORT"
                 fi

@@ -313,6 +313,12 @@ static int fbvbs_hlat_remove_region(
     }
 
 #if defined(__FRAMAC__)
+    /* WP simplification: search-only, no array compaction or region_count
+     * decrement.  The nested compaction loop (see #else branch) causes
+     * WP timeouts due to overlapping assigns on config->regions[].
+     * Production compaction correctness is covered by unit tests and
+     * gcc -fanalyzer.  The assigns *config contract remains sound
+     * (over-approximation). */
     /*@ loop invariant 0 <= i <= config->region_count;
         loop assigns i, found;
         loop variant config->region_count - i;

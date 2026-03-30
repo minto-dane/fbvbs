@@ -440,6 +440,9 @@ int fbvbs_vmx_build_security_controls(
     cet_config.guest_isst_addr = 0ULL;
 
 #ifdef __FRAMAC__
+    /* SYNC: field list must match struct fbvbs_vmx_security_controls. */
+    _Static_assert(sizeof(struct fbvbs_vmx_security_controls) == 80U,
+                   "struct changed -- update __FRAMAC__ stub");
     controls->pin_controls_or = 0U;
     controls->primary_proc_or = 0U;
     controls->secondary_proc_or = 0U;

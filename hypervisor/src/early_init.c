@@ -123,6 +123,11 @@ static int process_efi_memory_map(const struct fbvbs_efi_boot_info *boot_info)
     uint32_t count;
 
     g_early_mmap_count = 0;
+    if (boot_info->memory_map_addr == 0U ||
+        boot_info->descriptor_size == 0U ||
+        boot_info->mmap_entry_count == 0U) {
+        return -1;
+    }
     map_ptr = (const uint8_t *)(uintptr_t)boot_info->memory_map_addr;
     count = boot_info->mmap_entry_count;
     if (count > FBVBS_MAX_EARLY_MMAP_ENTRIES) {

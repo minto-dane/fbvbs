@@ -68,6 +68,11 @@ for h in "${HARNESSES[@]}"; do
         continue
     fi
 
+    if [[ ! -d "$CORPUS" ]]; then
+        echo "SKIP: $CORPUS not found (prepare corpus or run make fuzz-corpus)" | tee -a "$SUMMARY"
+        continue
+    fi
+
     mkdir -p "$CAMPAIGN_DIR/crashes" "$CAMPAIGN_DIR/queue"
 
     echo "--- Running: $h (${DURATION}s) ---" | tee -a "$SUMMARY"
@@ -86,13 +91,18 @@ for h in "${HARNESSES[@]}"; do
             CRASHES=0
             for seed in "$CORPUS"/*; do
                 [[ -f "$seed" ]] || continue
-                if ! "$BINARY" < "$seed" > /dev/null 2>&1; then
+                set +e
+                "$BINARY" < "$seed" > /dev/null 2>&1
+                EXIT_STATUS=$?
+                set -e
+                # Only count signal-terminated processes as crashes (status > 128)
+                if [[ $EXIT_STATUS -gt 128 ]]; then
                     cp "$seed" "$CAMPAIGN_DIR/crashes/"
                     CRASHES=$((CRASHES + 1))
                 fi
             done
             echo "  Corpus replay: $CRASHES crashes from $(ls "$CORPUS" 2>/dev/null | wc -l) seeds" | tee -a "$SUMMARY"
-            TOTAL_CRASHES=$((TOTAL_CRASHES + CRASHES))
+            # Do not add CRASHES here — the find-based count below avoids double counting
         fi
     elif [[ "$FUZZ_ENGINE" == "libfuzzer" ]]; then
         timeout "${DURATION}s" "$BINARY" \

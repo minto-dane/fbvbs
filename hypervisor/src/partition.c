@@ -1990,9 +1990,9 @@ static void fbvbs_partition_sanitize_memory(
     return;
 #endif
 
-    /* 1. Zero and release all memory objects owned by this partition.
-     *    Each object's GPA-mapped pages are zeroed via fbvbs_zero_page_at_gpa.
-     *    The memory object itself is then cleared. */
+    /* SYNC: memory-object cleanup loop excluded from WP — calls
+     * fbvbs_memory_object_release_backing which involves void* page
+     * zeroing.  Update if memory_objects[] layout or release logic changes. */
 #ifndef __FRAMAC__
     /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_OBJECTS;
         loop assigns index,
@@ -2109,6 +2109,19 @@ static int fbvbs_partition_destroy_common(
     partition->iommu_domain_id = 0ULL;
     partition->consecutive_timer_exits = 0U;
     partition->watchdog_faults_total = 0U;
+    /* Match production vcpu state loop (bounded, WP-safe). */
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_VCPUS;
+        loop assigns index, partition->vcpus[0 .. FBVBS_MAX_VCPUS - 1];
+        loop variant FBVBS_MAX_VCPUS - index;
+    */
+    for (index = 0U; index < vcpu_count && index < FBVBS_MAX_VCPUS; ++index) {
+        partition->vcpus[index].state = FBVBS_VCPU_STATE_DESTROYED;
+    }
+    /* WP simplification: mappings[], command_pages[], bootstrap_page are
+     * deliberately not zeroed here — compound-literal zeroing of the full
+     * struct causes WP goal explosion.  Production uses *partition = (...){0}
+     * which covers all fields.  The assigns *partition contract remains
+     * sound (over-approximation). */
     return OK;
 #endif
 

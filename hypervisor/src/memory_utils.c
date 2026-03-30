@@ -137,6 +137,9 @@ int fbvbs_memory_is_zero(const void *buffer, size_t length) {
     return accumulator == 0U ? 1 : 0;
 }
 
+/* SYNC: SHA-384 implementation excluded from WP — uses complex
+ * rotation/schedule loops that cause WP timeout.  Verified by
+ * gcc -fanalyzer + test vectors.  Update if algorithm changes. */
 #ifndef __FRAMAC__
 /*@
   @ requires 0 < shift < 64;
