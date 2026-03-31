@@ -20,13 +20,20 @@ HARNESS=""
 OUTPUT_DIR="build/fuzz-campaign"
 FUZZ_ENGINE="afl"  # afl or libfuzzer
 
+validate_optarg() {
+    if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+        echo "Error: Missing or invalid value for $1" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --duration)   DURATION="$2"; shift 2 ;;
-        --harness)    HARNESS="$2"; shift 2 ;;
-        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        --engine)     FUZZ_ENGINE="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --duration)   validate_optarg "$1" "${2:-}"; DURATION="$2"; shift 2 ;;
+        --harness)    validate_optarg "$1" "${2:-}"; HARNESS="$2"; shift 2 ;;
+        --output-dir) validate_optarg "$1" "${2:-}"; OUTPUT_DIR="$2"; shift 2 ;;
+        --engine)     validate_optarg "$1" "${2:-}"; FUZZ_ENGINE="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
@@ -92,7 +99,7 @@ for h in "${HARNESSES[@]}"; do
             for seed in "$CORPUS"/*; do
                 [[ -f "$seed" ]] || continue
                 set +e
-                "$BINARY" < "$seed" > /dev/null 2>&1
+                "$BINARY" "$seed" > /dev/null 2>&1
                 EXIT_STATUS=$?
                 set -e
                 # Only count signal-terminated processes as crashes (status > 128)

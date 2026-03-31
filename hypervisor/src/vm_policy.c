@@ -268,7 +268,11 @@ static int fbvbs_vmx_unclassified_fault_exit(
     overlay.e.fault_code = FAULT_CODE_VM_EXIT_UNCLASSIFIED;
     overlay.e.reserved0 = 0U;
     overlay.e.detail0 = vcpu_id;
-    overlay.e.detail1 = partition->vcpus[vcpu_id].rip;
+    if (vcpu_id < partition->vcpu_count) {
+        overlay.e.detail1 = partition->vcpus[vcpu_id].rip;
+    } else {
+        overlay.e.detail1 = 0U;
+    }
     fbvbs_copy_bytes(response->exit_payload, overlay.b, sizeof(overlay.b));
     response->exit_reason = FBVBS_VM_EXIT_REASON_UNCLASSIFIED_FAULT;
     response->exit_length = (uint32_t)sizeof(overlay.e);

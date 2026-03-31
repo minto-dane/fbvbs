@@ -361,7 +361,6 @@ static const struct acpi_ivrs_table_header *fbvbs_acpi_find_ivrs(void)
  * ================================================================ */
 
 /*@ assigns \nothing;
-    ensures \result == 0;
 */
 static uint64_t amdvi_mmio_read64(uint64_t base, uint32_t offset)
 {

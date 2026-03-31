@@ -198,7 +198,7 @@ static void fbvbs_apic_init_state(
     *apic = (struct fbvbs_apic_state){0};
     apic->apic_id = apic_id;
     apic->apic_base = APIC_DEFAULT_BASE | APIC_BASE_ENABLE | APIC_BASE_BSP;
-    apic->mode = 1;  /* Default to xAPIC */
+    apic->mode = (uint32_t)fbvbs_apic_detect_mode();  /* Detect actual APIC mode */
     apic->svr = 0x000000FFU;  /* Spurious vector 0xFF, APIC disabled */
     apic->timer_divide = 0U;  /* Divide by 2 */
 

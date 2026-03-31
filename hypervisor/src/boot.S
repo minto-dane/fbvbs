@@ -827,9 +827,10 @@ vmx_stack_top:
 .type fbvbs_vmlaunch, @function
 fbvbs_vmlaunch:
     /* Issue VERW for MDS/TAA/MMIO/RFDS mitigation — must be
-     * the last data-touching instruction before VM entry */
+     * the last data-touching instruction before VM entry.
+     * Use a valid writable data selector (0x10), not null (0). */
     sub     $2, %rsp
-    movw    $0, (%rsp)
+    movw    $0x10, (%rsp)
     verw    (%rsp)
     add     $2, %rsp
 
@@ -851,9 +852,9 @@ fbvbs_vmlaunch:
 .global fbvbs_vmresume
 .type fbvbs_vmresume, @function
 fbvbs_vmresume:
-    /* VERW mitigation before VM entry */
+    /* VERW mitigation before VM entry — valid writable data selector */
     sub     $2, %rsp
-    movw    $0, (%rsp)
+    movw    $0x10, (%rsp)
     verw    (%rsp)
     add     $2, %rsp
 
@@ -934,9 +935,9 @@ fbvbs_vmexit_handler:
     pop     %r14
     pop     %r15
 
-    /* VERW mitigation before VMRESUME */
+    /* VERW mitigation before VMRESUME — valid writable data selector */
     sub     $2, %rsp
-    movw    $0, (%rsp)
+    movw    $0x10, (%rsp)
     verw    (%rsp)
     add     $2, %rsp
 

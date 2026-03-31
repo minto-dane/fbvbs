@@ -820,13 +820,15 @@ int fbvbs_memory_allocate_object(
     fbvbs_memory_object_reset(object);
     object->allocated = true;
     object->object_flags = request->object_flags;
-    object->memory_object_id = state->next_memory_object_id++;
     object->owner_partition_id = owner_partition_id;
     object->size = request->size;
     if (fbvbs_memory_object_allocate_owned_pages(object) != 0) {
         fbvbs_memory_object_reset(object);
         return RESOURCE_EXHAUSTED;
     }
+    /* Consume the ID only after allocation succeeds, so a failed
+     * attempt does not burn an object ID. */
+    object->memory_object_id = state->next_memory_object_id++;
     response->memory_object_id = object->memory_object_id;
     return OK;
 #endif
@@ -1115,7 +1117,7 @@ int fbvbs_memory_object_hash_page_sha384(
 }
 
 /*@ requires object == \null || \valid(object);
-    assigns \nothing;
+    assigns *object;
 */
 void fbvbs_memory_object_release_backing(struct fbvbs_memory_object *object) {
     if (object == NULL) {

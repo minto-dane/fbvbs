@@ -79,7 +79,12 @@ static int hosted_pfn_from_phys(uint64_t phys_addr, uint32_t *pfn_out) {
  * bitmap: bit=1 means page is FREE (available for allocation).
  * total_pages: number of pages managed.
  * free_count: number of free pages.
- * initialized: set to 1 after init completes. */
+ * initialized: set to 1 after init completes.
+ *
+ * Thread safety: This allocator is single-threaded only.  All callers
+ * execute under the Big Hypervisor Lock (BHL), so no additional
+ * synchronization is required here.  Do not call from contexts where
+ * the BHL is not held. */
 static uint64_t page_bitmap[BITMAP_WORDS];
 static uint32_t total_pages;
 static uint32_t free_count;
@@ -202,6 +207,10 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
          * Direct uint64_t→uint32_t cast before clamping can silently
          * truncate high addresses (e.g. 256TB → PFN 0), aliasing
          * distant physical memory onto the low 4GiB page pool. */
+        /* Overflow check: base + PAGE_SIZE - 1 must not wrap */
+        if (base > UINT64_MAX - (PAGE_SIZE - 1U)) {
+            continue;
+        }
         start_pfn_64 = (base + PAGE_SIZE - 1U) >> PAGE_SHIFT;
         end_pfn_64 = end >> PAGE_SHIFT;
 

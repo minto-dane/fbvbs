@@ -27,7 +27,7 @@ On AMD platforms, FBVBS enforces kernel code integrity through a four-layer comp
 
 1. **NPT Write-Protect** (Phase 3-1): Kernel PTE pages are mapped read-only in the Nested Page Table. Any guest write to a PTE page triggers `#VMEXIT(NPT fault)`.
 
-2. **PTE Update Trap** (Phase 3-2): The NPT fault handler (`fbvbs_npt_handle_fault`, line 554) validates each PTE modification against KCI policy before emulation. PFN substitution on executable PTEs is unconditionally rejected.
+2. **PTE Update Trap** (Phase 3-2): The NPT fault handler (`fbvbs_npt_handle_fault`, line 584) validates each PTE modification against KCI policy before emulation. PFN substitution on executable PTEs is unconditionally rejected.
 
 3. **TLB Synchronisation** (Phase 3-3): INVLPG and INVLPGA are intercepted (`SVM_INTERCEPT_INVLPG`, `SVM_INTERCEPT_INVLPGA`). A monotonic generation counter (`tlb_generation`) and IPI-based cross-core invalidation prevent stale TLB entries from bypassing write-protect.
 
@@ -47,16 +47,16 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 
 **Preconditions:**
 - Partition created on AMD platform with NPT active (`nps->config.active == 1U`)
-- Kernel text region registered via `fbvbs_npt_add_code_region` (line 234)
-- PTE page covering kernel text write-protected via `fbvbs_npt_protect_pte_page` (line 353)
+- Kernel text region registered via `fbvbs_npt_add_code_region` (line 258)
+- PTE page covering kernel text write-protected via `fbvbs_npt_protect_pte_page` (line 383)
 - Existing PTE has Present=1, NX=0 (executable), PFN=original
 
 **Expected Behavior (fail-closed):**
 - Guest writes a new PTE with Present=1, NX=0 (executable), PFN=attacker
 - Write triggers `#VMEXIT(NPT fault)` because the PTE page is write-protected
-- `fbvbs_npt_validate_pte_write` (line 498) detects `old_exec && new_exec && old_pfn != new_pfn`
-- Returns `-1` (SECURITY VIOLATION, line 528)
-- `fbvbs_npt_handle_fault` propagates `-1` (line 574)
+- `fbvbs_npt_validate_pte_write` (line 528) detects `old_exec && new_exec && old_pfn != new_pfn`
+- Returns `-1` (SECURITY VIOLATION, line 558)
+- `fbvbs_npt_handle_fault` propagates `-1` (line 604)
 - Partition is faulted; guest does not resume
 
 **Pass Criteria:**
@@ -65,8 +65,8 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - Partition transitions to FAULTED state
 
 **Implementation Evidence:**
-- `fbvbs_npt_validate_pte_write`, lines 527-528: `if (old_exec && new_exec && old_pfn != new_pfn) { return -1; }`
-- PFN extraction at lines 506-507: `old_pfn = (old_pte & NPT_PTE_ADDR_MASK) >> 12; new_pfn = (new_pte & NPT_PTE_ADDR_MASK) >> 12;`
+- `fbvbs_npt_validate_pte_write`, lines 557-558: `if (old_exec && new_exec && old_pfn != new_pfn) { return -1; }`
+- PFN extraction at lines 536-537: `old_pfn = (old_pte & NPT_PTE_ADDR_MASK) >> 12; new_pfn = (new_pte & NPT_PTE_ADDR_MASK) >> 12;`
 - ACSL contract ensures only three return values: `ensures \result == 0 || \result == -1 || \result == -2;`
 
 ---
@@ -87,17 +87,17 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 *Subcase A -- W+X violation:*
 - Guest writes PTE with Present=1, NX=0, RW=1 (writable + executable)
 - `fbvbs_npt_validate_pte_write` detects `new_exec && (new_pte & NPT_PTE_RW) != 0ULL`
-- Returns `-1` (W+X violation, line 534)
+- Returns `-1` (W+X violation, line 564)
 
 *Subcase B -- Unauthorized execute grant:*
 - Guest writes PTE with Present=1, NX=0 where the old PTE was non-executable or not present
 - `fbvbs_npt_validate_pte_write` detects `!old_exec && new_exec`
-- Returns `-2` (needs KCI approval, line 522)
-- `fbvbs_npt_handle_fault` treats `-2` as rejection (line 581): returns `-1`
+- Returns `-2` (needs KCI approval, line 552)
+- `fbvbs_npt_handle_fault` treats `-2` as rejection (line 609): returns `-1`
 - The outer handler in `vm_policy.c` may check KCI bindings; without a valid KCI binding, the partition is faulted
 
 *Subcase C -- Benign updates allowed:*
-- Hardware-generated accessed/dirty bit updates on existing executable PTEs (same PFN, no W or NX change) return `0` (line 539)
+- Hardware-generated accessed/dirty bit updates on existing executable PTEs (same PFN, no W or NX change) return `0` (line 569)
 
 **Pass Criteria:**
 - W+X PTE modifications always rejected (`return -1`)
@@ -105,10 +105,10 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - Benign accessed/dirty updates on verified PTEs succeed (`return 0`)
 
 **Implementation Evidence:**
-- W+X check, line 533: `if (new_exec && (new_pte & NPT_PTE_RW) != 0ULL) { return -1; }`
-- Execute grant check, lines 521-522: `if (!old_exec && new_exec) { return -2; }`
-- GMET W^X enforcement, line 1132-1134: `if (writable && policy != GMET_POLICY_DATA_ONLY) { return 0ULL; }` (empty permissions = reject)
-- GMET VMCB validation, lines 1199-1210: runtime W^X invariant check on kernel_perm, user_perm, data_perm
+- W+X check, line 563: `if (new_exec && (new_pte & NPT_PTE_RW) != 0ULL) { return -1; }`
+- Execute grant check, lines 551-552: `if (!old_exec && new_exec) { return -2; }`
+- GMET W^X enforcement, line 1190-1191: `if (writable && policy != GMET_POLICY_DATA_ONLY) { return 0ULL; }` (empty permissions = reject)
+- GMET VMCB validation, lines 1257-1267: runtime W^X invariant check on kernel_perm, user_perm, data_perm
 
 ---
 
@@ -128,29 +128,29 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - Guest issues INVLPG on vCPU-0 targeting a code address
 
 **Expected Behavior (fail-closed):**
-- INVLPG triggers `#VMEXIT(SVM_EXIT_INVLPG)`, handled by `fbvbs_npt_handle_invlpg` (line 619)
-- TLB generation counter incremented (saturating at UINT64_MAX, line 633-635)
-- `pending_invlpg` counter incremented for code addresses (line 625-627)
-- IPI issued to all other cores for TLB flush (PRODUCTION NOTE, line 637-640)
+- INVLPG triggers `#VMEXIT(SVM_EXIT_INVLPG)`, handled by `fbvbs_npt_handle_invlpg` (line 647)
+- TLB generation counter incremented (saturating at UINT64_MAX, line 661-663)
+- `pending_invlpg` counter incremented for code addresses (line 652-655)
+- IPI issued to all other cores for TLB flush (PRODUCTION NOTE, line 665-668)
 - Guest does not resume until all cores have acknowledged the flush
-- `pending_invlpg` decremented only after acknowledgement (line 642-644)
+- `pending_invlpg` decremented only after acknowledgement (line 670-672)
 
 **Serialization Invariant:**
 - NPT fault handling is serialized under the BHL (Big Hypervisor Lock)
 - This prevents TOCTOU on the guest PTE value between read and validation
-- Without BHL, a per-partition spinlock would be required (documented at lines 425-431)
+- Without BHL, a per-partition spinlock would be required (documented at lines 452-460)
 
 **Pass Criteria:**
-- `fbvbs_npt_check_tlb_sync` (line 655) returns `-1` (stale) whenever `pending_invlpg > 0`
+- `fbvbs_npt_check_tlb_sync` (line 683) returns `-1` (stale) whenever `pending_invlpg > 0`
 - No guest execution resumes with stale TLB entries for modified code pages
 - TLB generation counter is monotonically increasing (saturates, never wraps)
 
 **Implementation Evidence:**
-- INVLPG intercept: `SVM_INTERCEPT_INVLPG` (line 74), `SVM_INTERCEPT_INVLPGA` (line 75)
-- Generation counter saturation, line 633: `if (config->tlb_generation < UINT64_MAX)`
-- Pending flush tracking, lines 624-628: increment only for code addresses via `fbvbs_npt_is_code_address`
-- Sync check, lines 659-665: returns `-1` if generation stale OR pending invalidations exist
-- VMCB config, lines 700-702: both INVLPG and INVLPGA intercepts set in `intercept_misc`
+- INVLPG intercept: `SVM_INTERCEPT_INVLPG` (line 75), `SVM_INTERCEPT_INVLPGA` (line 76)
+- Generation counter saturation, line 661: `if (config->tlb_generation < UINT64_MAX)`
+- Pending flush tracking, lines 652-656: increment only for code addresses via `fbvbs_npt_is_code_address`
+- Sync check, lines 687-692: returns `-1` if generation stale OR pending invalidations exist
+- VMCB config, lines 732-734: both INVLPG and INVLPGA intercepts set in `intercept_misc`
 
 ---
 
@@ -168,7 +168,7 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 
 **Expected Behavior (fail-closed):**
 - Each write triggers `#VMEXIT(NPT fault)` independently on each vCPU
-- The BHL serializes entry into `fbvbs_npt_handle_fault_exit` (line 990)
+- The BHL serializes entry into `fbvbs_npt_handle_fault_exit` (line 1042)
 - vCPU-0's fault is fully processed (validate, emulate, TLB bump) before vCPU-1's begins
 - No interleaving of old_pte reads and new_pte emulations across vCPUs
 - Each PTE modification is validated against the post-emulation state of the page, not a stale snapshot
@@ -180,10 +180,10 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - A security violation on one vCPU does not prevent correct handling on the other
 
 **Implementation Evidence:**
-- Serialization documented at lines 422-431: BHL guarantees sequential processing
-- `fbvbs_npt_handle_fault_exit` (line 990) is the single entry point for all NPT faults
-- PRODUCTION NOTE at line 589-593: PTE emulation is atomic (write-enable, write, re-protect with no guest execution in between)
-- TLB generation increment at lines 585-587 occurs under BHL, preventing lost updates
+- Serialization documented at lines 452-460: BHL guarantees sequential processing
+- `fbvbs_npt_handle_fault_exit` (line 1042) is the single entry point for all NPT faults
+- PRODUCTION NOTE at line 617-621: PTE emulation is atomic (write-enable, write, re-protect with no guest execution in between)
+- TLB generation increment at lines 613-615 occurs under BHL, preventing lost updates
 
 **Hardware Test Requirement:** This test requires execution on Zen 2+ hardware with SVM and NPT support. The model implementation serializes inherently (single-threaded); the concurrent contention scenario can only be validated on real multi-core hardware or via a concurrency testing framework (e.g., Litmus tests for the SVM memory model).
 
@@ -196,19 +196,19 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 **Description:** Verify that SEV-SNP RMP enforcement, when available, strengthens the NPT compound path but that disabling SEV-SNP does not weaken NPT-only protection below the security baseline. The NPT write-protect mechanism must be independently sufficient.
 
 **Preconditions:**
-- Partition initialized with `fbvbs_npt_init_for_partition` (line 799)
-- SEV-SNP configuration initialized via `fbvbs_sev_snp_config_init` (line 747)
+- Partition initialized with `fbvbs_npt_init_for_partition` (line 832)
+- SEV-SNP configuration initialized via `fbvbs_sev_snp_config_init` (line 778)
 
 **Expected Behavior:**
 
 *Subcase A -- SEV-SNP unavailable:*
-- `fbvbs_sev_snp_config_init` sets `available = 0U`, `active = 0U` (lines 749-751)
-- `fbvbs_sev_snp_validate_code_page` returns `0` (pass-through, line 769)
+- `fbvbs_sev_snp_config_init` sets `available = 0U`, `active = 0U` (lines 780-782)
+- `fbvbs_sev_snp_validate_code_page` returns `0` (pass-through, line 800)
 - All NPT write-protect, PTE validation, and TLB synchronisation mechanisms remain fully operational
 - Security guarantee is identical to the compound NPT path alone
 
 *Subcase B -- SEV-SNP available and active:*
-- RMP entry validation adds an additional check (PRODUCTION NOTE, lines 774-780):
+- RMP entry validation adds an additional check (PRODUCTION NOTE, lines 805-811):
   - Owner ASID matches partition
   - Page type is correct (4K or 2M)
   - VMPL permissions allow supervisor execute
@@ -216,10 +216,10 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - RMP provides defense-in-depth against hypervisor-level bugs in NPT emulation
 
 *Subcase C -- Architectural independence:*
-- `fbvbs_npt_init_for_partition` calls both `fbvbs_npt_config_init` and `fbvbs_sev_snp_config_init` independently (lines 826, 887)
+- `fbvbs_npt_init_for_partition` calls both `fbvbs_npt_config_init` and `fbvbs_sev_snp_config_init` independently (lines 879, 938)
 - The NPT configuration (`nps->config`) is complete and active regardless of SEV-SNP state
 - No NPT code path has a conditional dependency on `snp.active`
-- VMPL levels defined (`FBVBS_VMPL_HYPERVISOR = 0`, `FBVBS_VMPL_GUEST = 1`, lines 729-730) but used only when SEV-SNP is enabled
+- VMPL levels defined (`FBVBS_VMPL_HYPERVISOR = 0`, `FBVBS_VMPL_GUEST = 1`, lines 760-761) but used only when SEV-SNP is enabled
 
 **Pass Criteria:**
 - All tests in sections 3.1-3.4 pass identically with SEV-SNP disabled
@@ -227,9 +227,9 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 - No code path bypasses NPT validation based on SEV-SNP availability
 
 **Implementation Evidence:**
-- SEV-SNP initialization is isolated: `fbvbs_sev_snp_config_init` (line 747) and `fbvbs_sev_snp_validate_code_page` (line 764) are independent of NPT config
-- The SEV-SNP check in `fbvbs_npt_init_for_partition` is a stack-local validation (lines 886-890) that does not modify the NPT config
-- `fbvbs_sev_snp_validate_code_page` returns `0` (no-op) when `active == 0U` (line 769)
+- SEV-SNP initialization is isolated: `fbvbs_sev_snp_config_init` (line 778) and `fbvbs_sev_snp_validate_code_page` (line 795) are independent of NPT config
+- The SEV-SNP check in `fbvbs_npt_init_for_partition` is a stack-local validation (lines 936-941) that does not modify the NPT config
+- `fbvbs_sev_snp_validate_code_page` returns `0` (no-op) when `active == 0U` (line 800)
 - The function is called after NPT setup is complete, not as a gate for NPT activation
 
 ---
@@ -240,7 +240,7 @@ Additionally, **GMET** (Guest Mode Execute Trap, AMD's MBEC equivalent) splits N
 
 | Tool | Scope | Result |
 |------|-------|--------|
-| GCC 13 `-fanalyzer` | All 1,248 lines of `amd_npt.c` | 0 warnings |
+| GCC 13 `-fanalyzer` | All 1,309 lines of `amd_npt.c` | 0 warnings |
 | cppcheck `--enable=warning,performance,portability` | All source files | 0 findings |
 
 ### 4.2 ACSL Contracts (Complete)
@@ -249,21 +249,21 @@ All functions in `amd_npt.c` have ACSL contracts specifying:
 
 | Function | Contract Summary | Lines |
 |----------|-----------------|-------|
-| `fbvbs_npt_config_init` | `\valid(config); assigns *config` | 185-187 |
-| `fbvbs_npt_add_code_region` | Alignment requires, overflow guard, `ensures \result == 0 \|\| \result == -1` | 227-232 |
-| `fbvbs_npt_remove_code_region` | `assigns *config; ensures \result == 0 \|\| \result == -1` | 306-308 |
-| `fbvbs_npt_protect_pte_page` | Alignment requires, level range, `ensures \result == 0 \|\| \result == -1` | 348-351 |
-| `fbvbs_npt_is_protected_page` | `assigns \nothing; ensures \result == 0 \|\| \result == 1` | 433-435 |
-| `fbvbs_npt_is_code_address` | `assigns \nothing; ensures \result == 0 \|\| \result == 1` | 458-460 |
-| `fbvbs_npt_validate_pte_write` | `assigns \nothing; ensures \result == 0 \|\| \result == -1 \|\| \result == -2` | 495-496 |
-| `fbvbs_npt_handle_fault` | `assigns config->tlb_generation; ensures \result == 0 \|\| \result == -1` | 550-552 |
-| `fbvbs_npt_handle_invlpg` | `assigns config->tlb_generation, config->pending_invlpg; ensures \result == 0` | 615-617 |
-| `fbvbs_npt_check_tlb_sync` | `assigns \nothing; ensures \result == 0 \|\| \result == -1` | 651-653 |
-| `fbvbs_npt_build_vmcb_config` | `assigns *vmcb_config` | 685-687 |
-| `fbvbs_sev_snp_config_init` | `assigns *config` | 744-745 |
-| `fbvbs_sev_snp_validate_code_page` | `assigns \nothing; ensures \result == 0 \|\| \result == -1` | 760-762 |
-| `fbvbs_gmet_npt_permissions` | W^X postcondition on return value | 1118-1123 |
-| `fbvbs_gmet_build_config` | `assigns *npt_control_or; ensures \result == 0 \|\| \result == -1` | 1174-1176 |
+| `fbvbs_npt_config_init` | `\valid(config); assigns *config` | 206-207 |
+| `fbvbs_npt_add_code_region` | Alignment requires, overflow guard, `ensures \result == 0 \|\| \result == -1` | 248-256 |
+| `fbvbs_npt_remove_code_region` | `assigns *config; ensures \result == 0 \|\| \result == -1` | 330-333 |
+| `fbvbs_npt_protect_pte_page` | Alignment requires, level range, `ensures \result == 0 \|\| \result == -1` | 373-378 |
+| `fbvbs_npt_is_protected_page` | `assigns \nothing; ensures \result == 0 \|\| \result == 1` | 463-465 |
+| `fbvbs_npt_is_code_address` | `assigns \nothing; ensures \result == 0 \|\| \result == 1` | 488-490 |
+| `fbvbs_npt_validate_pte_write` | `assigns \nothing; ensures \result == 0 \|\| \result == -1 \|\| \result == -2` | 525-526 |
+| `fbvbs_npt_handle_fault` | `assigns config->tlb_generation; ensures \result == 0 \|\| \result == -1` | 580-582 |
+| `fbvbs_npt_handle_invlpg` | `assigns config->tlb_generation, config->pending_invlpg; ensures \result == 0` | 643-645 |
+| `fbvbs_npt_check_tlb_sync` | `assigns \nothing; ensures \result == 0 \|\| \result == -1` | 679-681 |
+| `fbvbs_npt_build_vmcb_config` | `assigns *vmcb_config` | 713-718 |
+| `fbvbs_sev_snp_config_init` | `assigns *config` | 775-776 |
+| `fbvbs_sev_snp_validate_code_page` | `assigns \nothing; ensures \result == 0 \|\| \result == -1` | 791-793 |
+| `fbvbs_gmet_npt_permissions` | W^X postcondition on return value | 1175-1180 |
+| `fbvbs_gmet_build_config` | `assigns *npt_control_or; ensures \result == 0 \|\| \result == -1` | 1231-1233 |
 
 `fbvbs_npt_validate_pte_write` is identified as a WP-compatible pure function (documented in `wp_verification_boundary.md`, line 89). Loop invariants with `loop variant` clauses are provided on all bounded loops.
 
@@ -325,8 +325,8 @@ Both Intel HLAT and AMD NPT compound path achieve the same security objective --
 | Design analysis | **Complete** | `amd_npt.c` implements all four compound path layers |
 | ACSL contracts | **Complete** | 15 functions with requires/ensures/assigns |
 | GCC -fanalyzer | **Complete** | 0 warnings |
-| PFN swap attack (model) | **Complete** | `fbvbs_npt_validate_pte_write` lines 527-528 |
-| PTE tampering detection (model) | **Complete** | `fbvbs_npt_validate_pte_write` lines 521-534 |
+| PFN swap attack (model) | **Complete** | `fbvbs_npt_validate_pte_write` lines 557-558 |
+| PTE tampering detection (model) | **Complete** | `fbvbs_npt_validate_pte_write` lines 551-564 |
 | TLB race prevention (model) | **Complete** | `fbvbs_npt_handle_invlpg` + generation counter |
 | Multi-core serialization (model) | **Complete** | BHL serialization documented, single-threaded model |
 | SEV-SNP complement verification | **Complete** | Architectural independence confirmed |
@@ -347,7 +347,7 @@ Both Intel HLAT and AMD NPT compound path achieve the same security objective --
 - FBVBS Design Specification, Section 21.3 (Translation Integrity)
 - FBVBS Design Specification, Appendix F.1 (AMD Translation Integrity Certification Challenge)
 - FBVBS Design Specification, Appendix G.4 (Translation Integrity Requirements)
-- `hypervisor/src/amd_npt.c` -- NPT compound path implementation (1,248 lines)
+- `hypervisor/src/amd_npt.c` -- NPT compound path implementation (1,309 lines)
 - `hypervisor/src/hlat.c` -- Intel HLAT implementation (1,110 lines)
 - `hypervisor/compliance/wp_verification_boundary.md` -- WP verification boundary classification
 - `hypervisor/compliance/covert_channel_analysis.md` -- TLB and cache channel analysis

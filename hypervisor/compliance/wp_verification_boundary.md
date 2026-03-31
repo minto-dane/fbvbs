@@ -113,7 +113,7 @@ Reasons include:
 
 All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file verification, 60s timeout, Alt-Ergo + Z3 provers).
 
-**Total: 14,866 goals proved, 0 timeouts.**
+**Total: 14,872 goals proved, 0 timeouts.**
 
 | File | Goals |
 |------|-------|
@@ -128,7 +128,7 @@ All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file v
 | watchdog.c | 175/175 |
 | early_init.c | 225/225 |
 | acpi.c | 117/117 |
-| apic.c | 365/365 |
+| apic.c | 371/371 |
 | idt.c | 321/321 |
 | vmx_controls.c | 499/499 |
 | vmcs_setup.c | 223/223 |

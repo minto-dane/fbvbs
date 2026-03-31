@@ -100,6 +100,10 @@ def parse_framac_blocks(filepath):
                 in_else = True
                 j += 1
                 continue
+            elif re.match(r"^\s*#\s*elif\b", ln) and depth == 1:
+                in_else = True
+                j += 1
+                continue
 
             if depth >= 1:
                 if in_else:
@@ -209,9 +213,13 @@ def main():
     # Collect all C source and header files
     files = []
     for d in [SRC_DIR, INCLUDE_DIR]:
-        for fn in sorted(os.listdir(d)):
-            if fn.endswith((".c", ".h")):
-                files.append(os.path.join(d, fn))
+        try:
+            for root, _dirs, fnames in os.walk(d):
+                for fn in sorted(fnames):
+                    if fn.endswith((".c", ".h")):
+                        files.append(os.path.join(root, fn))
+        except FileNotFoundError:
+            pass
 
     all_findings = []
     for fp in files:

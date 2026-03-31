@@ -1,25 +1,47 @@
-# Security Policy
+# セキュリティポリシー
 
-## Scope
+## 概要
 
-Security reports should clearly state whether the issue affects:
+このプロジェクトは個人開発プロジェクトであり、セキュリティ問題はベストエフォートで対応します。SLA（サービスレベル合意）は提供されていません。
 
-- the standalone microhypervisor in `hypervisor/`
-- the wider FBVBS stack described under `plan/`
+## 対象範囲
 
-Please include:
+セキュリティ報告には、以下のいずれに影響するかを明記してください：
 
-- affected files and functions
-- trigger conditions
-- whether the issue is fail-open, fail-closed, integrity-only, availability-only, or confidentiality-impacting
-- whether QEMU, host tests, or proof tooling can reproduce it
+- `hypervisor/` 内のスタンドアロンマイクロハイパーバイザー
+- `plan/` で説明されているFBVBSスタック全体
 
-## Reporting
+以下の情報を含めてください：
 
-For suspected high-severity vulnerabilities, avoid filing a public issue first. Share a private report with the project maintainers through the repository security-contact mechanism or direct maintainer contact.
+- 影響を受けるファイルと関数
+- トリガー条件
+- 問題がフェイルオープン、フェイルクローズ、整合性のみ、可用性のみ、機密性に影響するか
+- QEMU、ホストテスト、または証明ツールで再現可能か
 
-## Expectations
+## サポート対象バージョン
 
-- security fixes must include regression coverage when practical
-- repository documents must be updated if implementation reality changes
-- “proof complete”, “production-ready”, or similar claims must be supported by current reproducible evidence
+セキュリティ修正は `main` ブランチの最新リリースのみが対象です。
+重大な問題（CVSS >= 9.0）が発見されない限り、古いタグへのバックポートは行われません。
+
+## 報告方法
+
+深刻な脆弱性が疑われる場合、**公開のイシューを作成しないでください**。
+以下のプライベートチャネルを使用してください：
+
+1. **GitHub Security Advisories** -- リポジトリのSecurityタブで「Report a vulnerability」をクリックしてください（推奨）。
+
+上記の「対象範囲」に記載されている情報を含めてください。
+
+### 対応について
+
+このプロジェクトは個人開発プロジェクトであるため、以下の点をご理解ください：
+
+- **対応はベストエフォート**です。SLAや保証はありません。
+- 初回対応や修正のタイミングは保証されません。
+- 修正は可能な範囲で実施します。
+
+## 期待事項
+
+- セキュリティ修正には、可能な場合は回帰テストを含めてください
+- 実装の現実が変更された場合は、リポジトリのドキュメントを更新してください
+- 「証明完了」「本番環境対応」または類似の主張は、現在の再現可能な証拠によって裏付けられている必要があります

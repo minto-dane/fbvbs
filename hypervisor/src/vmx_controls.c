@@ -514,6 +514,17 @@ int fbvbs_vmx_build_security_controls(
     {
         uint8_t *bitmap_ptr = fbvbs_page_phys_to_writable_ptr(bitmap_phys);
         if (bitmap_ptr == NULL) {
+            (void)fbvbs_page_free(bitmap_phys);
+            g_msr_bitmap_phys = 0U;
+            if (caps->cet_available != 0U) {
+                uint64_t host_ssp_page = cet_config.host_ssp & ~((uint64_t)FBVBS_PAGE_SIZE - 1ULL);
+                if (host_ssp_page != 0U) {
+                    (void)fbvbs_page_free(host_ssp_page);
+                }
+                if (cet_config.host_isst_addr != 0U) {
+                    (void)fbvbs_page_free(cet_config.host_isst_addr);
+                }
+            }
             return -1;
         }
         fbvbs_copy_bytes(bitmap_ptr, bitmap.data, sizeof(bitmap.data));

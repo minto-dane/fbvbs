@@ -254,8 +254,10 @@ static void serial_putchar(char c)
         if (--timeout == 0U) break;
     } while ((lsr & UART_LSR_THRE) == 0U);
 
-    __asm__ volatile("outb %0, %1"
-                     : : "a"((uint8_t)c), "Nd"((uint16_t)SERIAL_PORT_COM1));
+    if (timeout != 0U) {
+        __asm__ volatile("outb %0, %1"
+                         : : "a"((uint8_t)c), "Nd"((uint16_t)SERIAL_PORT_COM1));
+    }
 #else
     (void)c;
 #endif

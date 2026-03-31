@@ -2188,6 +2188,13 @@ int fbvbs_kci_set_wx(
         }
     }
 
+    /* Reject if upper bits are set to prevent silent truncation.
+     * Validate before recording the binding so we don't persist
+     * a record for a request that will be rejected. */
+    if ((request->permissions & ~(uint32_t)0xFFFFU) != 0U) {
+        return INVALID_PARAMETER;
+    }
+
     if (fbvbs_kci_record_binding(
             state,
             request->module_object_id,
@@ -2198,10 +2205,6 @@ int fbvbs_kci_set_wx(
         return RESOURCE_EXHAUSTED;
     }
 
-    /* Reject if upper bits are set to prevent silent truncation */
-    if ((request->permissions & ~(uint32_t)0xFFFFU) != 0U) {
-        return INVALID_PARAMETER;
-    }
     target_mapping->permissions = (uint16_t)request->permissions;
     return OK;
 }

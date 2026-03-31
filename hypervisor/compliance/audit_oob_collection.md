@@ -49,7 +49,10 @@ AUDIT seq=<u64> ts=<unix-ns> src=<u16> sev=<u16> event=<u16> len=<u16> payload=<
 ```
 
 - `seq`: monotonically increasing record sequence
-- `ts`: collector-side or hypervisor-side Unix timestamp in nanoseconds, depending on deployment framing
+- `ts`: the value of the hypervisor's TSC-normalized monotonic counter at
+  log-append time, expressed in nanoseconds. This is **not** a POSIX
+  timestamp; the counter resets to 0 on each hypervisor boot. External
+  collectors must correlate with wall-clock time using the boot event record
 - `src`: source component identifier
 - `sev`: severity code
 - `event`: event code

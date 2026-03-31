@@ -356,6 +356,7 @@ static uint32_t mp_count_bits_u32(uint32_t bits)
     requires count <= 4U;
     assigns stack_pages[0 .. 3];
 */
+/* Note: \valid (not \valid_read) is correct here — function writes to stack_pages[]. */
 static void mp_free_stack_pages(uint64_t stack_pages[4], uint32_t count)
 {
     uint32_t q;
@@ -584,13 +585,15 @@ static int srat_parse_entries(
 
         switch (entry_type) {
             case SRAT_TYPE_PROCESSOR_AFFINITY:
-                /* Length 16: proximity domain [1], APIC ID [3], flags [4-7] */
+                /* Length 16: proximity domain low byte [2], APIC ID [3],
+                 * flags [4-7], proximity domain high bytes [9-11].
+                 * Per ACPI 6.5 Table 5-58. */
                 if (entry_length >= 16U) {
                     uint32_t prox_domain =
                         (uint32_t)table_data[offset + 2U] |
-                        ((uint32_t)table_data[offset + 12U] << 8) |
-                        ((uint32_t)table_data[offset + 13U] << 16) |
-                        ((uint32_t)table_data[offset + 14U] << 24);
+                        ((uint32_t)table_data[offset + 9U] << 8) |
+                        ((uint32_t)table_data[offset + 10U] << 16) |
+                        ((uint32_t)table_data[offset + 11U] << 24);
                     uint32_t apic_id = (uint32_t)table_data[offset + 3U];
                     uint32_t flags = mp_read_le32(table_data + offset + 4U);
 
@@ -1435,13 +1438,13 @@ uint32_t fbvbs_mp_numa_domain_count(void) {
     return g_mp_state.numa_domain_count;
 }
 
-/*@ requires \valid(apic_id_out);
-    requires \valid(state_out);
-    requires \valid(numa_domain_out);
+/*@ requires apic_id_out == \null || \valid(apic_id_out);
+    requires state_out == \null || \valid(state_out);
+    requires numa_domain_out == \null || \valid(numa_domain_out);
     requires g_mp_state.cpu_count <= FBVBS_MAX_CPUS;
-    requires \separated(apic_id_out, &g_mp_state);
-    requires \separated(state_out, &g_mp_state);
-    requires \separated(numa_domain_out, &g_mp_state);
+    requires apic_id_out != \null ==> \separated(apic_id_out, &g_mp_state);
+    requires state_out != \null ==> \separated(state_out, &g_mp_state);
+    requires numa_domain_out != \null ==> \separated(numa_domain_out, &g_mp_state);
     assigns *apic_id_out, *state_out, *numa_domain_out;
     ensures \result == 0 || \result == -1;
 */

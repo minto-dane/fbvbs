@@ -223,7 +223,14 @@ static void fbvbs_exception_handler(
     payload[22] = 0U;
     payload[23] = 0U;
 
-    /* Log the exception — CRITICAL severity, never rate-limited */
+    /* Log the exception -- CRITICAL severity, never rate-limited.
+     *
+     * NMI/MC safety: fbvbs_log_append internally uses fbvbs_log_spinlock_acquire
+     * which is bounded (10000 iterations) and returns RESOURCE_BUSY on contention
+     * rather than spinning indefinitely.  If an NMI or #MC arrives while the
+     * log_lock is already held, the append will fail with RESOURCE_BUSY and the
+     * log entry is silently dropped.  This is acceptable because the subsequent
+     * halt (cli; hlt) makes the lost record moot. */
     (void)fbvbs_log_append(
         &g_fbvbs_hypervisor, 0U,
         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,

@@ -101,6 +101,9 @@ static void fbvbs_audit_line_append_hex(
     }
 }
 
+/* NOTE: This function has an external side effect via fbvbs_audit_primary_sink_write
+ * (serial/platform I/O).  WP excludes this branch (#ifndef __FRAMAC__), so the
+ * ACSL contract below is not verified and serves only as documentation. */
 /*@ requires \valid_read(record);
     assigns \nothing;
 */
