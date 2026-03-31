@@ -20,6 +20,13 @@ The attacker model assumes a compromised guest VM attempting to exfiltrate
 secrets from the host or another guest, or to infer the presence/behavior
 of other partitions.
 
+**Scope limitation:** The shared-resource enumeration in Section 2 covers
+software-visible shared resources that can be addressed by hypervisor-level
+mitigations. Hardware-level microarchitectural resources not directly
+observable or controllable by software (e.g., undocumented internal
+buffers, power/thermal side channels, electromagnetic emanations) are
+outside the scope of this analysis.
+
 ---
 
 ## 2. Channel Classification

@@ -65,6 +65,11 @@ FBVBS key material isolation guarantees:
    - Already-mounted volumes continue (keys cached in FreeBSD GELI/ZFS layer)
    - Operator must unmount affected volumes to purge cached keys
 
+   Note: destroying the IKS partition does **not** halt the host partition
+   or the hypervisor itself. The host (FreeBSD, partition 0) continues
+   running; only IKS-dependent service operations are affected. A full
+   hypervisor halt occurs only on P0 (unrecoverable microhypervisor fault).
+
 3. **UVS cascade**: UVS depends on IKS for manifest signature verification.
    Without IKS:
    - No updates can be applied (fail-closed)
@@ -148,6 +153,16 @@ When a trusted service partition faults in the full service-enabled design:
    LOAD_MANIFEST               -- re-measure service code
    VM_RUN                      -- restart service
    ```
+
+   **Authorization:** `VM_DESTROY` and `VM_CREATE` are restricted to the
+   host partition (partition ID 0); guest partitions cannot invoke these
+   hypercalls. The operator must have console or management-plane access.
+
+   **Rollback on `LOAD_MANIFEST` failure:** If `LOAD_MANIFEST` fails
+   (measurement mismatch or mapping error), the operator should
+   `VM_DESTROY` the partially-created partition and investigate the image
+   integrity before retrying. Do not proceed to `VM_RUN` with a failed
+   manifest.
 
    **Current boundary note:** The retained-C repository can execute the
    microhypervisor side of the `VM_DESTROY` → `VM_CREATE` →
