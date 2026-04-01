@@ -27,6 +27,7 @@ static int fbvbs_validate_command_page(
     uint32_t cached_input_length
 ) {
     uint16_t cached_flags;
+    uint64_t cached_output_gpa;
     uint16_t reserved_flags;
     uint32_t index;
 
@@ -37,6 +38,7 @@ static int fbvbs_validate_command_page(
     /* TOCTOU hardening: cache flags once from guest-accessible memory.
        All subsequent flag checks use this cached copy. */
     cached_flags = page->flags;
+    cached_output_gpa = page->output_page_gpa;
     reserved_flags = (uint16_t)(cached_flags & (uint16_t)(~FBVBS_CMD_FLAG_SEPARATE_OUTPUT));
     if (page->abi_version != FBVBS_ABI_VERSION) {
         return ABI_VERSION_UNSUPPORTED;
@@ -63,10 +65,10 @@ static int fbvbs_validate_command_page(
     if (reserved_flags != 0U) {
         return INVALID_PARAMETER;
     }
-    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) == 0U && page->output_page_gpa != 0U) {
+    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) == 0U && cached_output_gpa != 0U) {
         return INVALID_PARAMETER;
     }
-    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) != 0U && !fbvbs_is_page_aligned(page->output_page_gpa)) {
+    if ((cached_flags & FBVBS_CMD_FLAG_SEPARATE_OUTPUT) != 0U && !fbvbs_is_page_aligned(cached_output_gpa)) {
         return INVALID_PARAMETER;
     }
     if (page->command_state == EXECUTING) {

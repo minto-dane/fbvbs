@@ -114,10 +114,14 @@ def main() -> int:
     qemu_matrix_ready = text_contains(qemu_matrix, "overall=PASS")
     proof_ready = text_contains(proof_log, "Running WP plugin")
     fuzz_ready = text_contains(fuzz_log, "overall=PASS")
+    repro1_text = normalized_text(repro1) if repro1.is_file() else ""
+    repro2_text = normalized_text(repro2) if repro2.is_file() else ""
     repro_ready = (
         repro1.is_file() and
         repro2.is_file() and
-        normalized_text(repro1) == normalized_text(repro2)
+        len(repro1_text) > 0 and
+        len(repro2_text) > 0 and
+        repro1_text == repro2_text
     )
     docs = {
         rel_name: (repo_root / rel_name).is_file()

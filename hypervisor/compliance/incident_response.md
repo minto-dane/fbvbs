@@ -64,6 +64,7 @@ FBVBS key material isolation guarantees:
    - New mount operations fail (fail-closed)
    - Already-mounted volumes continue (keys cached in FreeBSD GELI/ZFS layer)
    - Operator must unmount affected volumes to purge cached keys
+   - **Verification checklist**: After IKS→SKS incident response, verify that all affected volumes have been unmounted and cached keys purged. Execute automated verification script if available.
 
    Note: destroying the IKS partition does **not** halt the host partition
    or the hypervisor itself. The host (FreeBSD, partition 0) continues
@@ -109,12 +110,14 @@ Microhypervisor
 
 ### 3.2 Integrity Guarantees
 
+**Warning:** The following table separates current implementation status from future design goals.
+
 | Property | Mechanism | Status |
 |----------|-----------|--------|
-| Primary log independence | authoritative UART/OOB sink outside guest memory | Target design; not fully implemented in retained-C runtime |
-| Mirror log immutability | EPT read-only mapping (REQ-0105) | Design (Phase 2) |
+| Primary log independence | authoritative UART/OOB sink outside guest memory | retained-C runtime: partial |
+| Mirror log immutability | EPT read-only mapping (REQ-0105) | Phase 2: design |
 | Record integrity | CRC32C per record | Implemented (log.c) |
-| Cryptographic integrity | HMAC-SHA-256 per record (REQ-0104) | Phase 5 (crypto) |
+| Cryptographic integrity | HMAC-SHA-256 per record (REQ-0104) | Phase 5: planned |
 | Tamper evidence | Monotonic sequence counter | Implemented |
 | Boot correlation | boot_id_hi/boot_id_lo per record | Implemented |
 | Overflow handling | Ring buffer with oldest-overwrite | Implemented |
@@ -240,7 +243,7 @@ Required when:
 ## 6. Partition Fault Handling Evidence
 
 The fault handling subsystem is verified by `tests/test_fault_injection.c`
-(17 tests):
+(18 tests):
 
 | Test | Scenario | Verification |
 |------|----------|-------------|
@@ -255,6 +258,10 @@ The fault handling subsystem is verified by `tests/test_fault_injection.c`
 | 8 | Double fault idempotency | FAULTED -> INVALID_STATE, original preserved |
 | 9 | Multiboot parser robustness | Malformed input -> safe defaults |
 | 10-14 | ID allocator, lifecycle, edge cases | Tombstone exhaustion handled |
+| 15 | Partition load image validation | Rejects invalid manifest/entry_ip |
+| 16 | Partition load image mapping | Rejects invalid memory permissions |
+| 17 | Partition load image success | Accepts valid ELF64 ET_EXEC |
+| 18 | Partition destroy idempotency | Double destroy returns INVALID_STATE |
 
 ---
 

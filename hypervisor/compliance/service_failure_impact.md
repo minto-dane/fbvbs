@@ -17,7 +17,7 @@ FBVBS is designed around a partitioned architecture with five trusted services:
 │  EPT/NPT │ IOMMU │ VMCS │ Audit Log │ Scheduler    │
 ├──────┬──────┬──────┬──────┬──────┬──────────────────┤
 │ KCI  │ KSI  │ IKS  │ SKS  │ UVS  │ FreeBSD Host   │
-│(SPARK)│(SPARK)│(SPARK)│(SPARK)│(SPARK)│ (deprivileged)│
+│(SPARK — planned)│(SPARK — planned)│(SPARK — planned)│(SPARK — planned)│(SPARK — planned)│ (deprivileged)│
 └──────┴──────┴──────┴──────┴──────┴──────────────────┘
 ```
 
@@ -29,7 +29,7 @@ ELF64 `ET_EXEC` profile: it reads a measured service image, validates
 memory, and reaches `Loaded` only on success. The path remains
 fail-closed on any measurement, loader, or mapping error, and the
 SPARK trusted-service payloads plus full orchestration remain future
-phase work.
+phase work. PARTITION_LOAD_IMAGE and Loaded are implemented; SPARK services are planned.
 
 ---
 
@@ -95,6 +95,7 @@ change log or rebuild a fresh shadow under KSI control. During this
 resync, writes remain gated by a temporary write-disable window or a
 short-lived hypervisor-enforced lock; the new shadow is staged and then
 atomically swapped in only after checksum and epoch validation succeed.
+**Timeout and failure handling:** Resynchronization must complete within a defined timeout (e.g., 30 seconds). If timeout or checksum validation fails, KSI transitions to FAULTED state and dependent services remain disabled.
 
 **Fail-Closed Behavior:**
 - Tier A structures remain EPT read-only protected regardless of KSI
@@ -192,7 +193,7 @@ only after both services pass health checks.
 
 Offline verification token requirements:
 
-- generated under an operator-controlled asymmetric signing key (Ed25519 or ECDSA-P256 in the current design) held in HSM/SE-backed storage where available
+- generated under an operator-controlled asymmetric signing key (Ed25519 or ECDSA-P256 in the current design) held in HSM/SE-backed storage
 - scoped to a specific KSI instance, boot/session epoch, and cached-metadata hash; any token KDF or derivation context must bind those fields so the token cannot be replayed for another service instance
 - short-lived, single-purpose, and usage-count bounded; expiry, nonce, and allowed-use counter must be embedded in the signed token payload
 - distributed only through the operator break-glass path and retained in sealed operator storage; emergency activation requires dual-approval or equivalent multi-party authorization
@@ -276,7 +277,7 @@ When a trusted service partition faults:
 | Test | Method | Status |
 |------|--------|--------|
 | Microhypervisor fault = total halt | Injected triple fault | Design analysis only |
-| KCI fault → KLD load denied | Kill KCI partition, attempt kldload | Phase 4 target: mock KCI module with retained-measurement replay and a denied-load assertion |
+| KCI fault → KLD load denied | Kill KCI partition, attempt kldload | Phase 4 target: mock KCI module with retained-measurement replay (replay of measured hash comparison) and a denied-load assertion |
 | KSI fault → setuid denied | Kill KSI partition, attempt setuid exec | Phase 4 target: KSI mock + setuid database fixture + expected deny result |
 | IKS fault → SKS/UVS cascade | Kill IKS partition, verify SKS+UVS fail | Phase 4 target: subsystem simulation with mock key handles and cascade assertions |
 | Partition fault → FAULTED state | test_fault_injection.c test 7 | ✅ Verified |

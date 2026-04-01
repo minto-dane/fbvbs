@@ -140,7 +140,7 @@ hypervisor operation and cannot be avoided.
    code blocks, isolated from verified paths.
 2. All GPAs are validated (alignment, 52-bit bounds, ownership) before
    conversion.
-3. Frama-C WP verifies the logic using abstract GPA models.
+3. Frama-C WP verifies the logic using abstract GPA models (verification in progress; current status tracked in wp_verification_boundary.md).
 
 ---
 
@@ -176,7 +176,7 @@ deviations. They have been relocated to Section 4.1 (Conformance Notes).
 |-------|------|--------|
 | Warnings | GCC -Wall -Wextra -Werror -Wpedantic | 0 warnings (24 sources) |
 | Static analysis (GCC) | GCC -fanalyzer | 0 findings (24 sources) |
-| Static analysis (cppcheck) | cppcheck warning+perf+port | 0 findings (25 sources) |
+| Static analysis (cppcheck) | cppcheck warning+perf+port | 0 findings (25 sources) **Note:** cppcheck counts one additional file that GCC excludes; this is expected and does not indicate a discrepancy in findings. |
 | Formal verification | Frama-C WP Typed+Cast | Available and reproducible, but current runs still report proof gaps/timeouts |
 | Shadow detection | -Wshadow -Werror | Enforced |
 | Implicit conversion | -Wconversion -Wsign-conversion -Werror | Enforced |

@@ -20,9 +20,9 @@ def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
     return (base_dir / path).resolve()
 
 
-def command_output(argv: list[str]) -> str | None:
+def command_output(argv: list[str], cwd: pathlib.Path | None = None) -> str | None:
     try:
-        return subprocess.check_output(argv, text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(argv, text=True, stderr=subprocess.DEVNULL, cwd=cwd).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 
@@ -70,7 +70,7 @@ def main() -> int:
                 int(source_date_epoch),
                 tz=datetime.timezone.utc,
             ).isoformat()
-        except ValueError:
+        except (ValueError, OverflowError):
             generated = datetime.datetime.now(datetime.timezone.utc).isoformat()
     else:
         generated = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -82,10 +82,10 @@ def main() -> int:
         "hypervisor_directory": str(hypervisor_dir.resolve()),
         "build_directory": str(build_dir.resolve()),
         "git": {
-            "head": command_output(["git", "rev-parse", "HEAD"]),
-            "describe": command_output(["git", "describe", "--always", "--dirty", "--tags"]),
+            "head": command_output(["git", "rev-parse", "HEAD"], cwd=repo_root),
+            "describe": command_output(["git", "describe", "--always", "--dirty", "--tags"], cwd=repo_root),
             "dirty_worktree": git_dirty(repo_root),
-            "branch": os.environ.get("GITHUB_REF_NAME") or command_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+            "branch": os.environ.get("GITHUB_REF_NAME") or command_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root),
         },
         "build_environment": {
             "compiler": compiler,

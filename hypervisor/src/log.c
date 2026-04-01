@@ -17,6 +17,8 @@
 /* Guard: max slot_index * record_size must fit in uint32_t for write_offset */
 _Static_assert((uint64_t)(FBVBS_LOG_SLOT_COUNT - 1U) * FBVBS_LOG_RECORD_V1_SIZE <= UINT32_MAX,
                "write_offset must fit in uint32_t");
+_Static_assert((FBVBS_RATE_LIMIT_CLASSES & (FBVBS_RATE_LIMIT_CLASSES - 1U)) == 0U,
+               "FBVBS_RATE_LIMIT_CLASSES must be a power of 2");
 
 static const uint32_t FBVBS_CRC32C_POLY = 0x82F63B78U;
 #define FBVBS_AUDIT_PRIMARY_LINE_MAX 768U
@@ -507,6 +509,7 @@ int fbvbs_log_append_rate_limited(
     if (state->log_rate_counts[event_class] < UINT32_MAX) {
         state->log_rate_counts[event_class] += 1U;
     }
+    uint64_t saved_window_sequence = state->log_rate_window_sequence;
     fbvbs_log_spinlock_release(&state->log_lock);
 
     if (emit_summary != 0U) {
@@ -539,9 +542,8 @@ int fbvbs_log_append_rate_limited(
     result = fbvbs_log_append(state, cpu_id, source_component,
                               severity, event_code, payload, payload_length);
     if (result != OK) {
-        uint64_t rollback_window_sequence = state->log_rate_window_sequence;
         if (fbvbs_log_spinlock_acquire(&state->log_lock) == OK) {
-            if (rollback_window_sequence == state->log_rate_window_sequence) {
+            if (saved_window_sequence == state->log_rate_window_sequence) {
                 state->log_rate_counts[event_class] = prior_count;
             }
             fbvbs_log_spinlock_release(&state->log_lock);

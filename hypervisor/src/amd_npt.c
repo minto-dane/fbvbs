@@ -648,8 +648,10 @@ static int fbvbs_npt_handle_invlpg(
     struct fbvbs_npt_config *config,
     uint64_t linear_addr)
 {
+    int is_code = fbvbs_npt_is_code_address(config, linear_addr);
+
     /* Track TLB invalidation for code addresses */
-    if (fbvbs_npt_is_code_address(config, linear_addr) != 0) {
+    if (is_code != 0) {
         if (config->pending_invlpg < UINT32_MAX) {
             config->pending_invlpg += 1U;
         }
@@ -667,7 +669,8 @@ static int fbvbs_npt_handle_invlpg(
      * Wait for acknowledgement before returning.
      * Model: immediate (single-core model). */
 
-    if (config->pending_invlpg > 0U) {
+    /* Only decrement for code addresses */
+    if (is_code != 0 && config->pending_invlpg > 0U) {
         config->pending_invlpg -= 1U;
     }
 

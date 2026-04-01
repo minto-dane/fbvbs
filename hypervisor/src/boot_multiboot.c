@@ -25,6 +25,11 @@ static void fbvbs_multiboot_copy_cmdline(
         return;
     }
 
+    if (source == NULL || source_length == 0U) {
+        destination[0] = '\0';
+        return;
+    }
+
     /*@ loop invariant 0 <= index < FBVBS_BOOT_MODULE_CMDLINE_BYTES;
         loop invariant index <= source_length || source_length >= FBVBS_BOOT_MODULE_CMDLINE_BYTES;
         loop assigns index, destination[0 .. FBVBS_BOOT_MODULE_CMDLINE_BYTES - 1];

@@ -314,6 +314,7 @@ struct fbvbs_iommu_state {
     uint32_t scalable_mode;            /* Intel VT-d scalable mode */
     uint32_t pasid_support;            /* PASID capability */
     uint32_t reserved0;
+    const void *acpi_table;            /* Parsed ACPI table pointer (IVRS/DMAR) */
 };
 
 /* ================================================================

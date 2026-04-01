@@ -1053,14 +1053,12 @@ int fbvbs_boot_integrity_detect(struct fbvbs_global_security_state *state)
      * attestation before claiming a trustworthy boot chain. */
     if (state->boot.drtm_available != 0U) {
         state->boot.measured_boot_active = 1;
-        return 0;
     }
     /* If CPUID didn't detect DRTM, set model defaults for coverage. */
     if (state->vendor == CPU_VENDOR_INTEL || state->vendor == CPU_VENDOR_AMD) {
         state->boot.drtm_available = 1;
         state->boot.drtm_type = (state->vendor == CPU_VENDOR_INTEL) ? 1U : 2U;
         state->boot.measured_boot_active = 1;
-        return 0;
     }
 #endif
 
@@ -1230,9 +1228,10 @@ void fbvbs_vmexit_mitigate(const struct fbvbs_vuln_profile *vuln,
                            uint32_t is_cross_partition)
 {
 #if defined(__FRAMAC__)
+    /* SYNC: model spec_ctrl save/restore — mirrors Steps 5-6 below */
     (void)vuln;
     (void)is_cross_partition;
-    spec_state->guest_spec_ctrl = spec_state->host_spec_ctrl;
+    spec_state->guest_spec_ctrl = 0;
     return;
 #endif
     /* Step 1: IBPB for cross-partition exits.
@@ -1344,8 +1343,9 @@ void fbvbs_vmentry_mitigate(const struct fbvbs_vuln_profile *vuln,
                             struct fbvbs_spec_ctrl_state *spec_state)
 {
 #if defined(__FRAMAC__)
+    /* SYNC: model spec_ctrl save/restore — mirrors Steps 1-2 below */
     (void)vuln;
-    spec_state->host_spec_ctrl = spec_state->guest_spec_ctrl;
+    spec_state->host_spec_ctrl = 0;
     return;
 #endif
     /* Step 1: L1D flush */
@@ -1378,7 +1378,15 @@ void fbvbs_cet_save_guest(struct fbvbs_cet_state *guest_cet,
                           const struct fbvbs_cet_state *host_cet)
 {
 #if defined(__FRAMAC__)
-    *guest_cet = *host_cet;
+    /* SYNC: model guest CET saved from MSRs, host CET restored */
+    guest_cet->s_cet    = 0;
+    guest_cet->u_cet    = 0;
+    guest_cet->pl0_ssp  = 0;
+    guest_cet->pl1_ssp  = 0;
+    guest_cet->pl2_ssp  = 0;
+    guest_cet->pl3_ssp  = 0;
+    guest_cet->isst_addr = 0;
+    (void)host_cet;
     return;
 #endif
     /* Save guest CET state */
@@ -1406,6 +1414,7 @@ void fbvbs_cet_save_guest(struct fbvbs_cet_state *guest_cet,
 void fbvbs_cet_restore_guest(const struct fbvbs_cet_state *guest_cet)
 {
 #if defined(__FRAMAC__)
+    /* SYNC: model guest CET restore — writes MSRs only */
     (void)guest_cet;
     return;
 #endif

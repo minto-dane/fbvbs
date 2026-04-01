@@ -218,3 +218,7 @@ methodology (AVA_VAN.5):
 - Ge et al., "A Survey of Microarchitectural Timing Attacks" (ACM Computing Surveys, 2018)
 - NIST SP 800-53 Rev. 5, SC-4 (Information in Shared System Resources)
 - Common Criteria Part 3, AVA_VAN.5 (Advanced Methodical Vulnerability Analysis)
+
+## 7. Terminology
+
+- **PRODUCTION NOTE**: A marker indicating that the described behavior is the production configuration. See `hypervisor/src/cpu_security.c` for the implementation details.

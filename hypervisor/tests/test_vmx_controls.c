@@ -77,6 +77,42 @@ static void test_build_security_controls_with_cet(void) {
 }
 
 /* ================================================================
+ * Test: double call is safe — no corruption on repeated failure
+ *
+ * In hosted mode the page allocator is not initialized, so CET
+ * allocation fails before the MSR bitmap path is reached. This
+ * test verifies that two consecutive failures leave controls in a
+ * consistent zero state without crashing.
+ *
+ * NOTE: the cet_pages_owned cleanup guard (CET succeeds, MSR
+ * bitmap fails) requires a mock page allocator that can fail after
+ * N allocations. That path is verified by code inspection only.
+ * ================================================================ */
+static void test_build_security_controls_double_call_safe(void) {
+    struct fbvbs_vmx_security_controls controls;
+    struct fbvbs_vmx_capabilities caps;
+    int s1;
+    int s2;
+
+    memset(&controls, 0, sizeof(controls));
+    memset(&caps, 0, sizeof(caps));
+    caps.vmx_supported = 1U;
+    caps.cet_available = 1U;
+
+    /* First call: CET alloc fails in hosted mode (no page allocator) */
+    s1 = fbvbs_vmx_build_security_controls(&controls, &caps);
+    assert(s1 == -1);
+
+    /* Second call: must not double-free or corrupt state */
+    s2 = fbvbs_vmx_build_security_controls(&controls, &caps);
+    assert(s2 == -1);
+
+    /* Controls remain zeroed after both failures — no partial init */
+    assert(controls.host_ssp == 0ULL);
+    assert(controls.host_isst_addr == 0ULL);
+}
+
+/* ================================================================
  * Test: MSR bitmap physical address is stable after init
  * ================================================================ */
 static void test_msr_bitmap_phys_stable(void) {
@@ -97,6 +133,7 @@ static void test_msr_bitmap_phys_stable(void) {
 int main(void) {
     test_build_security_controls_no_cet();
     test_build_security_controls_with_cet();
+    test_build_security_controls_double_call_safe();
     test_msr_bitmap_phys_stable();
     return 0;
 }

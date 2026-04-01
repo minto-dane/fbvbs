@@ -414,6 +414,23 @@ static void fbvbs_preemption_build_config(
  * modifications.
  * ================================================================ */
 
+/* Release CET pages allocated by fbvbs_cet_build_vmcs_config on error paths. */
+static void free_cet_pages(
+    const struct fbvbs_cet_vmcs_config *cet_config,
+    const struct fbvbs_vmx_capabilities *caps)
+{
+    if (caps->cet_available != 0U) {
+        uint64_t host_ssp_page =
+            cet_config->host_ssp & ~((uint64_t)FBVBS_PAGE_SIZE - 1ULL);
+        if (host_ssp_page != 0U) {
+            (void)fbvbs_page_free(host_ssp_page);
+        }
+        if (cet_config->host_isst_addr != 0U) {
+            (void)fbvbs_page_free(cet_config->host_isst_addr);
+        }
+    }
+}
+
 /*@ requires \valid(controls);
     requires \valid_read(caps);
     assigns *controls;
@@ -428,6 +445,7 @@ int fbvbs_vmx_build_security_controls(
     static struct fbvbs_msr_bitmap_model bitmap;
     struct fbvbs_preemption_config preempt;
     struct fbvbs_cet_vmcs_config cet_config;
+    int cet_pages_owned = 0;
     uint64_t bitmap_phys;
 
     cet_config.entry_controls_or = 0U;
@@ -471,17 +489,21 @@ int fbvbs_vmx_build_security_controls(
 
     /* CET if available — fail-closed: if hardware supports CET but
      * allocation fails, the entire security controls init fails.
-     * Running without CET on CET-capable hardware is a downgrade. */
+     * Running without CET on CET-capable hardware is a downgrade.
+     * Reinitialization guard: reuse existing values if already initialized. */
     if (caps->cet_available != 0U) {
-        if (fbvbs_cet_build_vmcs_config(&cet_config, caps) != 0) {
-            return -1;  /* CET available but SSP/ISST alloc failed */
+        if (controls->host_ssp == 0U) {
+            if (fbvbs_cet_build_vmcs_config(&cet_config, caps) != 0) {
+                return -1;  /* CET available but SSP/ISST alloc failed */
+            }
+            cet_pages_owned = 1;
+            controls->entry_controls_or |= cet_config.entry_controls_or;
+            controls->exit_controls_or |= cet_config.exit_controls_or;
+            controls->host_s_cet = cet_config.host_s_cet;
+            controls->host_ssp = cet_config.host_ssp;
+            controls->host_isst_addr = cet_config.host_isst_addr;
+            controls->guest_s_cet = cet_config.guest_s_cet;
         }
-        controls->entry_controls_or |= cet_config.entry_controls_or;
-        controls->exit_controls_or |= cet_config.exit_controls_or;
-        controls->host_s_cet = cet_config.host_s_cet;
-        controls->host_ssp = cet_config.host_ssp;
-        controls->host_isst_addr = cet_config.host_isst_addr;
-        controls->guest_s_cet = cet_config.guest_s_cet;
     }
 
 #ifdef __FRAMAC__
@@ -492,20 +514,17 @@ int fbvbs_vmx_build_security_controls(
     (void)bitmap_phys;
     controls->msr_bitmap_valid = 1;
 #else
-    /* MSR bitmap — always initialize after CET setup succeeds. */
-    fbvbs_msr_bitmap_init(&bitmap);
+    /* MSR bitmap — always initialize after CET setup succeeds.
+     * Skip initialization if already allocated (reinitialization guard). */
+    if (g_msr_bitmap_phys == 0U) {
+        fbvbs_msr_bitmap_init(&bitmap);
+    }
     bitmap_phys = g_msr_bitmap_phys;
     if (bitmap_phys == 0U) {
         bitmap_phys = fbvbs_page_alloc();
         if (bitmap_phys == 0U) {
-            if (caps->cet_available != 0U) {
-                uint64_t host_ssp_page = cet_config.host_ssp & ~((uint64_t)FBVBS_PAGE_SIZE - 1ULL);
-                if (host_ssp_page != 0U) {
-                    (void)fbvbs_page_free(host_ssp_page);
-                }
-                if (cet_config.host_isst_addr != 0U) {
-                    (void)fbvbs_page_free(cet_config.host_isst_addr);
-                }
+            if (cet_pages_owned != 0) {
+                free_cet_pages(&cet_config, caps);
             }
             return -1;
         }
@@ -516,14 +535,8 @@ int fbvbs_vmx_build_security_controls(
         if (bitmap_ptr == NULL) {
             (void)fbvbs_page_free(bitmap_phys);
             g_msr_bitmap_phys = 0U;
-            if (caps->cet_available != 0U) {
-                uint64_t host_ssp_page = cet_config.host_ssp & ~((uint64_t)FBVBS_PAGE_SIZE - 1ULL);
-                if (host_ssp_page != 0U) {
-                    (void)fbvbs_page_free(host_ssp_page);
-                }
-                if (cet_config.host_isst_addr != 0U) {
-                    (void)fbvbs_page_free(cet_config.host_isst_addr);
-                }
+            if (cet_pages_owned != 0) {
+                free_cet_pages(&cet_config, caps);
             }
             return -1;
         }

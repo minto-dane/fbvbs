@@ -333,6 +333,14 @@ static int apic_timer_check_expiry(struct fbvbs_apic_state *apic) {
         return 0;  /* Timer not armed */
     }
 
+    /* Extract timer mode from LVT */
+    timer_mode = (apic->lvt_timer >> 17U) & 0x3U;
+
+    /* TSC-deadline mode: timer_current is not used for countdown */
+    if (timer_mode == APIC_TIMER_MODE_TSC_DEADLINE) {
+        return 0;  /* TSC-deadline uses separate TSC compare */
+    }
+
     /* Check if timer expired (model: decrement to zero) */
     if (apic->timer_current > 0U) {
         apic->timer_current -= 1U;
@@ -342,9 +350,8 @@ static int apic_timer_check_expiry(struct fbvbs_apic_state *apic) {
         return 0;  /* Not yet expired */
     }
 
-    /* Timer expired — extract vector and mode from LVT */
+    /* Timer expired — extract vector from LVT */
     vector = apic->lvt_timer & 0xFFU;
-    timer_mode = (apic->lvt_timer >> 17U) & 0x3U;
 
     /* Check if masked */
     if ((apic->lvt_timer & (1U << 16U)) != 0U) {

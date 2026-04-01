@@ -631,7 +631,7 @@ static int srat_parse_entries(
             case SRAT_TYPE_X2APIC_AFFINITY:
                 /* Length 24: x2APIC affinity */
                 if (entry_length >= 24U) {
-                    uint32_t prox_domain = mp_read_le32(table_data + offset + 2U);
+                    uint32_t prox_domain = mp_read_le32(table_data + offset + 4U);
                     uint32_t x2apic_id = mp_read_le32(table_data + offset + 8U);
                     uint32_t flags = mp_read_le32(table_data + offset + 12U);
 

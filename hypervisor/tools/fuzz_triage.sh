@@ -18,11 +18,17 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             CAMPAIGN_DIR="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
 cd "$(dirname "$0")/.."
+
+# Verify CAMPAIGN_DIR exists and is a directory
+if [[ ! -d "$CAMPAIGN_DIR" ]]; then
+    echo "Error: Campaign directory does not exist or is not a directory: $CAMPAIGN_DIR" >&2
+    exit 1
+fi
 
 REPORT="$CAMPAIGN_DIR/triage-report.txt"
 : > "$REPORT"

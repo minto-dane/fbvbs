@@ -42,7 +42,7 @@ static void test_deprivilege_host_rejects_double_deprivilege(void) {
 
     status = fbvbs_deprivilege_host(&state);
     assert(status == -1);
-    assert((state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) == 0U);
+    assert((state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) != 0U);
 }
 
 /* ================================================================

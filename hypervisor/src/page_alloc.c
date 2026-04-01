@@ -241,9 +241,13 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
             loop variant end_pfn - pfn;
         */
         for (pfn = start_pfn; pfn < end_pfn; ++pfn) {
-            mark_free(pfn);
-            if (free_count < UINT32_MAX) {
-                free_count += 1U;
+            uint32_t word = pfn / (uint32_t)BITS_PER_WORD;
+            uint32_t bit = pfn % (uint32_t)BITS_PER_WORD;
+            if (bitmap_test(word, bit) == 0) {
+                mark_free(pfn);
+                if (free_count < UINT32_MAX) {
+                    free_count += 1U;
+                }
             }
         }
 
@@ -253,12 +257,12 @@ int fbvbs_page_alloc_init(const struct fbvbs_memory_map_entry *map,
     }
 
     total_pages = max_pfn;
-    initialized = 1U;
 
     if (free_count == 0U) {
         return -1;  /* No usable memory found — fail-closed */
     }
 
+    initialized = 1U;
     return 0;
 }
 

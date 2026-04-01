@@ -44,7 +44,7 @@ In the current development environment, `make -C hypervisor release-hypervisor` 
 - coverage outputs
   - `make -C hypervisor coverage` now runs leaf-boundary, policy-security, and fault-injection suites
   - the bounded gate rejects `0.00%` line/branch coverage regressions for `command.c`, `vm_policy.c`, and `vmx.c`
-  - current local snapshot: `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%
+  - current local snapshot (last updated 2026-03-31): `command.c` 24.44% lines / 57.62% branches, `vm_policy.c` 67.34% / 59.32%, `vmx.c` 95.00% / 100.00%
 - traceability output
 - reproducibility manifests
 - provenance metadata (`build/provenance.json`)

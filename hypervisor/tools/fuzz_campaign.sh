@@ -37,6 +37,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate FUZZ_ENGINE
+if [[ "$FUZZ_ENGINE" != "afl" && "$FUZZ_ENGINE" != "libfuzzer" ]]; then
+    echo "Error: FUZZ_ENGINE must be 'afl' or 'libfuzzer', got '$FUZZ_ENGINE'" >&2
+    exit 1
+fi
+
 cd "$(dirname "$0")/.."
 
 HARNESSES=(
@@ -104,7 +110,12 @@ for h in "${HARNESSES[@]}"; do
                 set -e
                 # Only count signal-terminated processes as crashes (status > 128)
                 if [[ $EXIT_STATUS -gt 128 ]]; then
-                    cp "$seed" "$CAMPAIGN_DIR/crashes/"
+                    # Generate unique destination filename to prevent overwriting
+                    dest="$CAMPAIGN_DIR/crashes/$(basename "$seed")"
+                    if [[ -f "$dest" ]]; then
+                        dest="$CAMPAIGN_DIR/crashes/$(basename "$seed").$(date +%s).$$"
+                    fi
+                    cp "$seed" "$dest"
                     CRASHES=$((CRASHES + 1))
                 fi
             done

@@ -44,7 +44,7 @@
 | リンカスクリプト | fbvbs.ld | ~170 | N/A | ガードページ + IST スタック + W^X + ASSERT 検証 (Phase 1-11) |
 | ファジングハーネス | fuzz/*.c | ~550 | N/A | command page + manifest + multiboot2 + iommu (Phase 9-1) |
 
-**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,866 / 14,866 (0 TO) 100%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
+**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,866 / 14,809 (57 TO 残存) 99.6%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
 
 ### 未実装・ブロッカー
 
@@ -243,7 +243,9 @@
 - REQ-0301/0302 (HLAT/NPT テーブル構築)
 - REQ-0350 (DMA ページテーブル)
 
-**現状:** HLAT(12箇所), NPT(21箇所), IOMMU VT-d(20+箇所), IOMMU AMD-Vi(10箇所), VMCS(2箇所), CET(1箇所) が物理ページアロケータの不在により fail-closed。
+**過去の状態（2026-03-22 以前）:** HLAT(12箇所), NPT(21箇所), IOMMU VT-d(20+箇所), IOMMU AMD-Vi(10箇所), VMCS(2箇所), CET(1箇所) が物理ページアロケータの不在により fail-closed。
+
+**現在の状態（2026-03-22 以降）:** ✅ Phase 0C 完了。ビットマップアロケータ実装 + 全統合ポイント接続済み (VMCS/HLAT/NPT/IOMMU VT-d/AMD-Vi/CET)。ページアロケータ接続により各コンポーネントは fail-closed を解除。
 
 #### 0C-1. ビットマップアロケータ
 
@@ -306,6 +308,22 @@
     - IST スタック分離: #NMI, #DF, #MC に専用スタック（スタック破損カスケード防止）
     - 例外ハンドラ: UART 一次ログ出力後 halt
     - IST スタック境界の ACSL 契約
+12. **Manifest-Driven Autostart (監査補遺 C.4):**
+    - manifest の `autostart=true` に基づく boot 時自動パーティション生成
+    - `service_kind`, `memory_limit_bytes`, `capability_mask`, `vcpu_count`, `initial_sp` の manifest 決定
+    - `SERVICE_KIND_KCI/KSI/IKS/SKS/UVS` の 5 種限定
+    - 測定前は `SERVICE_KIND_NONE` として扱う
+    - 参照: 監査補遺 C.4 (Section 12, 19)
+13. **CPU 初期状態凍結 (監査補遺 C.9):**
+    - `RFLAGS = 0x0000000000000002`（bit 1 必須）
+    - `CR0` 基底値 `0x80010033` + pin policy 適用
+    - `CR4` 基底値 `0x000006f0` + pin policy 適用
+    - 汎用レジスタ（RIP/RSP 除き）= 0
+    - XMM/YMM/ZMM = 0
+    - FS.base/GS.base = 0
+    - flat 64-bit segment model
+    - RSI = bootstrap page GPA
+    - 参照: 監査補遺 C.9 (Section 18)
 
 #### 1-2. ベアメタル初期化（boot.S） ✅（Multiboot2 パス実装済み）
 
@@ -678,6 +696,22 @@
 2. パーティション間 IPC ライブラリ（共有コマンドページ操作）
 3. GNATprove 構成ファイル
 4. 最小パーティションイメージ（エコーサービスで起動検証）
+5. **Manifest-Driven Autostart (監査補遺 C.4):**
+   - manifest の `autostart=true` に基づく boot 時自動パーティション生成
+   - `service_kind`, `memory_limit_bytes`, `capability_mask`, `vcpu_count`, `initial_sp` の manifest 決定
+   - `SERVICE_KIND_KCI/KSI/IKS/SKS/UVS` の 5 種限定
+   - 測定前は `SERVICE_KIND_NONE` として扱う
+   - 参照: 監査補遺 C.4 (Section 12, 19)
+6. **CPU 初期状態凍結 (監査補遺 C.9):**
+   - `RFLAGS = 0x0000000000000002`（bit 1 必須）
+   - `CR0` 基底値 `0x80010033` + pin policy 適用
+   - `CR4` 基底値 `0x000006f0` + pin policy 適用
+   - 汎用レジスタ（RIP/RSP 除き）= 0
+   - XMM/YMM/ZMM = 0
+   - FS.base/GS.base = 0
+   - flat 64-bit segment model
+   - RSI = bootstrap page GPA
+   - 参照: 監査補遺 C.9 (Section 18)
 
 #### 4-2. Kernel Code Integrity Service (KCI)
 
@@ -898,7 +932,7 @@
    - PIO/MMIO/external interrupt/EPT violation/CR access の固定 payload 構造準拠
    - exit_length 境界検証
    - 未分類 exit の fail-closed 処理テスト
-6. vCPU 状態機械 (Section 35.1, REQ-0906, REQ-0907):
+6. vCPU 状態機械 (Section 35.1, REQ-0906, REQ-0907, 監査補遺 C.1):
    - 6状態: Created/Runnable/Running/Blocked/Faulted/Destroyed
    - VM exit 種別→状態遷移の固定規則
    - halt → Blocked、割り込み注入 → Runnable 復帰
@@ -906,6 +940,7 @@
    - multi-vCPU fault 集約（任意 vCPU fault → VM 全体 Faulted）
    - VM_RUN は Runnable のみ、VM_INJECT_INTERRUPT は Runnable/Blocked のみ
    - VM_SET/GET_REGISTER は Running 時禁止
+   - 参照: 監査補遺 C.1 (Section 35.1, REQ-0907)
 7. VM_CREATE vs PARTITION_CREATE 制限 (Section 34):
    - PARTITION_CREATE(kind=GUEST_VM) → INVALID_PARAMETER 強制
    - VM_CREATE のみで guest VM 生成可能
@@ -960,7 +995,7 @@
 - ✅ cppcheck 静的解析: `make cppcheck` — 現行 host source set で 0 errors/0 warnings (warning/performance/portability)
 - ✅ gcov 分岐カバレッジ: `make coverage` — command.c 24.44% lines / 57.62% branches executed, vm_policy.c 67.34% / 59.32%, vmx.c 95.00% / 100.00%, log.c 88%, watchdog.c 100%
 - ✅ host-side MSR safety model: userspace test/coverage/fuzz builds は CPU security 内部で deterministic MSR software model を使用し、privileged `RDMSR/WRMSR` によるクラッシュを避けつつ retained-C 挙動を検証
-- ✅ トレーサビリティツール: `tools/traceability_matrix.py` — REQ-XXXX ソース参照スキャン + 孤立分析 (全115要件にソースタグ)
+- ✅ トレーサビリティツール: `tools/traceability_matrix.py` — REQ-XXXX ソース参照スキャン + 孤立分析 (全116要件にソースタグ)
 - ✅ MISRA C:2023 逸脱ログ: `compliance/misra_c_deviation_log.md` — 6逸脱 (asm, _Static_assert, void*, volatile, uintptr_t, goto) + 緩和策 + 承認根拠
 - ✅ 隠れチャネル分析: `compliance/covert_channel_analysis.md` — CC EAL5+ AVA_VAN.5 準拠、7カテゴリ (タイミング/キャッシュ/分岐予測/メモリバス/MDS/IOMMU/デバッグレジスタ)、残留リスク評価
 - ✅ ログデコーダファジング: `fuzz/fuzz_log_decoder.c` (CRC32C、リングバッファ、レートリミッタ、シーケンス枯渇) と `fuzz/fuzz_partition_loader.c` (retained-C ELF64 loader) を追加し、合計 6 ハーネス
@@ -1296,7 +1331,7 @@
 ║      │                                                           ║
 ║      ├──→ Phase 0B (IOMMU) ── ✅ モデル完了                      ║
 ║      │         │                                                 ║
-║      │         └──→ Phase 0C (ページアロケータ) ── ★ 致命的      ║
+║      │         └──→ Phase 0C (ページアロケータ) ── ✅ 完了      ║
 ║      │                   │                                       ║
 ║      │                   └──→ Phase 2 (Intel HLAT) ── ✅ 完了    ║
 ║      │                             │                             ║
@@ -1423,7 +1458,12 @@
 
 ---
 
-## 監査補遺: 設計仕様との差分（2026-03-20 自己監査）
+## 監査補遺: 設計仕様との差分（2026-03-20 自己監査）✅ 統合済み
+
+**統合状況:** 以下の監査補遺項目は対応するPhaseアクションリストに統合済みです。
+- C.1 (vCPU状態機械) → Phase 7-2 アクション6
+- C.4 (Manifest-Driven Autostart) → Phase 1 アクション12、Phase 4-1 アクション5
+- C.9 (CPU初期状態凍結) → Phase 1 アクション13、Phase 4-1 アクション6
 
 本ロードマップを plan/fbvbs-design.md の全セクション・全 Appendix と照合した結果、以下の要素が欠落または不十分であった。これらは極めてクリティカルなシステムとして全て対処が必要である。
 
@@ -1625,4 +1665,4 @@ Phase 0A に確認必要:
 | **セキュリティ強化** | — | — | **+8** (硬化フラグ, ログ制限, APIC, entropy, watchdog, asm, FIPS, HSM) | 0 |
 | **品質プロセス** | — | — | **+12** (故障注入, MISRA, CC, 隠れチャネル, CI/CD, 性能, 障害影響, プロセス規律) | 0 |
 | **残留リスク** | 6 | 6 | **新規セクション** | 0 |
-| **合計** | 116+ REQ | 116 | +58 項目 | 0 |
+| **合計** | 116+ REQ | 116 | +73 項目 | 0 |

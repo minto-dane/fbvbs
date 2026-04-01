@@ -813,7 +813,11 @@ TCB は Trusted Computing Base の略であり、ある保護性質を成立さ�
 
 VT-x は Intel の仮想化拡張、AMD-V は AMD の仮想化拡張を指す。EPT は Extended Page Tables、NPT は Nested Page Tables の略であり、いずれも第二レベルアドレス変換機構である。HLAT は Hypervisor-Managed Linear Address Translation の略であり、Intel が公開している、ハイパーバイザー管理下の線形アドレス変換機構を指す。MBEC は Mode-Based Execute Control の略であり、Intel 側の実行権限細粒度化機構を指す。AMD 側の対応機能は GMET と呼ばれる。RMP は Reverse Map Table の略であり、SEV-SNP における物理ページ所有権整合性の管理機構を指す。VMPL は Virtual Machine Privilege Level の略であり、SEV-SNP guest における特権階層を指す。
 
-retained-C は、本書における build model の一つであり、C 実装の一部を最終成果物の authoritative byte range として保持する方式を指す。これは「C で書かれていること」自体を security property にする語ではなく、現行実装が C の linker/loader artifact を authoritative source として使うことを示す歴史的ラベルである。Ada/SPARK など別言語実装が同等の immutable authoritative byte range を定義する場合は、より中立な「retained artifact build model」または「immutable-region build model」と記述してよく、`retained-C` という語は current C-based microhypervisor profile に対してのみ使う。Intel/x86_64 実装では linker symbols `_binary_start .. _data_end` をその具体例として用いてよいが、これは platform-specific implementation example であり universal rule ではない。これらの symbol を持たない platform は、Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、もしくは size/offset metadata による明示 binding を使って authoritative source を宣言しなければならない。
+retained-C は、本書における build model の一つであり、C 実装の一部を最終成果物の authoritative byte range として保持する方式を指す。これは「C で書かれていること」自体を security property にする語ではなく、現行実装が C の linker/loader artifact を authoritative source として使うことを示す歴史的ラベルである。Ada/SPARK など別言語実装が同等の immutable authoritative byte range を定義する場合は、より中立な「retained artifact build model」または「immutable-region build model」と記述してよく、`retained-C` という語は current C-based microhypervisor profile に対してのみ使う。
+
+Intel/x86_64 実装では linker symbols `_binary_start .. _data_end` をその具体例として用いてよいが、これは platform-specific implementation example であり universal rule ではない。
+
+これらの symbol を持たない platform は、Multiboot module cmdline の `artifact:0x...` または `fbvbs.object_id=0x...`、もしくは size/offset metadata による明示 binding を使って authoritative source を宣言しなければならない。
 
 bare-metal release profile は、conformance profile のうち物理ホスト上の standalone microhypervisor 配布を対象とする subtype である。これは bootloader-bound artifact set、固定 loader 規約、OOB audit collector、IOMMU 必須条件、QEMU では代替できない実機検証要求を含む。VM-hosted や containerized な test profile は存在し得るが、それらは bare-metal release profile ではなく、production-grade publication の正本プロファイルとして扱ってはならない。
 

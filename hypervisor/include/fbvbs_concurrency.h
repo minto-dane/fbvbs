@@ -119,8 +119,8 @@
 #define FBVBS_PER_CPU
 
 /* Lock identifiers (for documentation; not instantiated on BSP-only) */
-#define FBVBS_LOCK_LOG       0U  /* Index 0: log_lock (Level 1, inner) */
-#define FBVBS_LOCK_BHL       1U  /* Index 1: BHL (Level 2, outer, acquired first) */
-#define FBVBS_LOCK_LEVEL_MAX 2U
+#define FBVBS_LOCK_LOG       1U  /* Index 1: log_lock (Level 1, inner) */
+#define FBVBS_LOCK_BHL       2U  /* Index 2: BHL (Level 2, outer, acquired first) */
+#define FBVBS_LOCK_LEVEL_MAX 3U
 
 #endif /* FBVBS_CONCURRENCY_H */

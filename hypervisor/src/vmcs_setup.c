@@ -381,8 +381,9 @@ static void fbvbs_vmxon_leave(void);
 
 /*@ requires \valid(config);
     assigns *config, g_next_vpid;
+    ensures \result == 0 || \result == -1;
 */
-static void fbvbs_vmcs_build_host_config(
+static int fbvbs_vmcs_build_host_config(
     struct fbvbs_vmcs_config *config,
     uint64_t pinned_cr0_mask,
     uint64_t pinned_cr0_value,
@@ -405,6 +406,7 @@ static void fbvbs_vmcs_build_host_config(
     (void)pinned_cr4_mask;
     (void)pinned_cr4_value;
     (void)ept_pml4_phys;
+    return 0;
 #else
     *config = (struct fbvbs_vmcs_config){0};
 
@@ -413,6 +415,10 @@ static void fbvbs_vmcs_build_host_config(
      * Saturate at 0xFFFF — 65534 vCPUs is far beyond spec limit. */
     if (g_next_vpid == 0U) {
         g_next_vpid = 1U;  /* Recover from hypothetical wraparound */
+    }
+    if (g_next_vpid == 0xFFFFU) {
+        /* VPID pool exhausted — cannot allocate unique VPID */
+        return -1;
     }
     config->vpid = g_next_vpid;
     if (g_next_vpid < 0xFFFFU) {
@@ -526,6 +532,7 @@ static void fbvbs_vmcs_build_host_config(
     config->guest_ldtr_access_rights = FBVBS_VMCS_AR_UNUSABLE;
     config->guest_tr_access_rights = FBVBS_VMCS_AR_TSS64;
 #endif /* !__FRAMAC__ */
+    return 0;
 }
 
 /* ================================================================
@@ -1224,6 +1231,10 @@ int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state)
     if (state == NULL) {
         return -1;
     }
+    /* Reject double deprivilege — preserve flag for caller diagnostics */
+    if ((state->runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) != 0U) {
+        return -1;
+    }
     state->runtime_state_flags &= ~FBVBS_RUNTIME_HOST_DEPRIVILEGED;
     return -1;
 #else
@@ -1233,6 +1244,10 @@ int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state)
     uint64_t host_partition_id = 0ULL;
 
     if (state == NULL) {
+        return -1;
+    }
+    /* Reject double deprivilege — preserve flag for caller diagnostics */
+    if ((state->runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) != 0U) {
         return -1;
     }
     state->runtime_state_flags &= ~FBVBS_RUNTIME_HOST_DEPRIVILEGED;
@@ -1245,14 +1260,16 @@ int fbvbs_deprivilege_host(struct fbvbs_hypervisor_state *state)
     }
 
     /* Build VMCS configuration with pinning masks */
-    fbvbs_vmcs_build_host_config(
-        &config,
-        state->pinned_cr0_mask,
-        state->pinned_cr0_value,
-        state->pinned_cr4_mask,
-        state->pinned_cr4_value,
-        ept_pml4_phys
-    );
+    if (fbvbs_vmcs_build_host_config(
+            &config,
+            state->pinned_cr0_mask,
+            state->pinned_cr0_value,
+            state->pinned_cr4_mask,
+            state->pinned_cr4_value,
+            ept_pml4_phys) != 0) {
+        fbvbs_host_ept_release(&g_host_ept_state);
+        return -1;
+    }
 
     if (fbvbs_vmx_build_security_controls(&vmx_security, &state->vmx_caps) != 0) {
         fbvbs_host_ept_release(&g_host_ept_state);

@@ -156,7 +156,6 @@ def classify_block(block):
     # For ifndef blocks, the roles are swapped in our storage
     # but parse already handles that. Check framac_text for
     # patterns that indicate FULL_STUB
-    framac_stripped = framac_text.strip()
 
     # FULL_STUB: FRAMAC block returns early (replaces body)
     if FULL_STUB_RETURN.search(framac_text):
@@ -207,8 +206,21 @@ def scan_file(filepath):
 
 
 def main():
-    strict = "--strict" in sys.argv
-    quiet = "--quiet" in sys.argv
+    # Parse arguments
+    strict = False
+    quiet = False
+    for arg in sys.argv[1:]:
+        if arg == "--help":
+            print(__doc__)
+            sys.exit(0)
+        elif arg == "--strict":
+            strict = True
+        elif arg == "--quiet":
+            quiet = True
+        else:
+            print(f"Unknown argument: {arg}", file=sys.stderr)
+            print(__doc__, file=sys.stderr)
+            sys.exit(2)
 
     # Collect all C source and header files
     files = []

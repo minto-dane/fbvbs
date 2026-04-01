@@ -10,7 +10,7 @@ This campaign is the minimum evidence set needed before calling the standalone m
 
 The repository-local QEMU smoke path is necessary but not sufficient. It now has three preparatory stages:
 
-1. Stage 1: QEMU/TCG boot-to-gate with `intel-iommu`
+1. Stage 1: QEMU/TCG boot-to-gate with `intel-iommu` (Intel-only; AMD IOMMU emulation is not supported in Stage 1)
 2. Stage 2: local QEMU/KVM boot-to-gate when `/dev/kvm` and passwordless `sudo` are available
 3. Stage 3: q35 `intel-iommu` / `amd-iommu` emulation matrix for MMIO/programming-order and fail-closed replay
 
@@ -28,7 +28,7 @@ These stages only demonstrate boot, retained-C initialization, expected fail-clo
 ### AMD campaign
 
 - CPU with SVM, NPT, INVLPGA/flush support as required by the build
-- AMD-Vi capable platform with interrupt remapping support where available
+- AMD-Vi capable platform with interrupt remapping support (required)
 - Secure Boot capable firmware
 - usable COM1/UART or BMC/SOL capture path
 

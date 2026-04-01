@@ -35,7 +35,7 @@ ACS_DT = 0x0040  /* Direct Translated P2P */
 
 1. **Boot-time enumeration**: The hypervisor enumerates PCI devices and populates `device_catalog` with capability flags.
 2. **Operator qualification**: The operator (or automated policy) sets `qualified = 1` for devices that pass all criteria.
-3. **Assignment-time check**: `vm_assign_device` enforces Q1-Q8 before proceeding. Unqualified devices are rejected with `NOT_SUPPORTED_ON_PLATFORM`.
+3. **Assignment-time check**: `vm_assign_device` enforces Q1, Q2, Q4–Q8 before proceeding. Unqualified devices are rejected with `NOT_SUPPORTED_ON_PLATFORM`.
 
 ## Phase 0A Disclaimer
 
@@ -86,7 +86,7 @@ Phase 0B action plan:
 ## Fail-Closed Behavior
 
 - Devices default to `qualified = 0` (unqualified)
-- Missing ACS or FLR capability → assignment rejected
+- Missing ACS or FLR capability → assignment rejected (Phase 0B; in Phase 0A, assignment is based on the `qualified` flag)
 - IOMMU unavailable → assignment rejected (separate check)
 - IOMMU domain setup failure → assignment rejected (Phase 0A)
 

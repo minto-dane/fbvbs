@@ -200,8 +200,10 @@ def main():
     print("# FBVBS Requirement Traceability Matrix")
     print()
     print(f"Generated: {date.today().isoformat()}")
-    src_count = len(scan_directory(SRC_DIR)) if os.path.isdir(SRC_DIR) else 0
-    include_count = len(scan_directory(INCLUDE_DIR)) if os.path.isdir(INCLUDE_DIR) else 0
+    src_files = scan_directory(SRC_DIR) if os.path.isdir(SRC_DIR) else []
+    include_files = scan_directory(INCLUDE_DIR) if os.path.isdir(INCLUDE_DIR) else []
+    src_count = len(src_files)
+    include_count = len(include_files)
     print(f"Source files scanned: {src_count} src + "
           f"{include_count} include")
     print()
@@ -229,7 +231,7 @@ def main():
                 by_file[fname].append(lineno)
             impl_parts = []
             for fname in sorted(by_file.keys()):
-                lines = by_file[fname]
+                lines = sorted(by_file[fname])
                 if len(lines) <= 3:
                     impl_parts.append(f"{fname}:{','.join(str(l) for l in lines)}")
                 else:
@@ -249,7 +251,7 @@ def main():
                 by_file[fname].append(lineno)
             ver_parts = []
             for fname in sorted(by_file.keys()):
-                lines = by_file[fname]
+                lines = sorted(by_file[fname])
                 ver_parts.append(f"{fname}:{','.join(str(l) for l in lines[:3])}")
             ver_str = "; ".join(ver_parts[:3])
         else:

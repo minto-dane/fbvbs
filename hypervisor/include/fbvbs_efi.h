@@ -283,7 +283,7 @@ typedef struct {
  * FBVBS EFI boot information (passed to hypervisor after ExitBootServices)
  * ================================================================ */
 
-#define FBVBS_EFI_BOOT_MAGIC  0x46425642534549ULL  /* "FBVBSEI" */
+#define FBVBS_EFI_BOOT_MAGIC  0x0049455342564246ULL  /* "FBVBSEI\0" */
 
 #define FBVBS_EFI_MAX_MMAP_ENTRIES 512
 

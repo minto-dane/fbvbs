@@ -197,7 +197,7 @@ fbvbs_ivrs_parse(
     }
 
     /* Validate length consistency */
-    if (table->length != table_length ||
+    if (table->length > table_length ||
         table->length > FBVBS_MAX_IVRS_TABLE_SIZE) {
         return -1;
     }
@@ -219,26 +219,31 @@ fbvbs_ivrs_parse(
 
     info->iv_info = table->iv_info;
 
-    /* Parse IVHD/IVMD blocks */
+    /* Parse IVHD/IVMD blocks.
+     * Use table->length (IVRS self-reported size) as the parse bound,
+     * not table_length (accessible buffer size). After the validation
+     * above, table->length <= table_length is guaranteed. */
     offset = (uint32_t)sizeof(struct acpi_ivrs_table_header);
+    {
+    uint32_t parse_limit = table->length;
 
-    /*@ loop invariant sizeof(struct acpi_ivrs_table_header) <= offset <= table_length;
+    /*@ loop invariant sizeof(struct acpi_ivrs_table_header) <= offset <= parse_limit;
         loop invariant info->ivhd_count <= FBVBS_MAX_AMDVI_UNITS;
         loop invariant info->ivmd_count <= FBVBS_MAX_IVMD_REGIONS;
         loop assigns offset, info->ivhd_units[0 .. FBVBS_MAX_AMDVI_UNITS - 1],
                      info->ivhd_count,
                      info->ivmd_regions[0 .. FBVBS_MAX_IVMD_REGIONS - 1],
                      info->ivmd_count;
-        loop variant table_length - offset;
+        loop variant parse_limit - offset;
     */
-    while (offset + 4U <= table_length) {
+    while (offset + 4U <= parse_limit) {
         const struct ivrs_block_header *blk =
             (const struct ivrs_block_header *)(raw + offset);
         uint8_t blk_type = blk->type;
         uint16_t blk_length = blk->length;
 
         /* Validate block bounds */
-        if (blk_length < 4U || offset + (uint32_t)blk_length > table_length) {
+        if (blk_length < 4U || offset + (uint32_t)blk_length > parse_limit) {
             break;
         }
 
@@ -331,6 +336,7 @@ fbvbs_ivrs_parse(
 
         offset += (uint32_t)blk_length;
     }
+    } /* end parse_limit scope */
 
     if (info->ivhd_count == 0U) {
         return -1;
@@ -349,7 +355,7 @@ fbvbs_ivrs_parse(
  * ================================================================ */
 
 /*@ assigns \nothing;
-    ensures \result == \null;
+    ensures \result == \null || \valid_read(\result);
 */
 static const struct acpi_ivrs_table_header *fbvbs_acpi_find_ivrs(void)
 {
@@ -543,6 +549,7 @@ int fbvbs_amdvi_detect(struct fbvbs_global_security_state *state)
 
     ivrs = fbvbs_acpi_find_ivrs();
     if (ivrs == NULL) {
+        state->iommu.iommu_type = IOMMU_TYPE_NONE;
         return -1;
     }
 
@@ -555,6 +562,9 @@ int fbvbs_amdvi_detect(struct fbvbs_global_security_state *state)
             return -1;
         }
     }
+
+    /* Save parsed IVRS pointer for reuse in init */
+    state->iommu.acpi_table = ivrs;
 
     return amdvi_probe_capabilities(state, &info);
 }
@@ -587,8 +597,8 @@ int fbvbs_amdvi_init(struct fbvbs_global_security_state *state)
     state->iommu.kernel_dma_protection = 1;
     return 0;
 #else
-    /* Re-parse IVRS to get MMIO base addresses */
-    ivrs = fbvbs_acpi_find_ivrs();
+    /* Use previously parsed IVRS pointer from detection phase */
+    ivrs = (const struct acpi_ivrs_table_header *)state->iommu.acpi_table;
     if (ivrs == NULL) {
         return -1;
     }

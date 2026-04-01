@@ -37,7 +37,9 @@ static void test_deprivilege_clears_flag_on_reentry(void) {
     g_state.runtime_state_flags = FBVBS_RUNTIME_HOST_DEPRIVILEGED;
 
     assert(fbvbs_deprivilege_host(&g_state) == -1);
-    assert((g_state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) == 0U);
+    /* Double deprivilege rejected early — flag preserved so caller
+     * knows the system is still in deprivileged state. */
+    assert((g_state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) != 0U);
 }
 
 /* ================================================================

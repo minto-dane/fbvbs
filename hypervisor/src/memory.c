@@ -1,4 +1,8 @@
 #include "fbvbs_hypervisor.h"
+#include "fbvbs_asm.h"
+
+#include <stddef.h>
+void *memset(void *destination, int value, size_t length);
 
 /* ================================================================
  * EPT (Extended Page Tables) Construction — Phase 0C-3
@@ -255,6 +259,7 @@ static int fbvbs_ept_map_page(
             if (new_page == 0U) {
                 return -1;
             }
+            memset((void *)(uintptr_t)new_page, 0, FBVBS_PAGE_SIZE);
             if (ept_record_table_page(eps, new_page) != 0) {
                 (void)fbvbs_page_free(new_page);
                 return -1;
@@ -405,10 +410,15 @@ int fbvbs_ept_map_region(
                 }
                 eps->table_page_count = saved_table_count;
             }
+            /* Invalidate cached EPT translations after rollback */
+            (void)fbvbs_asm_invept(1U, eps->pml4_phys);
             return -1;
         }
     }
     } /* end saved_table_count scope */
+
+    /* Invalidate cached EPT translations after successful mapping */
+    (void)fbvbs_asm_invept(1U, eps->pml4_phys);
 
     return 0;
 #endif
@@ -688,6 +698,7 @@ static int fbvbs_memory_object_allocate_owned_pages(
         }
 
         list = (struct fbvbs_memory_object_page_list *)(uintptr_t)list_phys;
+        memset(list, 0, FBVBS_PAGE_SIZE);
         if (object->backing_page_list_head_phys == 0U) {
             object->backing_page_list_head_phys = list_phys;
         }
@@ -1076,10 +1087,13 @@ int fbvbs_memory_object_hash_sha384(
     (void)page_index;
 #else
     fbvbs_sha384_init(&context);
-    for (page_index = 0U; page_index < object->backing_page_count; ++page_index) {
-        uint64_t page_phys;
-        uint64_t bytes_remaining = object->size - ((uint64_t)page_index * FBVBS_PAGE_SIZE);
-        uint64_t chunk = bytes_remaining < FBVBS_PAGE_SIZE ? bytes_remaining : FBVBS_PAGE_SIZE;
+    {
+        uint64_t max_pages = (object->size + FBVBS_PAGE_SIZE - 1U) / FBVBS_PAGE_SIZE;
+        uint64_t limit = object->backing_page_count < max_pages ? object->backing_page_count : max_pages;
+        for (page_index = 0U; page_index < limit; ++page_index) {
+            uint64_t page_phys;
+            uint64_t bytes_remaining = object->size - ((uint64_t)page_index * FBVBS_PAGE_SIZE);
+            uint64_t chunk = bytes_remaining < FBVBS_PAGE_SIZE ? bytes_remaining : FBVBS_PAGE_SIZE;
 
         if (fbvbs_memory_object_get_page_phys(object, page_index, &page_phys) != 0) {
             context = (struct fbvbs_sha384_context){0};
@@ -1090,6 +1104,7 @@ int fbvbs_memory_object_hash_sha384(
             (const void *)(uintptr_t)page_phys,
             chunk
         );
+        }
     }
     fbvbs_sha384_final(&context, out);
 #endif

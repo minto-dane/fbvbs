@@ -262,13 +262,19 @@ void *memmove(void *destination, const void *source, size_t length) {
                \valid_read(((const char *)rhs) + (0 .. length - 1)));
     assigns \nothing;
 */
+/* Defensive NULL handling (non-standard: standard memcmp is UB on NULL).
+ * Both NULL → 0 (equal).  lhs NULL only → -1.  rhs NULL only → +1.
+ * Preserves antisymmetry: memcmp(a,b) == -memcmp(b,a) for NULL inputs. */
 int memcmp(const void *lhs, const void *rhs, size_t length) {
     const char *left = (const char *)lhs;
     const char *right = (const char *)rhs;
     size_t index;
 
-    if (lhs == NULL || rhs == NULL) {
-        return 0;
+    if (lhs == NULL) {
+        return (rhs == NULL) ? 0 : -1;
+    }
+    if (rhs == NULL) {
+        return 1;
     }
 
     /*@

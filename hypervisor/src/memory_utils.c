@@ -530,6 +530,10 @@ void fbvbs_zero_page_at_gpa(uint64_t gpa) {
     if ((gpa & (FBVBS_PAGE_SIZE - 1U)) != 0U || gpa == 0U) {
         return;
     }
+    /* Validate GPA does not overflow when adding page size */
+    if (gpa > UINT64_MAX - FBVBS_PAGE_SIZE) {
+        return;
+    }
 
 #ifndef __FRAMAC__
     fbvbs_zero_memory((void *)(uintptr_t)gpa, FBVBS_PAGE_SIZE);

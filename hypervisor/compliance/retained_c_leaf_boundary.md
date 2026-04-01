@@ -104,8 +104,8 @@ All 23 WP target files achieve full proof discharge under per-file Frama-C WP ve
 The current retained C implementation either refuses success outright or narrows itself to a fixed subset until the required security evidence exists:
 
 - `PARTITION_LOAD_IMAGE`
-  - retained-C の fixed ELF64 `ET_EXEC` loader を実装しており、authoritative `image_object_id` を materialize して `Loaded` を主張できる
-  - 非 executable entry segment、writable でない stack page、executable stack page、manifest/profile 不整合、non-authoritative/missing image object は fail-closed で拒否する
+  - retained-C implements a fixed ELF64 `ET_EXEC` loader that materializes authoritative `image_object_id` and asserts `Loaded`
+  - Non-executable entry segment, non-writable stack page, executable stack page, manifest/profile mismatch, non-authoritative/missing image object are rejected fail-closed
 - `VM_ASSIGN_DEVICE` and `VM_RELEASE_DEVICE`
   - passthrough is disabled because authoritative ACS validation, interrupt remapping control, and safe reset/FLR are not implemented
 - `fbvbs_hypervisor_init`

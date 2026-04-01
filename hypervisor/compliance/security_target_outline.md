@@ -38,7 +38,7 @@ host operating system and its guest virtual machines.
 | Target Architecture | x86-64 (Intel VT-x + EPT, AMD-V + NPT) |
 | Required Hardware | CPU with VMX/SVM, EPT/NPT, IOMMU (VT-d/AMD-Vi), optional TPM 2.0 |
 | Operating Mode | VMX root (ring 0) / SVM host mode |
-| Hosted OS | FreeBSD (target end state: deprivileged in VMX non-root; current retained-C boundary has not completed the handoff) |
+| Hosted OS | FreeBSD (target end state: deprivileged in VMX non-root; current retained-C boundary has not completed the handoff; retained-C boundary is the TCB boundary between FreeBSD and the hypervisor) |
 
 The retained-C boundary has not completed the host handoff yet: the FreeBSD
 host remains part of the trusted computing base, VMX non-root deprivilege is
@@ -661,11 +661,15 @@ no VMX non-root instruction can modify VMCS host state, hypervisor
 page tables, or TOE code/data without causing a VM exit that transfers
 control to the TOE.
 
+**Note:** Current implementation constraint: FreeBSD host remains in VMX non-root (host handoff not completed). Domain separation is partial until the host deprivilege path is finished.
+
 **Bypass protection:** The TOE is the sole entity in VMX root mode.
 All sensitive operations (memory mapping, device assignment, partition
 lifecycle) require hypercall mediation through the command page
 interface. The capability mask restricts which operations each
 partition may invoke.
+
+**Note:** Current implementation constraint: FreeBSD host remains in VMX non-root (host handoff not completed). Bypass protection is partial until the host deprivilege path is finished.
 
 **Non-bypassability:** EPT/NPT page tables are controlled exclusively
 by the TOE. Guest physical addresses are translated through

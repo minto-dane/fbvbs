@@ -188,7 +188,7 @@ static int fbvbs_hlat_add_region(
     }
 
     /* Check for overflow (kernel-high addresses can wrap) */
-    if (linear_base + size < linear_base) {
+    if (linear_base > UINT64_MAX - size) {
         return -1;
     }
 
@@ -1526,13 +1526,30 @@ void fbvbs_hlat_cleanup_partition(
     /* Clear PROC3_HLAT_ENABLE in VMCS before freeing page tables
      * to avoid dangling VMCS references to freed pages. */
     {
+        int pages_freed = 0;
         uint64_t tertiary = 0;
         int vmread_rc = fbvbs_hlat_vmread(VMCS_TERTIARY_PROC_CONTROLS, &tertiary);
         if (vmread_rc == 0) {
             int vmwrite_rc;
             tertiary &= ~PROC3_HLAT_ENABLE;
             vmwrite_rc = fbvbs_hlat_vmwrite(VMCS_TERTIARY_PROC_CONTROLS, tertiary);
-            if (vmwrite_rc != 0) {
+            if (vmwrite_rc == 0) {
+                /* Only free pages when VMCS update succeeded */
+                if (hps->phys_pml4 != 0U) {
+                    (void)fbvbs_page_free(hps->phys_pml4);
+                }
+                if (hps->phys_pdpt != 0U) {
+                    (void)fbvbs_page_free(hps->phys_pdpt);
+                }
+                if (hps->phys_pd != 0U) {
+                    (void)fbvbs_page_free(hps->phys_pd);
+                }
+                if (hps->phys_pt != 0U) {
+                    (void)fbvbs_page_free(hps->phys_pt);
+                }
+                pages_freed = 1;
+            } else {
+                /* vmwrite failed: keep pages allocated to avoid dangling references */
                 (void)fbvbs_log_append(
                     state, 0U,
                     FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
@@ -1543,6 +1560,7 @@ void fbvbs_hlat_cleanup_partition(
                 );
             }
         } else {
+            /* vmread failed: keep pages allocated to avoid dangling references */
             (void)fbvbs_log_append(
                 state, 0U,
                 FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
@@ -1552,23 +1570,16 @@ void fbvbs_hlat_cleanup_partition(
                 (uint32_t)(sizeof(g_hlat_cleanup_vmread_msg) - 1U)
             );
         }
+
+        if (pages_freed != 0) {
+            /* Pages freed successfully — safe to clear all state */
+            *hps = (struct fbvbs_hlat_partition_state){0};
+        } else {
+            /* Pages deliberately leaked — preserve phys_ addresses for
+             * post-mortem diagnostics; only mark partition inactive. */
+            hps->config.active = 0U;
+        }
     }
 
-    /* Release allocated HLAT page table pages */
-    if (hps->phys_pml4 != 0U) {
-        (void)fbvbs_page_free(hps->phys_pml4);
-    }
-    if (hps->phys_pdpt != 0U) {
-        (void)fbvbs_page_free(hps->phys_pdpt);
-    }
-    if (hps->phys_pd != 0U) {
-        (void)fbvbs_page_free(hps->phys_pd);
-    }
-    if (hps->phys_pt != 0U) {
-        (void)fbvbs_page_free(hps->phys_pt);
-    }
-
-    /* Clear partition state */
-    *hps = (struct fbvbs_hlat_partition_state){0};
     fbvbs_hlat_partition_unlock(part_idx);
 }

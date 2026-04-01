@@ -30,6 +30,19 @@ def openssl_output(argv: list[str]) -> str:
     return subprocess.check_output(argv, text=True).strip()
 
 
+def public_key_fingerprint(key_path: pathlib.Path) -> str:
+    """Calculate SHA-256 fingerprint of the public key derived from private key."""
+    # Extract public key from private key
+    pubkey_pem = subprocess.check_output(
+        ["openssl", "pkey", "-pubout", "-in", str(key_path)],
+        text=True
+    )
+    # Calculate SHA-256 of the public key bytes
+    digest = hashlib.sha256()
+    digest.update(pubkey_pem.encode("utf-8"))
+    return digest.hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create detached signatures for retained-C release artifacts.")
     parser.add_argument("--build-dir", default="build", help="Path to the hypervisor build directory")
@@ -61,7 +74,7 @@ def main() -> int:
     metadata = {
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "algorithm": "openssl-dgst-sha256",
-        "key_fingerprint": file_sha256(key_path),
+        "public_key_fingerprint": public_key_fingerprint(key_path),
         "certificate_path": str(cert_path) if cert_path is not None else None,
         "certificate_sha256": file_sha256(cert_path) if cert_path is not None else None,
         "artifacts": [],

@@ -408,7 +408,8 @@ static void fbvbs_vmx_dr_access_exit(
                 vcpu->dr7 = (value & 0x00000000FFFF00FFULL) | 0x0000000000000400ULL;
                 break;
             default:
-                /* DR4/DR5 with CR4.DE=1 cause #UD, should not reach VMX.
+                /* DR4/DR5 are handled in case 4U/5U above.
+                 * This default is for invalid dr_num (outside 0-7).
                  * If somehow reached, ignore silently. */
                 break;
         }

@@ -541,7 +541,7 @@ reproducible: | $(BUILD_DIR)
 		echo "FAIL: Build is NOT deterministic. Differing objects:"; \
 		diff $(BUILD_DIR)/repro_manifest_1.sha256 $(BUILD_DIR)/repro_manifest_2.sha256; \
 		exit 1; \
-		fi
+	fi
 
 sbom: $(REPRO_OBJECTS)
 	@echo "# FBVBS SBOM (Software Bill of Materials)" > $(BUILD_DIR)/sbom.txt
@@ -606,7 +606,18 @@ fuzz-triage: fuzz-campaign
 framac-sync:
 	python3 tools/check_framac_stubs.py --strict
 
+# ---------- grub.cfg placeholder rejection ----------
+# Rejects any grub.cfg that still contains PLACEHOLDER_ tokens.
+check-grub-cfg:
+	@if grep -v '^[[:space:]]*#' grub/grub.cfg | grep -q 'PLACEHOLDER_'; then \
+		echo "ERROR: grub/grub.cfg contains PLACEHOLDER_ token(s) in active lines."; \
+		echo "       Replace with a real hash from: grub-mkpasswd-pbkdf2 --iteration-count=100000"; \
+		grep -n 'PLACEHOLDER_' grub/grub.cfg | grep -v '^[[:space:]]*[0-9]*:[[:space:]]*#'; \
+		exit 1; \
+	fi
+	@echo "check-grub-cfg: no placeholder tokens found."
+
 # ---------- CI gate (Phase 9-8, REQ-1000) ----------
 # Runs all verification gates in sequence. Equivalent to the GitHub Actions pipeline.
-ci: analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom provenance framac-sync
+ci: analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom provenance framac-sync check-grub-cfg
 	@echo "CI: All gates passed."

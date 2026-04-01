@@ -43,7 +43,7 @@ This document records the supported producer-facing deployment profile for the s
 
 - the Multiboot profile must keep the explicit retained boot artifacts in the ISO
 - the UEFI path must use signed boot artifacts and firmware key enrollment appropriate to the operator environment
-- the retained-C host-kernel artifact binding is authoritative only for the documented build profile (see [plan/fbvbs-design.md](/home/nia/opencode/fbvbs/plan/fbvbs-design.md), Appendix L.1.E and the bare-metal release-profile rules in Section L.1.C/L.1.E)
+- the retained-C host-kernel artifact binding is authoritative only for the documented build profile (see [plan/fbvbs-design.md](plan/fbvbs-design.md), Appendix L.1.E and the bare-metal release-profile rules in Section L.1.C/L.1.E)
 
 ## Operational expectations
 

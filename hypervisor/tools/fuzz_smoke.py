@@ -99,7 +99,15 @@ def main() -> int:
                 ok, summary = run_seed(binary, seed_path)
             except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 ok = False
-                summary = f"{binary_name} seed={seed_path.name} status=FAIL error={exc}"
+                # Sanitize exception text to prevent injection into summary
+                exc_text = str(exc)
+                exc_text = exc_text.replace("\n", "\\n")
+                exc_text = exc_text.replace("=", "%3D")
+                exc_text = exc_text.replace(" ", " ")
+                # Collapse consecutive whitespace
+                import re
+                exc_text = re.sub(r"\s+", " ", exc_text)
+                summary = f"{binary_name} seed={seed_path.name} status=FAIL error={exc_text}"
             lines.append(summary)
             if not ok:
                 failed = True

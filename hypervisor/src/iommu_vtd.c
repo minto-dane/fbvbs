@@ -425,6 +425,7 @@ int fbvbs_vtd_detect(struct fbvbs_global_security_state *state)
 
     dmar = fbvbs_acpi_find_dmar();
     if (dmar == NULL) {
+        state->iommu.iommu_type = IOMMU_TYPE_NONE;
         return -1;
     }
 
@@ -585,9 +586,11 @@ struct fbvbs_vtd_domain {
  * Until MMIO mapping is available, all operations fail-closed.
  * ================================================================ */
 
+#if defined(__FRAMAC__)
 /*@ assigns \nothing;
     ensures \result == 0;
 */
+#endif
 static uint32_t vtd_mmio_read32(uint64_t base, uint32_t offset)
 {
 #if defined(__FRAMAC__)
@@ -939,7 +942,7 @@ static void vtd_build_context_entry(
     ctx->lo = VTD_CTX_PRESENT | VTD_CTX_TT_MULTI |
               (slpt_root_phys & VTD_PTE_ADDR_MASK);
     ctx->hi = VTD_CTX_AW_48 |
-              ((uint64_t)domain_id << 8);
+              (((uint64_t)domain_id & 0xffff) << 8);
 }
 
 /* ================================================================

@@ -100,10 +100,13 @@ static int fuzz_one_input(const uint8_t *data, size_t size)
     switch (action & 0x7U) {
     case 0U:
         /* Exercise fbvbs_log_append with fuzzer-controlled payload */
-        (void)fbvbs_log_append(
-            &g_state, cpu_id, source_component,
-            severity, event_code,
-            data, (size > 0U) ? payload_length : 0U);
+        {
+            uint32_t safe_length = (size > 0U) ? ((payload_length > (uint32_t)size) ? (uint32_t)size : payload_length) : 0U;
+            (void)fbvbs_log_append(
+                &g_state, cpu_id, source_component,
+                severity, event_code,
+                data, safe_length);
+        }
         break;
 
     case 1U:

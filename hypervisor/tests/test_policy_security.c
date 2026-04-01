@@ -1348,17 +1348,17 @@ static void test_partition_load_image_requires_guest_initial_stack(void) {
 static void test_platform_detection_fails_closed_without_real_bringup(void) {
     struct fbvbs_global_security_state state;
 
-    /* IOMMU detection: Intel → type set, but fail-closed (no ACPI evidence). */
+    /* IOMMU detection: Intel → fail-closed, type reset (no ACPI evidence). */
     memset(&state, 0, sizeof(state));
     state.vendor = CPU_VENDOR_INTEL;
     assert(fbvbs_iommu_detect(&state) == -1);
-    assert(state.iommu.iommu_type == IOMMU_TYPE_VTD);
+    assert(state.iommu.iommu_type == IOMMU_TYPE_NONE);
 
-    /* IOMMU detection: AMD → type set, but fail-closed. */
+    /* IOMMU detection: AMD → fail-closed, type reset (no ACPI evidence). */
     memset(&state, 0, sizeof(state));
     state.vendor = CPU_VENDOR_AMD;
     assert(fbvbs_iommu_detect(&state) == -1);
-    assert(state.iommu.iommu_type == IOMMU_TYPE_AMD_VI);
+    assert(state.iommu.iommu_type == IOMMU_TYPE_NONE);
 
     /* Boot integrity: Intel → CPUID model detects DRTM bits but
        measured boot cannot be established without platform bring-up. */
@@ -1707,7 +1707,9 @@ static void test_deprivilege_host_rejects_partial_handoff_and_clears_flag(void) 
     memset(&state, 0, sizeof(state));
     state.runtime_state_flags = FBVBS_RUNTIME_HOST_DEPRIVILEGED;
     assert(fbvbs_deprivilege_host(&state) == -1);
-    assert((state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) == 0U);
+    /* Double deprivilege is rejected early — flag must be preserved
+     * so the caller knows the system is still deprivileged. */
+    assert((state.runtime_state_flags & FBVBS_RUNTIME_HOST_DEPRIVILEGED) != 0U);
 }
 
 int main(void) {

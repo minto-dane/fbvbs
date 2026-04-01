@@ -3,6 +3,7 @@
 import argparse
 import pathlib
 import tarfile
+import time
 
 
 def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
@@ -13,6 +14,25 @@ def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:
     if cwd_candidate.exists():
         return cwd_candidate
     return (base_dir / path).resolve()
+
+
+def normalize_tarinfo(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Normalize TarInfo to strip mutable/unsafe metadata."""
+    # Reset mutable metadata
+    tarinfo.mtime = 0
+    tarinfo.uid = 0
+    tarinfo.gid = 0
+    tarinfo.uname = ""
+    tarinfo.gname = ""
+    # Ensure no absolute paths or parent traversal
+    name = tarinfo.name
+    if name.startswith("/"):
+        name = name.lstrip("/")
+    # Remove any parent path references
+    parts = name.split("/")
+    safe_parts = [p for p in parts if p and p != ".."]
+    tarinfo.name = "/".join(safe_parts)
+    return tarinfo
 
 
 def main() -> int:
@@ -82,21 +102,21 @@ def main() -> int:
         for rel in build_files:
             full = build_dir / rel
             arc = pathlib.Path("build") / rel
-            archive.add(full, arcname=str(arc))
+            archive.add(full, arcname=str(arc), filter=normalize_tarinfo)
             index_lines.append(str(arc))
         for rel in optional_build_files:
             full = build_dir / rel
             if full.is_file():
                 arc = pathlib.Path("build") / rel
-                archive.add(full, arcname=str(arc))
+                archive.add(full, arcname=str(arc), filter=normalize_tarinfo)
                 index_lines.append(str(arc))
         qemu_logs_dir = build_dir / "qemu-smoke-logs"
         if qemu_logs_dir.is_dir():
-            archive.add(qemu_logs_dir, arcname="build/qemu-smoke-logs")
+            archive.add(qemu_logs_dir, arcname="build/qemu-smoke-logs", filter=normalize_tarinfo)
             index_lines.append("build/qemu-smoke-logs/")
         for rel in doc_files:
             full = repo_root / rel
-            archive.add(full, arcname=rel)
+            archive.add(full, arcname=rel, filter=normalize_tarinfo)
             index_lines.append(rel)
 
     index_path = build_dir / "release-evidence-index.txt"
