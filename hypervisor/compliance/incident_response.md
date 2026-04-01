@@ -65,12 +65,40 @@ FBVBS key material isolation guarantees:
    - Already-mounted volumes continue (keys cached in FreeBSD GELI/ZFS layer)
    - Operator must unmount affected volumes to purge cached keys
    - **Verification checklist**: After IKS→SKS incident response, verify:
-     1. All affected GELI/ZFS volumes have been unmounted (`mount` / `zpool list` — no IKS-dependent entries active)
-     2. Cached encryption keys have been purged (`geli detach` for each affected provider)
-     3. SKS service partition is in DESTROYED or not-running state
-     4. No IKS-derived key material remains in kernel memory (confirm via audit log: `PARTITION_DESTROY` event for IKS and SKS)
-     - If an automated verification script is available in the deployment toolkit, execute it. No such script currently exists in this repository; when added, place it under `hypervisor/tools/` and reference it here.
-     - If no script is available, perform the above checks manually and record the results in the incident log.
+     1. **All affected GELI/ZFS volumes unmounted.**
+        - Run `mount` and `zpool list`. An "IKS-dependent entry" is any
+          filesystem or pool whose encryption keys were derived via the
+          SKS partition (for example, pools or datasets with names
+          containing a deployment-specific SKS tag, or GELI providers
+          whose keys were provisioned through the IKS→SKS derivation
+          path as recorded in the deployment runbook).
+        - For ZFS: `zfs list -o name,keystatus,encryptionroot` — any
+          dataset showing `keystatus=available` whose encryption root
+          was IKS-derived must be unmounted (`zfs unmount <dataset>`)
+          and its key unloaded (`zfs unload-key <dataset>`).
+        - For GELI: `mount` output referencing `*.eli` devices whose
+          keys were IKS-derived must be unmounted first.
+        - Confirm no IKS-dependent entries remain in `mount` output.
+     2. **Cached GELI encryption keys purged.**
+        - Run `geli status` to list all attached GELI providers.
+        - Identify IKS-derived providers by device name or label as
+          documented in the deployment runbook (for example,
+          `da1p2.eli`, `gpt/sks-data.eli`).
+        - Detach order: unmount filesystems on the provider first
+          (`umount /mnt/sks-data`), then detach the GELI provider
+          (`geli detach gpt/sks-data.eli`). Child consumers must be
+          removed before the underlying provider.
+        - Verify with `geli status` that no IKS-derived providers
+          remain attached.
+     3. SKS service partition is in DESTROYED or not-running state.
+     4. No IKS-derived key material remains in kernel memory (confirm
+        via audit log: `PARTITION_DESTROY` event for both IKS and SKS
+        partitions).
+     - No automated verification script currently exists in this
+       repository. If your deployment on-call toolkit provides one,
+       execute it; otherwise perform the above checks manually and
+       record the results in the incident log. When a script is added,
+       place it under `hypervisor/tools/` and reference it here.
 
    Note: destroying the IKS partition does **not** halt the host partition
    or the hypervisor itself. The host (FreeBSD, partition 0) continues

@@ -34,7 +34,7 @@
 | VMX 制御拡張 | vmx_controls.c | ~350 | 499/499 (0 TO) ✅ | CET-SS + MSR bitmap + preemption timer (Phase 2-3/4/5, 0C-3) |
 | ページアロケータ | page_alloc.c | ~200 | 304/304 (0 TO) ✅ | ビットマップ PFN アロケータ + ゼロ化保証 (Phase 0C-1/2) |
 | ウォッチドッグ | watchdog.c | ~270 | 175/175 (0 TO) ✅ | VMX preemption + NMI watchdog (Phase 1-9) |
-| APIC 仮想化 | apic.c | ~410 | 365/365 (0 TO) ✅ | xAPIC/x2APIC + タイマー + EOI + 割り込み注入 (Phase 1-7) |
+| APIC 仮想化 | apic.c | ~410 | 371/371 (0 TO) ✅ | xAPIC/x2APIC + タイマー + EOI + 割り込み注入 (Phase 1-7) |
 | IDT | idt.c | ~200 | 321/321 (0 TO) ✅ | IDT エントリ構築 + IST スタック (Phase 1-1) |
 | ASM バックエンド | fbvbs_asm.h | ~370 | N/A | 11カテゴリ asm + ACSL contracts (Phase 1-12) |
 | ACPI テーブル | acpi.c | ~120 | 117/117 (0 TO) ✅ | RSDP/RSDT/XSDT 検索 |
