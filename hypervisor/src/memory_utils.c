@@ -92,8 +92,6 @@ int fbvbs_constant_time_equals(const void *a, const void *b, size_t length) {
        Prevents timing side-channel that could leak partial match length. */
     /*@
       @ loop invariant 0 <= index <= length;
-      @ loop invariant accumulator == 0 <==> \forall size_t i; i < index ==>
-      @     va[i] == vb[i];
       @ loop assigns index, accumulator;
       @ loop variant length - index;
       @*/

@@ -133,6 +133,8 @@ FRAMAC ?= $(shell \
 	fi)
 FRAMAC_WP_FLAGS := \
     -wp \
+	-wp-prover alt-ergo,z3 \
+	-wp-timeout 60 \
     -wp-model 'Typed+Cast' \
     -wp-rte \
     -kernel-warn-key annot-error=abort \
@@ -434,6 +436,11 @@ COV_CFLAGS := $(COMMON_WARNINGS) $(HARDENING_FLAGS) -O0 -g \
               --coverage -fprofile-arcs -ftest-coverage $(INCLUDES)
 COV_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/cov_%.o,$(ALL_SOURCES))
 
+# early_init halts forever on production paths; build only this object with
+# __FRAMAC__ in coverage mode so unit tests can exercise it safely.
+$(BUILD_DIR)/cov_early_init.o: COV_CFLAGS += -D__FRAMAC__ -Wno-unused-function
+$(BUILD_DIR)/cov_early_init_tests: COV_CFLAGS += -DFBVBS_EARLY_INIT_COVERAGE_TEST
+
 $(BUILD_DIR)/cov_%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) -c $< -o $@
 
@@ -494,7 +501,7 @@ coverage: coverage-clean $(COV_TEST_BINS)
 	@cd $(BUILD_DIR) && fail=0; \
 	for f in cov_command.gcno cov_vm_policy.gcno cov_vmx.gcno \
 		cov_vmcs_setup.gcno cov_vmx_controls.gcno cov_kernel.gcno \
-		cov_iommu_vtd.gcno cov_iommu_amdvi.gcno; do \
+		cov_iommu_vtd.gcno cov_iommu_amdvi.gcno cov_early_init.gcno; do \
 		[ -f "$$f" ] || continue; \
 		summary=$$(gcov -bc "$$f" 2>/dev/null | head -4); \
 		if echo "$$summary" | grep -q "Lines executed:0.00%"; then \

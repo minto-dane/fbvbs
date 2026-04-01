@@ -143,6 +143,7 @@ void __stack_chk_fail(void) {
     /* fbvbs_boot_halt_forever returns under __FRAMAC__; satisfy noreturn. */
     while (1) {}
 #endif
+    __builtin_unreachable();
 }
 
 /*@ behavior null_destination:

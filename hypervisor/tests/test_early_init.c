@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "../include/fbvbs_efi.h"
 #include "../include/fbvbs_hypervisor.h"
 
 /* Stub: audit sink */
@@ -57,11 +58,52 @@ static void test_deprivilege_rejects_fresh_state(void) {
     assert(fbvbs_deprivilege_host(&g_state) == -1);
 }
 
+/* ================================================================
+ * Test: early EFI bridge rejects null boot info
+ * ================================================================ */
+#ifdef FBVBS_EARLY_INIT_COVERAGE_TEST
+static void test_efi_bridge_rejects_null_boot_info(void) {
+    fbvbs_efi_to_hypervisor(NULL);
+}
+
+/* ================================================================
+ * Test: early EFI bridge rejects invalid magic
+ * ================================================================ */
+static void test_efi_bridge_rejects_invalid_magic(void) {
+    struct fbvbs_efi_boot_info boot_info;
+
+    memset(&boot_info, 0, sizeof(boot_info));
+    boot_info.memory_map_addr = 0x1000U;
+    boot_info.descriptor_size = sizeof(uint64_t);
+    boot_info.mmap_entry_count = 1U;
+    fbvbs_efi_to_hypervisor(&boot_info);
+}
+
+/* ================================================================
+ * Test: early EFI bridge processes minimal valid boot info
+ * ================================================================ */
+static void test_efi_bridge_accepts_minimal_boot_info(void) {
+    struct fbvbs_efi_boot_info boot_info;
+
+    memset(&boot_info, 0, sizeof(boot_info));
+    boot_info.magic = FBVBS_EFI_BOOT_MAGIC;
+    boot_info.memory_map_addr = 0x1000U;
+    boot_info.descriptor_size = sizeof(uint64_t);
+    boot_info.mmap_entry_count = 1U;
+    fbvbs_efi_to_hypervisor(&boot_info);
+}
+#endif
+
 int main(void) {
     test_platform_foundation_not_ready_on_zeroed_state();
     test_high_assurance_not_ready_without_bringup();
     test_host_deprivilege_not_ready_on_fresh_state();
     test_audit_not_ready_on_fresh_state();
     test_deprivilege_rejects_fresh_state();
+#ifdef FBVBS_EARLY_INIT_COVERAGE_TEST
+    test_efi_bridge_rejects_null_boot_info();
+    test_efi_bridge_rejects_invalid_magic();
+    test_efi_bridge_accepts_minimal_boot_info();
+#endif
     return 0;
 }

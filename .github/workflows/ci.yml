@@ -149,6 +149,7 @@ jobs:
 
       - name: Build and run with coverage
         run: |
+          mkdir -p hypervisor/build
           make -C hypervisor coverage CC=gcc-13 | tee hypervisor/build/coverage-summary.txt
 
       - name: Upload coverage artifacts
@@ -240,9 +241,9 @@ jobs:
         run: |
           mkdir -p hypervisor/build
           python3 hypervisor/tools/traceability_matrix.py | tee hypervisor/build/traceability.txt
-          if grep -qi "no source reference" hypervisor/build/traceability.txt; then
+          if grep -E "Requirements with NO source reference: [1-9][0-9]*" hypervisor/build/traceability.txt; then
             echo "FAIL: Some requirements have no source reference"
-            grep -i "no source reference" hypervisor/build/traceability.txt
+            grep -E "Requirements with NO source reference: [1-9][0-9]*" hypervisor/build/traceability.txt
             exit 1
           fi
 
