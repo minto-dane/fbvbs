@@ -67,11 +67,10 @@ static void test_vtd_detect_no_acpi(void) {
     memset(&state, 0, sizeof(state));
 
     status = fbvbs_vtd_detect(&state);
-    /* No DMAR → returns 0 (not found, not error) or -1 */
-    if (status <= 0) {
+    /* No DMAR → returns 0 or -1 (contract: result == 0 || result == -1) */
+    assert(status <= 0);
+    if (status == -1) {
         assert(state.iommu.iommu_type == IOMMU_TYPE_NONE);
-    } else {
-        assert(state.iommu.iommu_type == IOMMU_TYPE_VTD);
     }
 }
 

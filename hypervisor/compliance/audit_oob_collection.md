@@ -24,7 +24,9 @@ The mirror ring is not the primary evidence source.
 2. Configure collector time synchronization explicitly:
    - NTP per RFC 5905 is the baseline requirement with authenticated `chrony`/`NTPsec` and measured offset `<= 100 ms`.
    - PTP / IEEE 1588 is required for sub-millisecond environments, with authenticated grandmaster configuration and measured offset `<= 1 ms`.
-   - The collector must log the active sync source, protocol, measured offset/drift, and the timestamp of the last successful sync. If drift exceeds threshold, the audit collection run is failed. The allowed drift thresholds are: NTP drift > 500 ms or PTP drift > 100 ppm. If drift exceeds these limits, the audit collection run is marked as failed.
+   - **Offset** is the instantaneous time difference between the collector and its reference source. Thresholds: NTP offset must be `<= 100 ms`; PTP offset must be `<= 1 ms`. **Drift** is the clock rate deviation over time. Thresholds: NTP drift must be `<= 500 ms` accumulated; PTP drift must be `<= 100 ppm`.
+   - Both offset and drift must independently pass for the audit collection run to be valid. If either metric exceeds its threshold, the audit collection run is marked as failed.
+   - The collector must log the active sync source, protocol, measured offset, measured drift, and the timestamp of the last successful sync. Each logged metric must be attributable to its respective check (offset or drift).
 3. Establish continuous service monitoring:
    - health check or heartbeat for the collector daemon/service by exact service name
    - log and metric collection for collector restart count, ingest error rate, dropped bytes, framing errors, and clock drift

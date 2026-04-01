@@ -382,6 +382,21 @@ static void fbvbs_vmx_dr_access_exit(
         return;
     }
 
+    /* Validate dr_num is in range 0-7 (x86 has DR0-DR7 only).
+     * Invalid values indicate hardware/firmware anomaly — same
+     * fail path as invalid access_type above. */
+    if (dr_num > 7U) {
+        fbvbs_log_append_rate_limited(state, 0U,
+                         FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                         FBVBS_SEVERITY_ALERT,
+                         FBVBS_EVENT_DR_ACCESS_INTERCEPT,
+                         (const uint8_t *)0, 0U);
+        response->exit_reason = FBVBS_VM_EXIT_REASON_DR_ACCESS;
+        response->exit_length = 0U;
+        vcpu->state = FBVBS_VCPU_STATE_FAULTED;
+        return;
+    }
+
     /* Handle MOV to DR (guest write) — update shadow state */
     if (is_read == 0U) {
         switch (dr_num) {

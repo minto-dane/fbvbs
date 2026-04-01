@@ -661,7 +661,7 @@ no VMX non-root instruction can modify VMCS host state, hypervisor
 page tables, or TOE code/data without causing a VM exit that transfers
 control to the TOE.
 
-**Note:** Current implementation constraint: FreeBSD host remains in VMX non-root (host handoff not completed). Domain separation is partial until the host deprivilege path is finished.
+**Note:** Current implementation constraint: FreeBSD host remains in VMX root (host handoff not completed; target end state is VMX non-root deprivilege). Domain separation is partial until the host deprivilege path is finished.
 
 **Bypass protection:** The TOE is the sole entity in VMX root mode.
 All sensitive operations (memory mapping, device assignment, partition
@@ -669,7 +669,7 @@ lifecycle) require hypercall mediation through the command page
 interface. The capability mask restricts which operations each
 partition may invoke.
 
-**Note:** Current implementation constraint: FreeBSD host remains in VMX non-root (host handoff not completed). Bypass protection is partial until the host deprivilege path is finished.
+**Note:** Current implementation constraint: FreeBSD host remains in VMX root (host handoff not completed). Bypass protection is partial until the host deprivilege path is finished.
 
 **Non-bypassability:** EPT/NPT page tables are controlled exclusively
 by the TOE. Guest physical addresses are translated through

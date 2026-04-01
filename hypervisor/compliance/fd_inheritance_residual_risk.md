@@ -280,7 +280,7 @@ registration:
 | 4 | Enters Capsicum capability mode (cap_enter) after resource acquisition | **Recommended** | Strongest available fd restriction; prevents new global namespace operations |
 | 5 | Drops privileges (seteuid to real UID) as early as possible | **Required** | Limits the privilege window during which inherited fds could cause damage |
 | 6 | Does not read from or write to fds passed via environment variables or command-line arguments without validation | **Required** | Prevents attacker from directing I/O to inherited descriptors |
-| 7 | Uses syscall restriction if available: `pledge(2)` (OpenBSD only). On FreeBSD, use `procctl(2)` with `PROC_NO_NEW_PRIVS` or equivalent process supervision policy. Capsicum `cap_enter(2)` is already covered by requirement #4 and should not be duplicated here. | **Recommended** | Additional defense-in-depth for syscall surface reduction |
+| 7 | Uses syscall restriction if available: `pledge(2)` (OpenBSD only). On FreeBSD, use `procctl(2)` with `PROC_NO_NEW_PRIVS_CTL` or equivalent process supervision policy. Capsicum `cap_enter(2)` is already covered by requirement #4 and should not be duplicated here. | **Recommended** | Additional defense-in-depth for syscall surface reduction |
 | 8 | Audited for CWE-403 (Exposure of File Descriptor to Unintended Control Sphere) | **Required** | Systematic check against the relevant CWE |
 
 ### 7.1 Audit Evidence

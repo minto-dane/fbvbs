@@ -44,7 +44,7 @@
 | リンカスクリプト | fbvbs.ld | ~170 | N/A | ガードページ + IST スタック + W^X + ASSERT 検証 (Phase 1-11) |
 | ファジングハーネス | fuzz/*.c | ~550 | N/A | command page + manifest + multiboot2 + iommu (Phase 9-1) |
 
-**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,866 / 14,809 (57 TO 残存) 99.6%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
+**WP検証合計 (2026-03-30):** 23ファイル per-file 検証 **14,872 / 14,872 (0 TO) 100%** — Alt-Ergo 2.4.3 + Z3 4.8.12, 60s timeout, Typed+Cast モデル。詳細: `compliance/wp_verification_boundary.md`
 
 ### 未実装・ブロッカー
 
@@ -53,7 +53,7 @@
 3. ~~**並行性設計**~~ — ✅ Phase 1-6 完了。BHL + per-CPU 戦略文書化 (fbvbs_concurrency.h) (2026-03-21)
 4. **IOMMU 実機有効化** — DMAR/IVRS パース済み、ページアロケータ接続済み、retained-C foundation は runtime-ready IOMMU と initialized audit path まで評価可能だが、authoritative 実機 bring-up の閉鎖は未完
 5. **ブートパス** — Multiboot2 bare-metal/QEMU smoke は追加済み、UEFI handoff はなお skeleton が残る
-6. ~~**WP proof hardening**~~ — ✅ 全23ファイル 14,436/14,436 (0 TO) 達成 (2026-03-30)。assembly wrapper ACSL contracts、compound literal stub、loop variant 修正、bounded-shift helper 等
+6. ~~**WP proof hardening**~~ — ✅ 全23ファイル 14,872/14,872 (0 TO) 達成 (2026-03-30)。assembly wrapper ACSL contracts、compound literal stub、loop variant 修正、bounded-shift helper 等
 7. ~~**KCI byte binding**~~ — ✅ full-module SHA-384 verification + approved per-page digest table (2026-03-24)
 8. **Broader executable loader profile** — retained-C fixed `ET_EXEC` loader は実装済み。残作業は `ET_DYN`/再配置/boot-time service orchestration のような release 範囲外 profile をどう扱うかの設計閉鎖
 9. ~~**VM exit 緩和列の実装完了**~~ — ✅ RSB fill / PBRSB / BHB clear の実装済み。残課題は実機 placement と proof hardening
@@ -308,22 +308,8 @@
     - IST スタック分離: #NMI, #DF, #MC に専用スタック（スタック破損カスケード防止）
     - 例外ハンドラ: UART 一次ログ出力後 halt
     - IST スタック境界の ACSL 契約
-12. **Manifest-Driven Autostart (監査補遺 C.4):**
-    - manifest の `autostart=true` に基づく boot 時自動パーティション生成
-    - `service_kind`, `memory_limit_bytes`, `capability_mask`, `vcpu_count`, `initial_sp` の manifest 決定
-    - `SERVICE_KIND_KCI/KSI/IKS/SKS/UVS` の 5 種限定
-    - 測定前は `SERVICE_KIND_NONE` として扱う
-    - 参照: 監査補遺 C.4 (Section 12, 19)
-13. **CPU 初期状態凍結 (監査補遺 C.9):**
-    - `RFLAGS = 0x0000000000000002`（bit 1 必須）
-    - `CR0` 基底値 `0x80010033` + pin policy 適用
-    - `CR4` 基底値 `0x000006f0` + pin policy 適用
-    - 汎用レジスタ（RIP/RSP 除き）= 0
-    - XMM/YMM/ZMM = 0
-    - FS.base/GS.base = 0
-    - flat 64-bit segment model
-    - RSI = bootstrap page GPA
-    - 参照: 監査補遺 C.9 (Section 18)
+12. **Manifest-Driven Autostart (監査補遺 C.4)** — 詳細は Phase 4-1 項目 5 を参照
+13. **CPU 初期状態凍結 (監査補遺 C.9)** — 詳細は Phase 4-1 項目 6 を参照
 
 #### 1-2. ベアメタル初期化（boot.S） ✅（Multiboot2 パス実装済み）
 

@@ -105,7 +105,7 @@ The current retained C implementation either refuses success outright or narrows
 
 - `PARTITION_LOAD_IMAGE`
   - retained-C implements a fixed ELF64 `ET_EXEC` loader that materializes authoritative `image_object_id` and asserts `Loaded`
-  - Non-executable entry segment, non-writable stack page, executable stack page, manifest/profile mismatch, non-authoritative/missing image object are rejected fail-closed
+  - non-executable entry segment, non-writable stack page, executable stack page, manifest/profile mismatch, non-authoritative/missing image object are rejected fail-closed
 - `VM_ASSIGN_DEVICE` and `VM_RELEASE_DEVICE`
   - passthrough is disabled because authoritative ACS validation, interrupt remapping control, and safe reset/FLR are not implemented
 - `fbvbs_hypervisor_init`

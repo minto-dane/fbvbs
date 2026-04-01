@@ -32,11 +32,22 @@ def openssl_output(argv: list[str]) -> str:
 
 def public_key_fingerprint(key_path: pathlib.Path) -> str:
     """Calculate SHA-256 fingerprint of the public key derived from private key."""
-    # Extract public key from private key
-    pubkey_pem = subprocess.check_output(
-        ["openssl", "pkey", "-pubout", "-in", str(key_path)],
-        text=True
-    )
+    # Extract public key from private key.
+    # stdin=DEVNULL prevents hang on passphrase-protected keys.
+    try:
+        result = subprocess.run(
+            ["openssl", "pkey", "-pubout", "-in", str(key_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"failed to extract public key from {key_path}: {exc.stderr.strip()}"
+        ) from exc
+    pubkey_pem = result.stdout
     # Calculate SHA-256 of the public key bytes
     digest = hashlib.sha256()
     digest.update(pubkey_pem.encode("utf-8"))

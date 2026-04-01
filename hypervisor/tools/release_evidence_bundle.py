@@ -3,7 +3,6 @@
 import argparse
 import pathlib
 import tarfile
-import time
 
 
 def resolve_user_path(base_dir: pathlib.Path, raw_path: str) -> pathlib.Path:

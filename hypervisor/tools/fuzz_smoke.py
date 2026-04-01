@@ -103,7 +103,6 @@ def main() -> int:
                 exc_text = str(exc)
                 exc_text = exc_text.replace("\n", "\\n")
                 exc_text = exc_text.replace("=", "%3D")
-                exc_text = exc_text.replace(" ", " ")
                 # Collapse consecutive whitespace
                 import re
                 exc_text = re.sub(r"\s+", " ", exc_text)

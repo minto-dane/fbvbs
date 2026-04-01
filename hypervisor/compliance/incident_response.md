@@ -64,7 +64,13 @@ FBVBS key material isolation guarantees:
    - New mount operations fail (fail-closed)
    - Already-mounted volumes continue (keys cached in FreeBSD GELI/ZFS layer)
    - Operator must unmount affected volumes to purge cached keys
-   - **Verification checklist**: After IKS→SKS incident response, verify that all affected volumes have been unmounted and cached keys purged. Execute automated verification script if available.
+   - **Verification checklist**: After IKS→SKS incident response, verify:
+     1. All affected GELI/ZFS volumes have been unmounted (`mount` / `zpool list` — no IKS-dependent entries active)
+     2. Cached encryption keys have been purged (`geli detach` for each affected provider)
+     3. SKS service partition is in DESTROYED or not-running state
+     4. No IKS-derived key material remains in kernel memory (confirm via audit log: `PARTITION_DESTROY` event for IKS and SKS)
+     - If an automated verification script is available in the deployment toolkit, execute it. No such script currently exists in this repository; when added, place it under `hypervisor/tools/` and reference it here.
+     - If no script is available, perform the above checks manually and record the results in the incident log.
 
    Note: destroying the IKS partition does **not** halt the host partition
    or the hypervisor itself. The host (FreeBSD, partition 0) continues

@@ -508,7 +508,7 @@ coverage: coverage-clean $(COV_TEST_BINS)
 # Deterministic compilation: fixed timestamp, no debug paths, sorted inputs.
 # SBOM generation: records compiler, flags, source hashes.
 
-.PHONY: reproducible sbom
+.PHONY: reproducible sbom framac-sync check-grub-cfg
 
 REPRO_CFLAGS := $(COMMON_WARNINGS) $(HARDENING_FLAGS) -O2 $(INCLUDES) \
                 -ffile-prefix-map=$(CURDIR)=. \
