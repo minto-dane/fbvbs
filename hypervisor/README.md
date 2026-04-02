@@ -1,57 +1,204 @@
-# Standalone Microhypervisor Boundary
+# スタンドアロン マイクロハイパーバイザー
 
-This directory is the producer-facing retained-C microhypervisor component.
+このディレクトリは、retained-C で実装されたマイクロハイパーバイザーの単体コンポーネントです。
 
-It is intentionally narrower than the full FBVBS stack:
+完全な FBVBS スタックよりも意図的にスコープを絞っています:
 
-- included here: buildable hypervisor core, bare-metal boot path, tests, fuzz harnesses, compliance notes
-- not included here: future trusted service partitions, FreeBSD frontend, bhyve/vmm integration
+- 含まれるもの: ハイパーバイザー本体、bare-metal ブートパス、テスト、ファズハーネス、コンプライアンス文書
+- 含まれないもの: トラステッドサービスパーティション、FreeBSD フロントエンド、bhyve/vmm 統合
 
-## Main Commands
+## 前提条件
+
+### 必須パッケージ（ビルド・テスト・静的解析）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    gcc-13 \
+    make \
+    cppcheck \
+    python3
+```
+
+### Bare-metal ISO ビルド・QEMU スモークテスト用
+
+```bash
+sudo apt-get install -y \
+    qemu-system-x86 \
+    grub-pc-bin \
+    grub-common \
+    xorriso \
+    mtools
+```
+
+### Frama-C WP 形式検証用
+
+```bash
+sudo apt-get install -y opam z3
+opam init --auto-setup --disable-sandboxing -y
+opam install frama-c alt-ergo -y
+eval $(opam env)
+```
+
+> **注意:** Frama-C コマンドの実行前には毎回 `eval $(opam env)` が必要です。
+
+## ビルドチュートリアル
+
+### 1. リポジトリの取得と移動
+
+```bash
+git clone <repository-url>
+cd fbvbs/hypervisor
+```
+
+### 2. 基本ビルド（静的解析）
+
+GCC の `-fanalyzer` で全ソースを解析します。まずはここから始めてください。
 
 ```bash
 make analyze
+```
+
+成功すると `GCC -fanalyzer: all 25 sources passed.` と表示されます。
+
+### 3. ユニットテストの実行
+
+8 つのテストスイートを順番に実行します。
+
+```bash
 make test
-make coverage
+```
+
+### 4. cppcheck による追加の静的解析
+
+```bash
 make cppcheck
+```
+
+### 5. カバレッジ計測
+
+gcov で行カバレッジとブランチカバレッジを計測します。
+
+```bash
+make coverage
+```
+
+結果は `build/` 配下の `.gcov` ファイルに出力されます。
+
+### 6. ファズハーネスのビルドとスモークテスト
+
+6 つのファズハーネスをビルドし、コミット済みコーパスでスモーク実行します。
+
+```bash
 make fuzz-build
 make fuzz-smoke
-make proof
-make proof-smoke
-make baremetal-iso
-make run-qemu-smoke
+```
+
+### 7. Bare-metal ISO のビルドと QEMU 起動
+
+GRUB Multiboot2 の ISO イメージを作成し、QEMU でブートテストを行います。
+
+```bash
+make baremetal-iso          # ISO イメージの生成
+make run-qemu-smoke         # TCG モードでスモークテスト
+make run-qemu-iommu-smoke   # Intel/AMD 両 IOMMU エミュレーション
+make run-qemu-matrix        # 全組み合わせマトリクス
+```
+
+KVM が利用可能な環境では、より高速なテストも実行できます:
+
+```bash
 make run-qemu-kvm-smoke
-make run-qemu-iommu-smoke
-make run-qemu-matrix
-make provenance
-FBVBS_RELEASE_SIGNING_KEY=/path/to/release-key.pem make sign-release
+```
+
+### 8. Frama-C WP 形式検証
+
+ACSL アノテーションに対する WP 証明を実行します。事前に opam 環境を有効にしてください。
+
+```bash
+eval $(opam env)
+make proof              # 全ソース一括検証
+make proof-shards       # ファイルごとの個別検証（推奨）
+make proof-smoke        # 起動確認のみ（高速）
+```
+
+### 9. CI ゲート全体の一括実行
+
+CI パイプラインと同等の全検証を順番に実行します。
+
+```bash
+make ci
+```
+
+### 10. リリースビルド
+
+全ゲート通過後、リリース成果物を生成します。
+
+```bash
 make release-readiness
 make release-manifest
 make release-evidence
 make release-hypervisor
 ```
 
-## Current Boot Status
+署名付きリリースを行う場合:
 
-The bare-metal Multiboot2 image now has a staged repository-local QEMU path:
+```bash
+FBVBS_RELEASE_SIGNING_KEY=/path/to/release-key.pem make sign-release
+```
 
-- Stage 1: `make run-qemu-smoke` runs the required QEMU/TCG boot-to-gate smoke with Intel VT-d emulation.
-- Stage 2: `make run-qemu-kvm-smoke` runs the stricter local QEMU/KVM boot-to-gate smoke when `/dev/kvm` and passwordless `sudo` are available.
-- Stage 3: `make run-qemu-iommu-smoke` replays the boot-to-gate path against both q35 `intel-iommu` and `amd-iommu` emulation, and `make run-qemu-matrix` bundles the full repository-local matrix with per-case logs.
+## 主要コマンド一覧
 
-In the current development environment, these paths reach `boot64`, boot artifact materialization, boot catalog ingest, and FreeBSD host partition seeding. Environments that do not expose usable VMX still stop fail-closed at `VMX unavailable`. The retained-C audit path now serializes committed records to the primary COM1/UART sink on bare-metal while keeping the mirror ring in memory. The current retained-C boot path also distinguishes:
+| コマンド | 説明 |
+|---------|------|
+| `make analyze` | GCC `-fanalyzer` による静的解析 |
+| `make test` | ユニットテスト（8 スイート） |
+| `make coverage` | gcov カバレッジ計測 |
+| `make cppcheck` | cppcheck 静的解析 |
+| `make fuzz-build` | ファズハーネスのビルド |
+| `make fuzz-smoke` | ファズスモークテスト |
+| `make proof` | Frama-C WP 一括検証 |
+| `make proof-shards` | Frama-C WP ファイル別検証 |
+| `make proof-smoke` | Frama-C WP 起動確認 |
+| `make baremetal-iso` | Bare-metal ISO 生成 |
+| `make run-qemu-smoke` | QEMU/TCG スモークテスト |
+| `make run-qemu-kvm-smoke` | QEMU/KVM スモークテスト |
+| `make run-qemu-iommu-smoke` | IOMMU エミュレーション付きスモーク |
+| `make run-qemu-matrix` | QEMU 全マトリクス実行 |
+| `make ci` | CI ゲート一括実行 |
+| `make provenance` | 来歴メタデータ生成 |
+| `make release-hypervisor` | リリースゲート実行 |
+| `make sign-release` | 署名付きリリース |
 
-- foundation readiness: VMX + runtime-ready IOMMU (`fbvbs_platform_foundation_ready`)
-- audit runtime readiness: initialized mirror ring plus retained-C primary UART/OOB sink (`fbvbs_audit_runtime_ready`)
-- high-assurance foundation readiness: foundation + measured boot (`fbvbs_platform_high_assurance_foundation_ready`)
-- host deprivilege readiness: end-to-end `VMLAUNCH` handoff (`fbvbs_host_deprivilege_runtime_ready`)
+## 現在のブート状況
 
-At boot-artifact level, the bare-metal host kernel artifact is bound to the loaded hypervisor image bytes, and the remaining retained boot artifacts are bound to explicit Multiboot modules via `artifact:0x...` or `fbvbs.object_id=0x...` cmdlines. `make baremetal-iso verify-baremetal-iso` checks that those modules are actually present in the release ISO.
+bare-metal Multiboot2 イメージには、リポジトリ内で完結する段階的な QEMU テストパスがあります:
 
-For host-side verification, the retained-C CPU security layer uses a deterministic software MSR model in userspace builds so unit tests, gcov runs, and fuzz harnesses never attempt privileged `RDMSR/WRMSR`. The bare-metal build path still uses real MSR instructions.
+- **ステージ 1:** `make run-qemu-smoke` — Intel VT-d エミュレーション付き QEMU/TCG ブートテスト
+- **ステージ 2:** `make run-qemu-kvm-smoke` — `/dev/kvm` とパスワードなし `sudo` が必要な QEMU/KVM ブートテスト
+- **ステージ 3:** `make run-qemu-iommu-smoke` — q35 上で `intel-iommu` と `amd-iommu` の両方をテスト。`make run-qemu-matrix` で全組み合わせを一括実行
 
-## Release Caveat
+現在の開発環境では、`boot64` → ブートアーティファクト実体化 → ブートカタログ取り込み → FreeBSD ホストパーティションのシードまで到達します。VMX を公開しない環境では `VMX unavailable` で安全に停止します。
 
-This directory now has a passing `make release-hypervisor` retained-C foundation gate in the current environment, and that gate now emits `provenance.json`, `release-readiness.json`, `release-evidence.tar.gz`, the staged QEMU summaries, and per-case QEMU logs. Detached signatures can be added with `make sign-release` once operator key material is available. It is still not a fully closed high-assurance release while proof gaps, authoritative hardware bring-up gaps, and host deprivilege handoff remain.
+retained-C の監査パスは、bare-metal 上でコミット済みレコードをプライマリ COM1/UART シンクへ出力しつつ、ミラーリングをメモリ上に保持します。ブートパスは以下の準備状態を区別します:
 
-The coverage gate now includes the leaf-boundary suite in addition to policy-security and fault-injection suites, rejects zero line/branch coverage regressions for `command.c`, `vm_policy.c`, and `vmx.c`, and currently reaches 24.44%/57.62% (`command.c`), 67.34%/59.32% (`vm_policy.c`), and 95.00%/100.00% (`vmx.c`) line/branch execution in the repository-local run.
+- **基盤準備完了:** VMX + ランタイム対応 IOMMU (`fbvbs_platform_foundation_ready`)
+- **監査ランタイム準備完了:** ミラーリング初期化済み + retained-C プライマリ UART/OOB シンク (`fbvbs_audit_runtime_ready`)
+- **高保証基盤準備完了:** 基盤 + measured boot (`fbvbs_platform_high_assurance_foundation_ready`)
+- **ホスト権限委譲準備完了:** `VMLAUNCH` ハンドオフ完了 (`fbvbs_host_deprivilege_runtime_ready`)
+
+ブートアーティファクトは、ホストカーネル成果物がハイパーバイザーイメージのバイト列に紐付けられ、その他の retained ブートアーティファクトは `artifact:0x...` / `fbvbs.object_id=0x...` コマンドラインを持つ Multiboot モジュールとして受理されます。`make baremetal-iso verify-baremetal-iso` でこれらのモジュールが ISO に含まれていることを検証できます。
+
+ホスト側の検証では、retained-C CPU セキュリティ層がユーザー空間ビルドで決定論的なソフトウェア MSR モデルを使用します。そのため、ユニットテスト・gcov・ファズハーネスは特権命令 `RDMSR/WRMSR` を実行しません。bare-metal ビルドでは実 MSR 命令を使用します。
+
+## リリースに関する注意
+
+現在の環境で `make release-hypervisor` の retained-C 基盤ゲートは通過しており、`provenance.json`、`release-readiness.json`、`release-evidence.tar.gz`、QEMU テストサマリー、ケースごとの QEMU ログが出力されます。署名鍵が用意できれば `make sign-release` で分離署名を追加できます。ただし、証明の未完了箇所、ハードウェア初期化の未完了箇所、ホスト権限委譲ハンドオフが残っているため、高保証リリースとしてはまだ完結していません。
+
+カバレッジゲートはリーフ境界・ポリシーセキュリティ・障害注入の各テストスイートを含み、`command.c`・`vm_policy.c`・`vmx.c` の行/ブランチカバレッジがゼロに退行することを拒否します。現在の計測値は以下の通りです:
+
+| ファイル | 行カバレッジ | ブランチカバレッジ |
+|---------|------------|-----------------|
+| `command.c` | 24.44% | 57.62% |
+| `vm_policy.c` | 67.34% | 59.32% |
+| `vmx.c` | 95.00% | 100.00% |

@@ -1,34 +1,32 @@
-# FBVBS Fuzz Harnesses
+# FBVBS ファズハーネス
 
-This directory contains repository-local fuzz entry points for the retained C microhypervisor.
+このディレクトリには、retained-C マイクロハイパーバイザー向けのfuzzテスト用エントリポイントが含まれています。
 
-## Harnesses
+## ハーネス一覧
 
 - `fuzz_command_page.c`
-  - exercises command-page parsing and dispatch preconditions
-  - current limitation: single-threaded model, so inter-CPU TOCTOU is out of scope
+  - コマンドページの解析とディスパッチ前提条件を検査します
+  - 制限事項: ファズハーネスはシングルスレッドで動作するため、複数 CPU が同時にコマンドページを操作する競合状態（TOCTOU）は検査対象外です。ハイパーバイザー本体はマルチ CPU 対応であり、本番コードではスピンロックやローカルコピーで競合を防いでいます
 - `fuzz_manifest.c`
-  - stresses manifest/profile/artifact validation paths
+  - マニフェスト・プロファイル・アーティファクトの検証パスを検査します
 - `fuzz_multiboot2.c`
-  - stresses Multiboot2 tag parsing and bounds handling
+  - Multiboot2 タグの解析と境界チェックを検査します
 - `fuzz_iommu.c`
-  - stresses DMAR/IVRS table parsing and bounded IOMMU discovery logic
+  - DMAR/IVRS テーブルの解析と IOMMU 探索ロジックを検査します
 - `fuzz_log_decoder.c`
-  - stresses audit-log ring initialization, append paths, CRC handling,
-    and mirror-info queries
+  - 監査ログリングの初期化、レコード追記、CRC 処理、ミラー情報照会を検査します
 - `fuzz_partition_loader.c`
-  - stresses the retained-C fixed ELF64 `ET_EXEC` partition loader,
-    including manifest/profile binding, segment validation, and cleanup
+  - retained-C 固定 ELF64 `ET_EXEC` パーティションローダーを検査します（マニフェスト/プロファイル紐付け、セグメント検証、後処理を含む）
 
-## Current status
+## 現在の状況
 
-- The repository ships the harness sources, committed seed corpora under `fuzz/corpus/`, `make -C hypervisor fuzz-build`, and `make -C hypervisor fuzz-smoke`.
-- The committed smoke corpus is intentionally small and deterministic; long-running AFL++/libFuzzer campaigns remain complementary external evidence.
-- Fuzz results are supporting evidence, not a substitute for proof obligations or hardware validation.
+- リポジトリにはハーネスのソース、`fuzz/corpus/` 配下のシードコーパス、`make -C hypervisor fuzz-build`、`make -C hypervisor fuzz-smoke` が同梱されています。
+- シードコーパスは意図的に小規模かつ決定論的です。長時間の AFL++/libFuzzer による本格的なファジングは、補完的な外部エビデンスとして別途実施します。
+- ファズテストの結果は補助的なエビデンスであり、形式検証やハードウェア検証の代替にはなりません。
 
-## Usage
+## 使い方
 
-Build all harnesses:
+全ハーネスのビルドとスモークテスト:
 
 ```bash
 cd hypervisor
@@ -36,4 +34,4 @@ make fuzz-build
 make fuzz-smoke
 ```
 
-The resulting binaries are placed in `hypervisor/build/`. `make fuzz-smoke` writes a replayable summary to `hypervisor/build/fuzz-smoke.txt`.
+生成されたバイナリは `hypervisor/build/` に配置されます。`make fuzz-smoke` の結果は `hypervisor/build/fuzz-smoke.txt` に出力されます。
