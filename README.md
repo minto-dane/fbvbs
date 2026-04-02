@@ -1,6 +1,6 @@
 # FBVBS — FreeBSD Virtualization-Based Security
 
-FBVBS v7 は、FreeBSD 向けのマイクロハイパーバイザーベースのセキュリティアーキテクチャです。このリポジトリは、その retained C 実装と設計文書を保持します。
+FBVBS は、FreeBSD 向けのマイクロハイパーバイザーベースのセキュリティアーキテクチャです。このリポジトリは、その retained C 実装と設計文書を保持します。
 
 producer-facing な standalone コンポーネントとしては `hypervisor/` を境界に扱います。将来の FBVBS trusted-service stack は `plan/` で設計を進めており、同じリポジトリ内にあっても release 境界は分けて扱います。
 
