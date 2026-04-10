@@ -574,8 +574,10 @@ shall include the partition_id of the subject.
 - CRC32C per-record integrity (union overlay pattern for WP
   compatibility)
 - Spinlock-serialized append prevents concurrent corruption
-- All 58 hypercall handlers generate audit records on state transitions
-  and error paths
+- All registered hypercall handlers generate audit records on state
+  transitions and error paths
+- VCD attach/status and owner-mismatch fail-closed transitions are
+  audited via `FBVBS_EVENT_VCD_STATE_CHANGE`
 
 **ACSL Evidence:** 217/218 WP goals proved in log.c (99.54%)
 
@@ -629,6 +631,8 @@ capability mask).
 - Guest partitions receive operator-assigned capability masks
 - Capability enforcement is checked on every hypercall dispatch
   (command.c: `dispatch_command`)
+- OCS service calls (`OCS_VCD_ATTACH`, `OCS_VCD_STATUS`) require
+  `SERVICE_KIND_OCS` and `FBVBS_CAP_OCS_ACCESS`
 
 ---
 

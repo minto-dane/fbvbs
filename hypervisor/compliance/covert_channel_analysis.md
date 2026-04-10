@@ -160,7 +160,7 @@ To validate the `need_verw` gating logic:
 Recommended evidence sources and tooling:
 
 - the profiling implementation in `hypervisor/src/cpu_security.c`
-- regression coverage in `hypervisor/tests/test_policy_security.c`
+- regression coverage in `hypervisor/tests/c/security/test_policy_security.c`
 - repository-local QEMU smoke and matrix runs for gate behavior, with the understanding that they do not replace real-hardware validation
 - release audit telemetry showing whether the platform entered a mitigation-required or mitigation-skipped path
 

@@ -60,9 +60,10 @@ make release-hypervisor
 
 ## 関連文書
 
-- [FBVBS v7 仕様書](plan/fbvbs-design.md)
-- [包括ロードマップ](plan/fbvbs-comprehensive-roadmap-2026-03-20.md)
-- [エージェント引き継ぎサマリー](plan/agent-handoff-summary.md)
+- [Plan Index](plan/README.md)
+- [FBVBS v7 仕様書](plan/full-stack/fbvbs-design.md)
+- [包括ロードマップ](plan/overview/fbvbs-comprehensive-roadmap-2026-03-20.md)
+- [エージェント引き継ぎサマリー](plan/overview/agent-handoff-summary.md)
 - [Standalone Hypervisor Boundary](hypervisor/README.md)
 - [retained C 境界保証](hypervisor/compliance/retained_c_leaf_boundary.md)
 - [Hardware Validation Campaign](hypervisor/compliance/hardware_validation_campaign.md)

@@ -543,6 +543,8 @@ void fbvbs_ept_cleanup_partition(
      * makes the array logically empty; production uses compound-literal
      * zeroing followed by a page-free loop.  The assigns clause covers the
      * whole struct (over-approximation). */
+    _Static_assert(sizeof(struct fbvbs_ept_partition_state) == sizeof(*eps),
+                   "fbvbs_ept_partition_state size drift");
     eps->pml4_phys = 0ULL;
     eps->table_page_count = 0U;
     eps->reserved0 = 0U;
@@ -593,6 +595,171 @@ struct fbvbs_memory_object_page_list {
     uint64_t page_phys[FBVBS_MEMORY_OBJECT_PAGE_LIST_CAPACITY];
 };
 
+static uint32_t fbvbs_memory_expected_page_count(const struct fbvbs_memory_object *object);
+
+static int fbvbs_memory_page_list_link_valid(
+    uint64_t list_phys,
+    uint64_t *next_list_phys_out
+)
+{
+    const struct fbvbs_memory_object_page_list *list;
+    uint64_t next_list_phys;
+
+    if (next_list_phys_out == NULL || list_phys == 0U ||
+        (list_phys & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;
+    }
+
+    list = (const struct fbvbs_memory_object_page_list *)(uintptr_t)list_phys;
+    if (list->entry_count == 0U ||
+        list->entry_count > FBVBS_MEMORY_OBJECT_PAGE_LIST_CAPACITY ||
+        list->next_list_page_phys == list_phys) {
+        return -1;
+    }
+
+    next_list_phys = list->next_list_page_phys;
+    if (next_list_phys != 0U &&
+        (next_list_phys & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;
+    }
+
+    *next_list_phys_out = next_list_phys;
+    return 0;
+}
+
+static int fbvbs_memory_owned_page_list_cycle_free(uint64_t head_list_phys)
+{
+    uint64_t slow;
+    uint64_t fast;
+
+    if (head_list_phys == 0U) {
+        return -1;
+    }
+
+    slow = head_list_phys;
+    fast = head_list_phys;
+    while (fast != 0U) {
+        uint64_t next_fast;
+        uint64_t next_slow;
+
+        if (fbvbs_memory_page_list_link_valid(fast, &next_fast) != 0) {
+            return -1;
+        }
+        fast = next_fast;
+        if (fast == 0U) {
+            break;
+        }
+        if (fbvbs_memory_page_list_link_valid(fast, &next_fast) != 0) {
+            return -1;
+        }
+        fast = next_fast;
+        if (fbvbs_memory_page_list_link_valid(slow, &next_slow) != 0) {
+            return -1;
+        }
+        slow = next_slow;
+        if (fast != 0U && fast == slow) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int fbvbs_memory_validate_owned_page_list_integrity(
+    const struct fbvbs_memory_object *object
+)
+{
+    uint32_t expected_pages;
+    uint32_t observed_pages = 0U;
+    uint32_t traversed_lists = 0U;
+    uint64_t list_phys;
+
+    if (object == NULL || object->backing_kind != FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST) {
+        return -1;
+    }
+
+    expected_pages = fbvbs_memory_expected_page_count(object);
+    if (expected_pages == 0U || object->backing_page_count != expected_pages) {
+        return -1;
+    }
+    if (object->backing_page_list_head_phys == 0U ||
+        (object->backing_page_list_head_phys & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;
+    }
+    if (fbvbs_memory_owned_page_list_cycle_free(object->backing_page_list_head_phys) != 0) {
+        return -1;
+    }
+
+    list_phys = object->backing_page_list_head_phys;
+    while (list_phys != 0U) {
+        const struct fbvbs_memory_object_page_list *list;
+        uint64_t next_list_phys;
+        uint32_t index;
+
+        if (traversed_lists > expected_pages) {
+            return -1;
+        }
+        traversed_lists += 1U;
+        if (fbvbs_memory_page_list_link_valid(list_phys, &next_list_phys) != 0) {
+            return -1;
+        }
+
+        list = (const struct fbvbs_memory_object_page_list *)(uintptr_t)list_phys;
+        for (index = 0U; index < list->entry_count; ++index) {
+            uint64_t page_phys = list->page_phys[index];
+
+            if (page_phys == 0U || (page_phys & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+                return -1;
+            }
+            if (observed_pages == UINT32_MAX) {
+                return -1;
+            }
+            observed_pages += 1U;
+            if (observed_pages > expected_pages) {
+                return -1;
+            }
+        }
+        list_phys = next_list_phys;
+    }
+
+    return (observed_pages == expected_pages) ? 0 : -1;
+}
+
+static void fbvbs_memory_log_corruption_event(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
+)
+{
+    struct {
+        uint64_t memory_object_id;
+        uint64_t owner_partition_id;
+        uint32_t lifecycle_state;
+        uint32_t quarantine_reason;
+    } payload;
+
+    if (state == NULL || object == NULL) {
+        return;
+    }
+
+    payload.memory_object_id = object->memory_object_id;
+    payload.owner_partition_id = object->owner_partition_id;
+    payload.lifecycle_state = object->lifecycle_state;
+    payload.quarantine_reason = (quarantine_reason == 0U)
+        ? FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        : quarantine_reason;
+
+    (void)fbvbs_log_append(
+        state,
+        0U,
+        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+        FBVBS_SEVERITY_ERROR,
+        FBVBS_EVENT_MEMORY_CORRUPTION,
+        (const uint8_t *)&payload,
+        (uint32_t)sizeof(payload)
+    );
+}
+
 static void fbvbs_memory_object_clear_backing_fields(
     struct fbvbs_memory_object *object
 ) {
@@ -604,6 +771,108 @@ static void fbvbs_memory_object_clear_backing_fields(
     object->backing_page_count = 0U;
     object->backing_phys_base = 0U;
     object->backing_page_list_head_phys = 0U;
+}
+
+static uint32_t fbvbs_memory_expected_page_count(const struct fbvbs_memory_object *object)
+{
+    if (object == NULL || object->size == 0U ||
+        (object->size % FBVBS_PAGE_SIZE) != 0U ||
+        object->size > (uint64_t)UINT32_MAX * FBVBS_PAGE_SIZE) {
+        return 0U;
+    }
+    return (uint32_t)(object->size / FBVBS_PAGE_SIZE);
+}
+
+void fbvbs_memory_object_refresh_lifecycle_state(struct fbvbs_memory_object *object)
+{
+    if (object == NULL) {
+        return;
+    }
+
+    if (!object->allocated) {
+        object->lifecycle_state = FBVBS_MEMORY_OBJECT_STATE_RELEASED;
+        object->quarantine_reason = 0U;
+        return;
+    }
+
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return;
+    }
+
+    if (object->map_count != 0U) {
+        object->lifecycle_state = FBVBS_MEMORY_OBJECT_STATE_MAPPED;
+    } else if (object->shared_count != 0U) {
+        object->lifecycle_state = FBVBS_MEMORY_OBJECT_STATE_SHARED;
+    } else {
+        object->lifecycle_state = FBVBS_MEMORY_OBJECT_STATE_ALLOCATED;
+    }
+    object->quarantine_reason = 0U;
+}
+
+void fbvbs_memory_object_mark_quarantined(
+    struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
+)
+{
+    if (object == NULL || !object->allocated) {
+        return;
+    }
+
+    if (object->corruption_count != UINT32_MAX) {
+        object->corruption_count += 1U;
+    }
+    object->quarantine_reason =
+        (quarantine_reason == 0U)
+            ? FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+            : quarantine_reason;
+    object->lifecycle_state = FBVBS_MEMORY_OBJECT_STATE_QUARANTINED;
+}
+
+int fbvbs_memory_object_validate_and_quarantine(
+    struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
+)
+{
+    uint32_t expected_pages;
+
+    if (object == NULL || !object->allocated) {
+        return -1;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return -1;
+    }
+
+    switch (object->backing_kind) {
+        case FBVBS_MEMORY_BACKING_NONE:
+            /* Metadata-only objects are allowed for policy paths and tests.
+               Concrete data access remains fail-closed in get_page_phys/read/write. */
+            fbvbs_memory_object_refresh_lifecycle_state(object);
+            return 0;
+        case FBVBS_MEMORY_BACKING_EXTERNAL_CONTIGUOUS:
+            expected_pages = fbvbs_memory_expected_page_count(object);
+            if (expected_pages == 0U || object->backing_page_count != expected_pages) {
+                fbvbs_memory_object_mark_quarantined(object, quarantine_reason);
+                return -1;
+            }
+            if (object->backing_phys_base == 0U ||
+                (object->backing_phys_base & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+                fbvbs_memory_object_mark_quarantined(object, quarantine_reason);
+                return -1;
+            }
+            break;
+        case FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST:
+            if (fbvbs_memory_validate_owned_page_list_integrity(object) != 0) {
+                fbvbs_memory_object_mark_quarantined(object, quarantine_reason);
+                return -1;
+            }
+            break;
+        default:
+            fbvbs_memory_object_mark_quarantined(object, quarantine_reason);
+            return -1;
+    }
+
+    fbvbs_memory_object_refresh_lifecycle_state(object);
+    return 0;
 }
 
 static void fbvbs_memory_object_reset(struct fbvbs_memory_object *object) {
@@ -627,6 +896,12 @@ static void fbvbs_memory_object_release_owned_pages(
     fbvbs_memory_object_clear_backing_fields(object);
     return;
 #else
+    if (object->backing_kind == FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST &&
+        fbvbs_memory_validate_owned_page_list_integrity(object) != 0) {
+        fbvbs_memory_object_clear_backing_fields(object);
+        return;
+    }
+
     if (object->backing_kind != FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST) {
         return;
     }
@@ -651,15 +926,50 @@ static void fbvbs_memory_object_release_owned_pages(
              index < FBVBS_MEMORY_OBJECT_PAGE_LIST_CAPACITY;
              ++index) {
             if (list->page_phys[index] != 0U) {
+                fbvbs_zero_page_at_gpa(list->page_phys[index]);
                 (void)fbvbs_page_free(list->page_phys[index]);
             }
         }
+        memset(list, 0, FBVBS_PAGE_SIZE);
         (void)fbvbs_page_free(list_phys);
         list_phys = next_list_phys;
     }
 
     fbvbs_memory_object_clear_backing_fields(object);
 #endif
+}
+
+static int fbvbs_memory_object_zero_external_contiguous_pages(
+    const struct fbvbs_memory_object *object
+)
+{
+    uint32_t expected_pages;
+    uint64_t page_phys;
+    uint32_t page_index;
+
+    if (object == NULL || object->backing_kind != FBVBS_MEMORY_BACKING_EXTERNAL_CONTIGUOUS) {
+        return -1;
+    }
+
+    expected_pages = fbvbs_memory_expected_page_count(object);
+    if (expected_pages == 0U || object->backing_page_count != expected_pages) {
+        return -1;
+    }
+    if (object->backing_phys_base == 0U ||
+        (object->backing_phys_base & (FBVBS_PAGE_SIZE - 1U)) != 0U) {
+        return -1;
+    }
+
+    page_phys = object->backing_phys_base;
+    for (page_index = 0U; page_index < expected_pages; ++page_index) {
+        fbvbs_zero_page_at_gpa(page_phys);
+        if (page_phys > UINT64_MAX - FBVBS_PAGE_SIZE) {
+            return -1;
+        }
+        page_phys += FBVBS_PAGE_SIZE;
+    }
+
+    return 0;
 }
 
 static int fbvbs_memory_object_allocate_owned_pages(
@@ -840,6 +1150,7 @@ int fbvbs_memory_allocate_object(
     /* Consume the ID only after allocation succeeds, so a failed
      * attempt does not burn an object ID. */
     object->memory_object_id = state->next_memory_object_id++;
+    fbvbs_memory_object_refresh_lifecycle_state(object);
     response->memory_object_id = object->memory_object_id;
     return OK;
 #endif
@@ -864,6 +1175,27 @@ int fbvbs_memory_release_object(  /* REQ-0909 */
     if (object->owner_partition_id != requester_partition_id) {
         return PERMISSION_DENIED;
     }
+
+    if (object->lifecycle_state != FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        if (fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+            fbvbs_memory_log_corruption_event(
+                state,
+                object,
+                FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+            );
+        }
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        if (object->owner_partition_id != requester_partition_id) {
+            return PERMISSION_DENIED;
+        }
+        if (object->map_count != 0U || object->shared_count != 0U) {
+            return RESOURCE_BUSY;
+        }
+    }
     if (object->map_count != 0U || object->shared_count != 0U) {
         return RESOURCE_BUSY;
     }
@@ -884,6 +1216,7 @@ int fbvbs_memory_object_get_page_phys(
 ) {
     if (object == NULL || page_phys_out == NULL ||
         !object->allocated ||
+        object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED ||
         object->backing_page_count == 0U ||
         page_index >= object->backing_page_count) {
         return -1;
@@ -915,23 +1248,33 @@ int fbvbs_memory_object_get_page_phys(
 #else
         uint32_t remaining = page_index;
         uint64_t list_phys = object->backing_page_list_head_phys;
+        uint32_t traversed_lists = 0U;
+        if (fbvbs_memory_owned_page_list_cycle_free(list_phys) != 0) {
+            return -1;
+        }
 
         /*@ loop invariant remaining <= page_index;
-            loop assigns remaining, list_phys, *page_phys_out;
-            loop variant remaining + 1U;
+            loop assigns remaining, list_phys, traversed_lists, *page_phys_out;
+            loop variant object->backing_page_count + 1U - traversed_lists;
         */
         while (list_phys != 0U) {
             const struct fbvbs_memory_object_page_list *list =
                 (const struct fbvbs_memory_object_page_list *)(uintptr_t)list_phys;
+            uint64_t next_list_phys;
 
-            if (list->entry_count == 0U ||
-                list->entry_count > FBVBS_MEMORY_OBJECT_PAGE_LIST_CAPACITY ||
-                list->next_list_page_phys == list_phys) {
+            if (traversed_lists > object->backing_page_count) {
                 return -1;
             }
+            traversed_lists += 1U;
+
+            if (fbvbs_memory_page_list_link_valid(list_phys, &next_list_phys) != 0) {
+                return -1;
+            }
+
             if (remaining < list->entry_count &&
                 remaining < FBVBS_MEMORY_OBJECT_PAGE_LIST_CAPACITY &&
-                list->page_phys[remaining] != 0U) {
+                list->page_phys[remaining] != 0U &&
+                (list->page_phys[remaining] & (FBVBS_PAGE_SIZE - 1U)) == 0U) {
                 *page_phys_out = list->page_phys[remaining];
                 return 0;
             }
@@ -940,7 +1283,7 @@ int fbvbs_memory_object_get_page_phys(
             }
 
             remaining -= list->entry_count;
-            list_phys = list->next_list_page_phys;
+            list_phys = next_list_phys;
         }
 #endif
     }
@@ -955,6 +1298,9 @@ int fbvbs_memory_object_read(
     uint64_t size
 ) {
     if (object == NULL || (!object->allocated) || destination == NULL) {
+        return -1;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
         return -1;
     }
     if (size == 0U) {
@@ -1012,6 +1358,9 @@ int fbvbs_memory_object_write(
     if (object == NULL || (!object->allocated) || source == NULL) {
         return -1;
     }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return -1;
+    }
     if (size == 0U) {
         return 0;
     }
@@ -1060,12 +1409,25 @@ int fbvbs_memory_object_hash_sha384(
     uint8_t out[48]
 ) {
     struct fbvbs_sha384_context context;
+    uint32_t expected_pages;
     uint32_t page_index;
 
     if (object == NULL || out == NULL ||
         !object->allocated ||
+        object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED ||
         object->size == 0U ||
         object->backing_page_count == 0U) {
+        return -1;
+    }
+
+    if ((object->size % FBVBS_PAGE_SIZE) != 0U) {
+        return -1;
+    }
+    if (object->size > (uint64_t)UINT32_MAX * FBVBS_PAGE_SIZE) {
+        return -1;
+    }
+    expected_pages = (uint32_t)(object->size / FBVBS_PAGE_SIZE);
+    if (expected_pages == 0U || object->backing_page_count != expected_pages) {
         return -1;
     }
 
@@ -1083,14 +1445,15 @@ int fbvbs_memory_object_hash_sha384(
     /* SYNC: WP model — SHA-384 over physical pages involves void* casts
        from physical addresses.  Bounds checks verified above.
        Update if fbvbs_sha384 API or backing_page_count logic changes. */
+    _Static_assert(sizeof(struct fbvbs_sha384_context) == sizeof(context),
+                   "fbvbs_sha384_context size drift");
     (void)context;
     (void)page_index;
+    (void)expected_pages;
 #else
     fbvbs_sha384_init(&context);
     {
-        uint64_t max_pages = (object->size + FBVBS_PAGE_SIZE - 1U) / FBVBS_PAGE_SIZE;
-        uint64_t limit = object->backing_page_count < max_pages ? object->backing_page_count : max_pages;
-        for (page_index = 0U; page_index < limit; ++page_index) {
+        for (page_index = 0U; page_index < expected_pages; ++page_index) {
             uint64_t page_phys;
             uint64_t bytes_remaining = object->size - ((uint64_t)page_index * FBVBS_PAGE_SIZE);
             uint64_t chunk = bytes_remaining < FBVBS_PAGE_SIZE ? bytes_remaining : FBVBS_PAGE_SIZE;
@@ -1118,7 +1481,8 @@ int fbvbs_memory_object_hash_page_sha384(
 ) {
     uint64_t page_phys;
 
-    if (object == NULL || out == NULL || !object->allocated) {
+    if (object == NULL || out == NULL || !object->allocated ||
+        object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
         return -1;
     }
     if (fbvbs_memory_object_get_page_phys(object, page_index, &page_phys) != 0) {
@@ -1142,11 +1506,25 @@ void fbvbs_memory_object_release_backing(struct fbvbs_memory_object *object) {
 #ifdef __FRAMAC__
     return;
 #else
-    if (object->backing_kind == FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST) {
-        fbvbs_memory_object_release_owned_pages(object);
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        /* Quarantined metadata may carry untrusted page-list pointers.
+           Fail-safe by dropping backing metadata without dereferencing it. */
+        fbvbs_memory_object_clear_backing_fields(object);
+        fbvbs_memory_object_refresh_lifecycle_state(object);
         return;
     }
 
+    if (object->backing_kind == FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST) {
+        fbvbs_memory_object_release_owned_pages(object);
+        fbvbs_memory_object_refresh_lifecycle_state(object);
+        return;
+    }
+
+    if (object->backing_kind == FBVBS_MEMORY_BACKING_EXTERNAL_CONTIGUOUS) {
+        (void)fbvbs_memory_object_zero_external_contiguous_pages(object);
+    }
+
     fbvbs_memory_object_clear_backing_fields(object);
+    fbvbs_memory_object_refresh_lifecycle_state(object);
 #endif
 }

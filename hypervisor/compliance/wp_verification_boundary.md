@@ -22,28 +22,31 @@ Release decisions must use current reproducible proof runs, not stale aggregate 
 The repository currently targets these source files for WP:
 
 - `src/cpu_security.c`
-- `src/vmx.c`
+- `src/platform/vmx.c`
 - `src/memory.c`
 - `src/memory_utils.c`
+- `src/core/scaling.c`
 - `src/freestanding_runtime.c`
 - `src/log.c`
 - `src/vm_policy.c`
-- `src/boot_multiboot.c`
+- `src/platform/boot_multiboot.c`
 - `src/watchdog.c`
-- `src/early_init.c`
-- `src/acpi.c`
-- `src/apic.c`
-- `src/idt.c`
-- `src/vmx_controls.c`
-- `src/vmcs_setup.c`
+- `src/platform/early_init.c`
+- `src/platform/acpi.c`
+- `src/platform/apic.c`
+- `src/platform/idt.c`
+- `src/platform/vmx_controls.c`
+- `src/platform/vmcs_setup.c`
 - `src/kernel.c`
 - `src/command.c`
 - `src/security.c`
 - `src/partition.c`
 - `src/page_alloc.c`
-- `src/hlat.c`
-- `src/amd_npt.c`
-- `src/mp_init.c`
+- `src/platform/hlat.c`
+- `src/platform/amd_npt.c`
+- `src/platform/mp_init.c`
+- `src/storage/storage_virtualization.c`
+- `src/io/vcd_virtualization.c`
 
 ### Why these files are in scope
 
@@ -55,6 +58,8 @@ The repository currently targets these source files for WP:
   - EPT state transitions and rollback logic are security-critical and mostly proof-shaped
 - `memory_utils.c`
   - byte helpers, constant-time comparisons, and SHA-384 primitives now carry enough ACSL structure to participate in standalone WP without fatal annotation noise
+- `core/scaling.c`
+  - runtime resource limit state machine and bound checks
 - `freestanding_runtime.c`
   - freestanding console/runtime helpers now expose proof-side representative models and bounded memory-primitive contracts, so the hosted WP boundary can include them without reintroducing fatal annotation noise
 - `log.c`
@@ -93,13 +98,17 @@ The repository currently targets these source files for WP:
   - AMD NPT write-protect, SEV-SNP integration, and VMCB configuration; complex init function stubbed under `__FRAMAC__` for assigns tractability
 - `mp_init.c`
   - MADT/SRAT parsing, AP initialization, per-CPU state management, TLB shootdown, and NUMA topology; shift operations isolated in `mp_bit_mask` helper for RTE provability
+- `storage/storage_virtualization.c`
+  - storage pool / virtual disk lifecycle logic is verified via `__FRAMAC__` proof model for state transitions and argument contracts
+- `io/vcd_virtualization.c`
+  - VCD attach/status fail-closed behavior is verified via `__FRAMAC__` proof model
 
 ## Files intentionally out of scope today
 
 ### Excluded because they are platform or hardware dominated
 
-- `src/iommu_vtd.c`
-- `src/iommu_amdvi.c`
+- `src/platform/iommu_vtd.c`
+- `src/platform/iommu_amdvi.c`
 - `src/uefi_entry.c`
 
 Reasons include:
@@ -111,37 +120,27 @@ Reasons include:
 
 ## Current proof state
 
-All 23 WP target files achieve **100% proved goals with 0 timeouts** (per-file verification, 60s timeout, Alt-Ergo + Z3 provers).
+All 26 WP target files achieve **0 timeout / 0 missing specification blocker** in the latest `make -C hypervisor proof-shards` run.
 
-**Total: 14,872 goals proved, 0 timeouts.**
+Verification command: `make -C hypervisor proof-shards`
 
-| File | Goals |
-|------|-------|
-| cpu_security.c | 1059/1059 |
-| vmx.c | 294/294 |
-| memory.c | 375/375 |
-| memory_utils.c | 316/316 |
-| freestanding_runtime.c | 308/308 |
-| log.c | 273/273 |
-| vm_policy.c | 191/191 |
-| boot_multiboot.c | 142/142 |
-| watchdog.c | 175/175 |
-| early_init.c | 225/225 |
-| acpi.c | 117/117 |
-| apic.c | 371/371 |
-| idt.c | 321/321 |
-| vmx_controls.c | 499/499 |
-| vmcs_setup.c | 223/223 |
-| hlat.c | 894/894 |
-| kernel.c | 1339/1339 |
-| command.c | 1377/1377 |
-| security.c | 2253/2253 |
-| partition.c | 2277/2277 |
-| page_alloc.c | 304/304 |
-| amd_npt.c | 665/665 |
-| mp_init.c | 874/874 |
+## Divergence inventory
 
-Verification command: `eval $(opam env) && frama-c -wp -wp-model 'Typed+Cast' -wp-rte -wp-prover alt-ergo,z3 -wp-timeout 60 -kernel-warn-key annot-error=abort -cpp-extra-args="-D__FRAMAC__ -Iinclude" <file>`
+`__FRAMAC__` 分岐の inventory と divergence classification は
+`make -C hypervisor semantic-drift-check` で生成する
+`build/verification/framac-divergence-report.json` /
+`build/verification/framac-divergence-report.md` を補助証跡として扱う。
+
+classification は次の 3 区分を使う。
+
+- `hardware-dependent-only`
+  - hardware interaction を proof-side model へ隔離したもの
+- `acceptable-stub`
+  - `SYNC` marker 等で production との対応が追える許容 stub
+- `forbidden-divergence`
+  - `SYNC` 欠落や size guard 欠落により drift が release gate を破るもの
+
+release 判断では proof pass/fail だけでなく、この divergence report も参照する。
 
 ## Non-goals for the current boundary
 

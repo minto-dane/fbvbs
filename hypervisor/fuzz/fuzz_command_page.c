@@ -74,7 +74,15 @@ static void fuzz_init_state(void)
     g_state.partitions[0].state = FBVBS_PARTITION_STATE_RUNNING;
     g_state.partitions[0].vcpu_count = 1U;
     g_state.partitions[0].vcpus[0].state = FBVBS_VCPU_STATE_RUNNING;
+    g_state.partitions[0].vcpus[0].rip = FBVBS_HOST_CALLSITE_FBVBS_PRIMARY;
     g_state.partitions[0].capability_mask = FBVBS_HOST_DEFAULT_CAPABILITY_MASK;
+
+    /* Keep host-only management commands reachable so corpus seeds can
+     * cover deeper ABI parsing paths instead of failing at caller validation. */
+    g_state.host_callsites[0].active = true;
+    g_state.host_callsites[0].caller_class = FBVBS_HOST_CALLER_CLASS_FBVBS;
+    g_state.host_callsites[0].count = 1U;
+    g_state.host_callsites[0].relocated_callsites[0] = FBVBS_HOST_CALLSITE_FBVBS_PRIMARY;
 }
 
 /* ================================================================

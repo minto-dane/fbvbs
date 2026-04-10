@@ -460,6 +460,8 @@ void fbvbs_sha384(const void *data, uint64_t length, uint8_t out[48]) {
     fbvbs_sha384_final(&context, out);
 }
 #else
+_Static_assert(sizeof(struct fbvbs_sha384_context) == sizeof(struct fbvbs_sha384_context),
+               "fbvbs_sha384_context size drift");
 void fbvbs_sha384_init(struct fbvbs_sha384_context *context) {
     if (context == NULL) {
         return;

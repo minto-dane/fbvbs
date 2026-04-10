@@ -2,7 +2,7 @@
  *
  * Requirements: REQ-0501 (Shadow copy — PRODUCTION NOTE: Phase 4 KSI stub),
  *   REQ-0601 (IKS API 制限 — PRODUCTION NOTE: Phase 5 IKS stub),
- *   REQ-1000 (トレーサビリティ — see tools/traceability_matrix.py),
+ *   REQ-1000 (トレーサビリティ — see tools/verification/traceability_matrix.py),
  *   REQ-1001 (TCB 変更独立レビュー — PRODUCTION NOTE: Phase 9 process),
  *   REQ-1002 (SPARK 例外不在証明 — PRODUCTION NOTE: Ada/SPARK reference path),
  *   REQ-1003 (Rust TCB 制約 — PRODUCTION NOTE: Phase 9),
@@ -1937,6 +1937,9 @@ int fbvbs_platform_foundation_ready(
     if (state->vmx_caps.vmx_supported == 0U) {
         return 0;
     }
+    if (state->vmx_caps.iommu_available == 0U) {
+        return 0;
+    }
     if (fbvbs_iommu_runtime_ready(&state->cpu_security) == 0) {
         return 0;
     }
@@ -2005,8 +2008,6 @@ static void fbvbs_seed_capability_bitmap(struct fbvbs_hypervisor_state *state) {
 
 /*@ requires \valid(state);
     assigns *state;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == ALREADY_EXISTS ||
-            \result == NOT_SUPPORTED_ON_PLATFORM || \result == RESOURCE_EXHAUSTED;
 */
 int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     static const uint8_t boot_payload[] = "fbvbs hypervisor kernel boot";
@@ -2030,6 +2031,10 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     state->next_dek_handle = 0x500000U;
     state->next_manifest_set_id = 0x600000U;
     state->next_iommu_domain_id = 0x700000U;
+    status = fbvbs_scaling_init(state);
+    if (status != OK) {
+        return status;
+    }
     state->trusted_clock_available = true;
     state->trusted_time_seconds = 1000U;
     fbvbs_seed_boot_ids(state);
@@ -2062,6 +2067,11 @@ int fbvbs_hypervisor_init(struct fbvbs_hypervisor_state *state) {
     state->next_dek_handle = 0x500000U;
     state->next_manifest_set_id = 0x600000U;
     state->next_iommu_domain_id = 0x700000U;
+    status = fbvbs_scaling_init(state);
+    if (status != OK) {
+        fbvbs_boot_status("FBVBS: scaling init failed\n");
+        return status;
+    }
     state->trusted_clock_available = true;
     state->trusted_time_seconds = 1000U;
     fbvbs_boot_status("FBVBS: init page allocator\n");
@@ -2291,6 +2301,194 @@ void fbvbs_kernel_main(const void *multiboot_info) {
 /* fbvbs_process_multiboot_info is in boot_multiboot.c (excluded from WP
    due to void* casts required for Multiboot2 binary structure parsing) */
 
+/*@ assigns \nothing;
+    ensures \result == \null || \valid_read(\result);
+*/
+static const struct fbvbs_partition *fbvbs_diag_find_partition(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id
+) {
+    uint32_t index;
+
+    if (state == NULL || partition_id == 0U) {
+        return NULL;
+    }
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_PARTITIONS;
+        loop assigns index;
+        loop variant FBVBS_MAX_PARTITIONS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_PARTITIONS; ++index) {
+        const struct fbvbs_partition *partition = &state->partitions[index];
+
+        if ((partition->occupied || partition->tombstone) &&
+            partition->partition_id == partition_id) {
+            return partition;
+        }
+    }
+
+    return NULL;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_diag_status_is_policy_deny(int status) {
+    return (status == PERMISSION_DENIED ||
+            status == INVALID_CALLER ||
+            status == CALLSITE_REJECTED ||
+            status == POLICY_DENIED ||
+            status == INVALID_PARAMETER ||
+            status == ABI_VERSION_UNSUPPORTED ||
+            status == REPLAY_DETECTED ||
+            status == RETRY_LATER);
+}
+
+/*@ assigns *response; */
+static void fbvbs_diag_apply_deny_guidance(
+    struct fbvbs_diag_reason_guidance_response *response,
+    uint32_t deny_reason
+) {
+    response->reason_domain = FBVBS_GUIDANCE_DOMAIN_DENY;
+    response->canonical_code = deny_reason;
+    response->deny_reason = deny_reason;
+
+    switch (deny_reason) {
+        case FBVBS_DENY_REASON_INVALID_PARAMETER:
+        case FBVBS_DENY_REASON_ABI_VERSION:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_VALIDATE_INPUT;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_REVIEW_INPUT;
+            break;
+        case FBVBS_DENY_REASON_PERMISSION:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_REVIEW_CAPABILITY;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_REVIEW_CAPABILITY;
+            break;
+        case FBVBS_DENY_REASON_RATE_LIMIT:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_WAIT_LOCKOUT;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_WAIT_LOCKOUT;
+            break;
+        case FBVBS_DENY_REASON_BUSY:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_RETRY_COMMAND;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_RETRY_COMMAND;
+            break;
+        case FBVBS_DENY_REASON_INVALID_CALLER:
+        case FBVBS_DENY_REASON_CALLSITE:
+        case FBVBS_DENY_REASON_REPLAY:
+            response->severity = FBVBS_SEVERITY_ERROR;
+            response->runbook_code = FBVBS_RUNBOOK_REAUTHORIZE_CALLER;
+            response->recommended_action_flags =
+                FBVBS_GUIDANCE_ACTION_REAUTHORIZE_CALLER |
+                FBVBS_GUIDANCE_ACTION_ESCALATE_SECURITY;
+            break;
+        case FBVBS_DENY_REASON_POLICY:
+            response->severity = FBVBS_SEVERITY_ERROR;
+            response->runbook_code = FBVBS_RUNBOOK_REVIEW_CAPABILITY;
+            response->recommended_action_flags =
+                FBVBS_GUIDANCE_ACTION_REVIEW_CAPABILITY |
+                FBVBS_GUIDANCE_ACTION_ESCALATE_SECURITY;
+            break;
+        default:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_VALIDATE_INPUT;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_REVIEW_INPUT;
+            break;
+    }
+}
+
+/*@ assigns *response; */
+static void fbvbs_diag_apply_health_guidance(
+    struct fbvbs_diag_reason_guidance_response *response,
+    uint32_t health_state
+) {
+    response->reason_domain = FBVBS_GUIDANCE_DOMAIN_HEALTH;
+    response->canonical_code = health_state;
+    response->health_state = health_state;
+
+    switch (health_state) {
+        case FBVBS_PARTITION_HEALTH_HEALTHY:
+            response->severity = FBVBS_SEVERITY_INFO;
+            response->runbook_code = FBVBS_RUNBOOK_NONE;
+            response->recommended_action_flags = 0ULL;
+            break;
+        case FBVBS_PARTITION_HEALTH_DEGRADED:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_PLATFORM_INVESTIGATION;
+            response->recommended_action_flags =
+                FBVBS_GUIDANCE_ACTION_MONITOR_PARTITION |
+                FBVBS_GUIDANCE_ACTION_ESCALATE_PLATFORM;
+            break;
+        case FBVBS_PARTITION_HEALTH_QUARANTINED:
+            response->severity = FBVBS_SEVERITY_ERROR;
+            response->runbook_code = FBVBS_RUNBOOK_PARTITION_RECOVERY;
+            response->recommended_recovery_flags = FBVBS_RECOVERY_CLEAR_VOLATILE;
+            response->recommended_action_flags =
+                FBVBS_GUIDANCE_ACTION_RECOVER_PARTITION |
+                FBVBS_GUIDANCE_ACTION_REMEASURE_ARTIFACTS;
+            break;
+        case FBVBS_PARTITION_HEALTH_RECOVERY:
+            response->severity = FBVBS_SEVERITY_NOTICE;
+            response->runbook_code = FBVBS_RUNBOOK_MONITOR_RECOVERY;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_MONITOR_PARTITION;
+            break;
+        default:
+            response->severity = FBVBS_SEVERITY_WARNING;
+            response->runbook_code = FBVBS_RUNBOOK_PLATFORM_INVESTIGATION;
+            response->recommended_action_flags = FBVBS_GUIDANCE_ACTION_ESCALATE_PLATFORM;
+            break;
+    }
+}
+
+/*@ assigns *response; */
+static void fbvbs_diag_apply_fault_guidance(
+    struct fbvbs_diag_reason_guidance_response *response,
+    uint32_t fault_code
+) {
+    response->reason_domain = FBVBS_GUIDANCE_DOMAIN_FAULT;
+    response->canonical_code = fault_code;
+    response->fault_code = fault_code;
+    response->health_state = FBVBS_PARTITION_HEALTH_QUARANTINED;
+    response->quarantine_reason = fault_code;
+    response->recommended_recovery_flags = FBVBS_RECOVERY_CLEAR_VOLATILE;
+    response->recommended_action_flags =
+        FBVBS_GUIDANCE_ACTION_RECOVER_PARTITION |
+        FBVBS_GUIDANCE_ACTION_REMEASURE_ARTIFACTS;
+
+    switch (fault_code) {
+        case FAULT_CODE_VM_EXIT_UNCLASSIFIED:
+            response->severity = FBVBS_SEVERITY_CRITICAL;
+            response->runbook_code = FBVBS_RUNBOOK_PLATFORM_INVESTIGATION;
+            response->recommended_recovery_flags |= FBVBS_RECOVERY_EXTENDED_REMEASURE;
+            response->recommended_action_flags |= FBVBS_GUIDANCE_ACTION_ESCALATE_PLATFORM;
+            break;
+        case FBVBS_FAULT_WATCHDOG_TIMEOUT:
+            response->severity = FBVBS_SEVERITY_CRITICAL;
+            response->runbook_code = FBVBS_RUNBOOK_PARTITION_RECOVERY;
+            response->recommended_action_flags |= FBVBS_GUIDANCE_ACTION_MONITOR_PARTITION;
+            break;
+        case FBVBS_FAULT_POLICY_DENY_THRESHOLD:
+            response->severity = FBVBS_SEVERITY_ALERT;
+            response->runbook_code = FBVBS_RUNBOOK_PARTITION_RECOVERY;
+            response->deny_reason = FBVBS_DENY_REASON_POLICY;
+            response->recommended_recovery_flags |=
+                FBVBS_RECOVERY_RESTORE_PERSISTENT |
+                FBVBS_RECOVERY_EXTENDED_REMEASURE;
+            response->recommended_action_flags |=
+                FBVBS_GUIDANCE_ACTION_REVIEW_CAPABILITY |
+                FBVBS_GUIDANCE_ACTION_REAUTHORIZE_CALLER |
+                FBVBS_GUIDANCE_ACTION_ESCALATE_SECURITY;
+            break;
+        default:
+            response->severity = FBVBS_SEVERITY_CRITICAL;
+            response->runbook_code = FBVBS_RUNBOOK_PLATFORM_INVESTIGATION;
+            response->recommended_action_flags |= FBVBS_GUIDANCE_ACTION_ESCALATE_PLATFORM;
+            break;
+    }
+}
+
 int fbvbs_diag_get_capabilities(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_capabilities_response *response
@@ -2301,6 +2499,240 @@ int fbvbs_diag_get_capabilities(
 
     response->capability_bitmap0 = state->capability_bitmap0;
     response->capability_bitmap1 = state->capability_bitmap1;
+    return OK;
+}
+
+int fbvbs_diag_get_reason_guidance(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_diag_reason_guidance_request *request,
+    struct fbvbs_diag_reason_guidance_response *response
+) {
+    if (state == NULL || request == NULL || response == NULL) {
+        return INVALID_PARAMETER;
+    }
+
+    *response = (struct fbvbs_diag_reason_guidance_response){0};
+    response->reason_domain = request->reason_domain;
+    response->reason_input = request->reason_input;
+
+    switch (request->reason_domain) {
+        case FBVBS_GUIDANCE_DOMAIN_DENY: {
+            uint32_t deny_reason;
+
+            if (!fbvbs_diag_status_is_policy_deny((int)request->reason_input)) {
+                return INVALID_PARAMETER;
+            }
+            deny_reason = fbvbs_policy_deny_reason_from_status((int)request->reason_input);
+            if (deny_reason == FBVBS_DENY_REASON_UNSPECIFIED) {
+                return INVALID_PARAMETER;
+            }
+            fbvbs_diag_apply_deny_guidance(response, deny_reason);
+            break;
+        }
+        case FBVBS_GUIDANCE_DOMAIN_FAULT:
+            if (request->reason_input == 0U) {
+                return INVALID_PARAMETER;
+            }
+            fbvbs_diag_apply_fault_guidance(response, request->reason_input);
+            break;
+        case FBVBS_GUIDANCE_DOMAIN_HEALTH:
+            if (request->reason_input > FBVBS_PARTITION_HEALTH_RECOVERY) {
+                return INVALID_PARAMETER;
+            }
+            fbvbs_diag_apply_health_guidance(response, request->reason_input);
+            break;
+        case FBVBS_GUIDANCE_DOMAIN_PARTITION: {
+            const struct fbvbs_partition *partition;
+
+            partition = fbvbs_diag_find_partition(state, request->partition_id);
+            if (partition == NULL) {
+                return NOT_FOUND;
+            }
+
+            response->reason_domain = FBVBS_GUIDANCE_DOMAIN_PARTITION;
+            response->health_state = partition->health_state;
+            response->fault_code = partition->last_fault_code;
+            response->quarantine_reason = partition->quarantine_reason;
+
+            if (partition->last_fault_code != 0U || partition->quarantine_reason != 0U) {
+                uint32_t effective_fault_code = partition->last_fault_code != 0U
+                    ? partition->last_fault_code
+                    : partition->quarantine_reason;
+
+                fbvbs_diag_apply_fault_guidance(response, effective_fault_code);
+                response->reason_domain = FBVBS_GUIDANCE_DOMAIN_PARTITION;
+                response->reason_input = effective_fault_code;
+                response->health_state = partition->health_state;
+                response->fault_code = effective_fault_code;
+                response->quarantine_reason = partition->quarantine_reason;
+            } else {
+                fbvbs_diag_apply_health_guidance(response, partition->health_state);
+                response->reason_domain = FBVBS_GUIDANCE_DOMAIN_PARTITION;
+                response->reason_input = partition->health_state;
+            }
+            break;
+        }
+        default:
+            return INVALID_PARAMETER;
+    }
+
+    return OK;
+}
+
+int fbvbs_diag_get_inventory(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_diag_inventory_response *response
+) {
+    uint32_t index;
+
+    if (state == NULL || response == NULL) {
+        return INVALID_PARAMETER;
+    }
+    if (state->artifact_catalog.count > FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES ||
+        state->device_catalog.count > FBVBS_MAX_DEVICE_CATALOG_ENTRIES) {
+        return INVALID_PARAMETER;
+    }
+
+    *response = (struct fbvbs_diag_inventory_response){0};
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_PARTITIONS;
+        loop assigns index, *response;
+        loop variant FBVBS_MAX_PARTITIONS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_PARTITIONS; ++index) {
+        const struct fbvbs_partition *partition = &state->partitions[index];
+
+        if (partition->occupied) {
+            response->occupied_partition_count += 1U;
+            if (partition->kind == PARTITION_KIND_GUEST_VM) {
+                response->guest_vm_count += 1U;
+            }
+            if (partition->service_kind != SERVICE_KIND_NONE) {
+                response->service_partition_count += 1U;
+            }
+            switch (partition->health_state) {
+                case FBVBS_PARTITION_HEALTH_HEALTHY:
+                    response->healthy_partition_count += 1U;
+                    break;
+                case FBVBS_PARTITION_HEALTH_DEGRADED:
+                    response->degraded_partition_count += 1U;
+                    break;
+                case FBVBS_PARTITION_HEALTH_QUARANTINED:
+                    response->quarantined_partition_count += 1U;
+                    break;
+                case FBVBS_PARTITION_HEALTH_RECOVERY:
+                    response->recovery_partition_count += 1U;
+                    break;
+                default:
+                    break;
+            }
+        } else if (partition->tombstone) {
+            response->tombstone_partition_count += 1U;
+        }
+    }
+
+    response->artifact_count = state->artifact_catalog.count;
+    response->device_count = state->device_catalog.count;
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_STORAGE_POOLS;
+        loop assigns index, *response;
+        loop variant FBVBS_MAX_STORAGE_POOLS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_STORAGE_POOLS; ++index) {
+        if (state->storage_pools[index].active) {
+            response->storage_pool_count += 1U;
+        }
+    }
+
+    /*@ loop invariant 0 <= index <= FBVBS_MAX_VIRTUAL_DISKS;
+        loop assigns index, *response;
+        loop variant FBVBS_MAX_VIRTUAL_DISKS - index;
+    */
+    for (index = 0U; index < FBVBS_MAX_VIRTUAL_DISKS; ++index) {
+        if (state->virtual_disks[index].active) {
+            response->vdisk_count += 1U;
+        }
+    }
+
+    return OK;
+}
+
+int fbvbs_diag_get_fault_record(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    struct fbvbs_diag_fault_record_response *response
+) {
+    const struct fbvbs_partition *partition;
+    struct fbvbs_diag_reason_guidance_request guidance_request = {0};
+    struct fbvbs_diag_reason_guidance_response guidance_response = {0};
+    uint32_t effective_fault_code;
+    int status;
+
+    if (state == NULL || response == NULL || partition_id == 0U) {
+        return INVALID_PARAMETER;
+    }
+
+    partition = fbvbs_diag_find_partition(state, partition_id);
+    if (partition == NULL) {
+        return NOT_FOUND;
+    }
+    if (partition->last_fault_code == 0U && partition->quarantine_reason == 0U) {
+        return NOT_FOUND;
+    }
+
+    effective_fault_code = partition->last_fault_code != 0U
+        ? partition->last_fault_code
+        : partition->quarantine_reason;
+
+    guidance_request.reason_domain = FBVBS_GUIDANCE_DOMAIN_PARTITION;
+    guidance_request.partition_id = partition_id;
+    status = fbvbs_diag_get_reason_guidance(state, &guidance_request, &guidance_response);
+    if (status != OK) {
+        return status;
+    }
+
+    *response = (struct fbvbs_diag_fault_record_response){
+        .partition_id = partition->partition_id,
+        .partition_state = partition->state,
+        .health_state = partition->health_state,
+        .fault_code = effective_fault_code,
+        .source_component = partition->last_fault_source_component,
+        .quarantine_reason = partition->quarantine_reason,
+        .severity = guidance_response.severity,
+        .runbook_code = guidance_response.runbook_code,
+        .fault_detail0 = partition->last_fault_detail0,
+        .fault_detail1 = partition->last_fault_detail1,
+        .measurement_epoch = partition->measurement_epoch,
+        .recommended_recovery_flags = guidance_response.recommended_recovery_flags,
+        .recommended_action_flags = guidance_response.recommended_action_flags,
+    };
+    return OK;
+}
+
+int fbvbs_diag_get_schema_registry(
+    struct fbvbs_diag_schema_registry_response *response
+) {
+    if (response == NULL) {
+        return INVALID_PARAMETER;
+    }
+
+    *response = (struct fbvbs_diag_schema_registry_response){
+        .management_abi_version = FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION,
+        .health_schema_version = FBVBS_HEALTH_SCHEMA_VERSION,
+        .audit_schema_version = FBVBS_AUDIT_SCHEMA_VERSION,
+        .inventory_schema_version = FBVBS_INVENTORY_SCHEMA_VERSION,
+        .guidance_schema_version = FBVBS_GUIDANCE_SCHEMA_VERSION,
+        .fault_record_schema_version = FBVBS_FAULT_RECORD_SCHEMA_VERSION,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+        .compatibility_flags =
+            FBVBS_COMPAT_FLAG_HEALTH_SCHEMA_STABLE |
+            FBVBS_COMPAT_FLAG_AUDIT_SCHEMA_STABLE |
+            FBVBS_COMPAT_FLAG_FAILURE_MODE_GUIDANCE_STABLE |
+            FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO |
+            FBVBS_COMPAT_FLAG_PARTITION_DIAGNOSTICS_STABLE |
+            FBVBS_COMPAT_FLAG_PARTITION_FAULT_INFO_STABLE,
+    };
     return OK;
 }
 

@@ -1,0 +1,74 @@
+{
+  "version": "2.1",
+  "last_updated": "2026-04-08",
+  "role": "machine_readable_index",
+  "description": "Non-authoritative summary of the shared retained-C microhypervisor boundary and the two product tracks that reuse it.",
+  "shared_foundation": {
+    "implementation_root": "hypervisor/",
+    "repository_snapshot": {
+      "source_files": 30,
+      "test_suites": 10,
+      "compliance_documents": 15
+    },
+    "implemented_substrate": [
+      "partition_memory_command_security_log foundation",
+      "cpu security and VMX/SVM control",
+      "boot and platform bring-up helpers",
+      "Intel HLAT and AMD NPT paths",
+      "scaling runtime-limit management",
+      "storage virtualization ABI and state machine",
+      "VCD attach/status fail-closed boundary"
+    ],
+    "authoritative_documents": [
+      "hypervisor/README.md",
+      "hypervisor/compliance/retained_c_leaf_boundary.md",
+      "hypervisor/compliance/wp_verification_boundary.md"
+    ]
+  },
+  "program_tracks": [
+    {
+      "id": "fbvbs_stack",
+      "name": "FBVBS stack for FreeBSD protection",
+      "authoritative_documents": [
+        "plan/full-stack/fbvbs-design.md",
+        "plan/overview/fbvbs-comprehensive-roadmap-2026-03-20.md"
+      ],
+      "status": "architecture_defined_but_not_end_to_end_implemented"
+    },
+    {
+      "id": "standalone_microhypervisor",
+      "name": "Standalone FBVBS microhypervisor",
+      "authoritative_documents": [
+        "plan/standalone/architecture/standalone-runtime-architecture.md",
+        "plan/standalone/implementation/standalone-implementation-plan.md",
+        "plan/standalone/operations/operator-control-plane.md"
+      ],
+      "status": "management_substrate_partially_implemented"
+    }
+  ],
+  "current_release_boundary": {
+    "claim": "retained_c_foundation_release_only",
+    "does_not_claim": [
+      "full FBVBS stack completion",
+      "standalone microhypervisor product completion",
+      "high-assurance operational closure"
+    ],
+    "blocking_items": [
+      "authoritative IOMMU and interrupt-remapping bring-up",
+      "final host deprivilege or VMLAUNCH handoff",
+      "standalone control-plane and OCS productization",
+      "trusted-service, FreeBSD front-end, and bhyve integration closure"
+    ]
+  },
+  "authoritative_release_documents": [
+    "README.md",
+    "RELEASE.md",
+    "plan/full-stack/fbvbs-design.md",
+    "plan/overview/fbvbs-comprehensive-roadmap-2026-03-20.md"
+  ],
+  "notes": [
+    "This file is an index, not the normative specification.",
+    "Standalone planning documents must not be interpreted as modifying the full FBVBS stack specification.",
+    "For exact proof scope and release evidence boundaries, use the compliance documents under hypervisor/compliance/."
+  ]
+}

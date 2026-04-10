@@ -16,6 +16,7 @@ This document records the supported producer-facing deployment profile for the s
 - IOMMU required
 - primary audit collection through a FreeBSD serial port / UART path (for example `/dev/ttyu0`) or an equivalent OOB serial path
 - explicit acceptance that future Formally-verified Bare-metal Virtual Boot Security (FBVBS) trusted services are out of scope for this standalone release
+- optional trusted-service Virtual Console Device (VCD) attach/status management path for `SERVICE_KIND_OCS` partitions
 
 ## Required platform properties
 
@@ -30,7 +31,7 @@ This document records the supported producer-facing deployment profile for the s
 - platforms without IOMMU
 - deployments without any OOB audit collector
 - dynamic executable profiles such as `ET_DYN`/PIE in the retained-C loader path
-- future service-partition orchestration
+- broad service-partition orchestration (except the retained-C VCD attach/status boundary)
 - device passthrough as a published release feature until authoritative teardown and validation are complete
 
 ## Residual-risk deployment restrictions
@@ -43,7 +44,7 @@ This document records the supported producer-facing deployment profile for the s
 
 - the Multiboot profile must keep the explicit retained boot artifacts in the ISO
 - the UEFI path must use signed boot artifacts and firmware key enrollment appropriate to the operator environment
-- the retained-C host-kernel artifact binding is authoritative only for the documented build profile (see [plan/fbvbs-design.md](plan/fbvbs-design.md), Appendix L.1.E and the bare-metal release-profile rules in Section L.1.C/L.1.E)
+- the retained-C host-kernel artifact binding is authoritative only for the documented build profile (see [plan/full-stack/fbvbs-design.md](../../plan/full-stack/fbvbs-design.md), Appendix L.1.E and the bare-metal release-profile rules in Section L.1.C/L.1.E)
 
 ## Operational expectations
 

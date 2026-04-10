@@ -10,6 +10,31 @@
  */
 #include "fbvbs_hypervisor.h"
 
+static void fbvbs_partition_confirmation_lock(volatile uint32_t *lock)
+{
+#ifdef __FRAMAC__
+    if (lock != NULL) {
+        *lock = 1U;
+    }
+    return;
+#else
+    while (__sync_lock_test_and_set(lock, 1U) != 0U) {
+        /* busy wait */
+    }
+#endif
+}
+
+static void fbvbs_partition_confirmation_unlock(volatile uint32_t *lock)
+{
+#ifndef __FRAMAC__
+    __sync_lock_release(lock);
+#else
+    if (lock != NULL) {
+        *lock = 0U;
+    }
+#endif
+}
+
 /*@ requires \valid(state);
     assigns \result \from partition_id, state->partitions[0 .. FBVBS_MAX_PARTITIONS - 1];
     ensures \result == \null ||
@@ -33,6 +58,203 @@ static struct fbvbs_partition *fbvbs_find_partition(
     }
 
     return NULL;
+}
+
+struct fbvbs_partition_recovery_approval_material {
+    uint64_t operation;
+    uint64_t partition_id;
+    uint64_t recovery_flags;
+    uint64_t session_correlation_id;
+    uint64_t confirmation_nonce;
+    uint64_t approval_expires_utc;
+    uint64_t boot_id_hi;
+    uint64_t boot_id_lo;
+    uint8_t approval_ledger_digest[48];
+};
+
+#define FBVBS_BREAK_GLASS_MAX_VALIDITY_SECONDS UINT64_C(900)
+
+void fbvbs_partition_compute_recovery_approval_digest(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t recovery_flags,
+    uint64_t session_correlation_id,
+    uint64_t confirmation_nonce,
+    uint64_t approval_expires_utc,
+    const uint8_t approval_ledger_digest[48],
+    uint8_t out_digest[48]
+)
+{
+    struct fbvbs_partition_recovery_approval_material material = {
+        .operation = FBVBS_RECOVERY_APPROVAL_OP_PARTITION_RECOVER,
+        .partition_id = partition_id,
+        .recovery_flags = recovery_flags,
+        .session_correlation_id = session_correlation_id,
+        .confirmation_nonce = confirmation_nonce,
+        .approval_expires_utc = approval_expires_utc,
+        .boot_id_hi = (state != NULL) ? state->boot_id_hi : 0U,
+        .boot_id_lo = (state != NULL) ? state->boot_id_lo : 0U,
+    };
+
+    if (out_digest == NULL) {
+        return;
+    }
+    if (approval_ledger_digest != NULL) {
+        fbvbs_copy_memory(
+            material.approval_ledger_digest,
+            approval_ledger_digest,
+            sizeof(material.approval_ledger_digest)
+        );
+    }
+
+    fbvbs_sha384(&material, (uint64_t)sizeof(material), out_digest);
+}
+
+static int fbvbs_partition_validate_recovery_approval(
+    const struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition_recover_request *request
+)
+{
+    uint8_t expected_digest[48];
+
+    if (state == NULL || request == NULL) {
+        return INVALID_PARAMETER;
+    }
+    if (request->reserved0 != 0U || request->reserved1 != 0U) {
+        return INVALID_PARAMETER;
+    }
+    if (request->session_correlation_id == 0U || request->confirmation_nonce == 0U) {
+        return POLICY_DENIED;
+    }
+    if (request->approval_expires_utc == 0U) {
+        return POLICY_DENIED;
+    }
+    if (!state->trusted_clock_available) {
+        return POLICY_DENIED;
+    }
+    if (fbvbs_memory_is_zero(request->recovery_approval_digest, 48U) != 0) {
+        return POLICY_DENIED;
+    }
+    if (fbvbs_memory_is_zero(request->approval_ledger_digest, 48U) != 0) {
+        return POLICY_DENIED;
+    }
+    if (state->trusted_time_seconds >= request->approval_expires_utc) {
+        return POLICY_DENIED;
+    }
+    if ((request->recovery_flags & FBVBS_RECOVERY_BREAK_GLASS) != 0U &&
+        request->approval_expires_utc - state->trusted_time_seconds >
+            FBVBS_BREAK_GLASS_MAX_VALIDITY_SECONDS) {
+        return POLICY_DENIED;
+    }
+
+    fbvbs_partition_compute_recovery_approval_digest(
+        state,
+        request->partition_id,
+        request->recovery_flags,
+        request->session_correlation_id,
+        request->confirmation_nonce,
+        request->approval_expires_utc,
+        request->approval_ledger_digest,
+        expected_digest
+    );
+
+    if (fbvbs_constant_time_equals(expected_digest, request->recovery_approval_digest, 48U) == 0) {
+        return POLICY_DENIED;
+    }
+
+    return OK;
+}
+
+static int fbvbs_confirmation_was_consumed(
+    const struct fbvbs_hypervisor_state *state,
+    uint32_t operation,
+    uint64_t requester_partition_id,
+    uint64_t target_id,
+    uint64_t session_correlation_id,
+    uint64_t confirmation_nonce
+)
+{
+    uint32_t index;
+
+    if (state == NULL) {
+        return 0;
+    }
+
+    for (index = 0U; index < FBVBS_MAX_CONSUMED_CONFIRMATIONS; ++index) {
+        const struct fbvbs_consumed_confirmation *entry =
+            &state->consumed_confirmations[index];
+
+        if (!entry->active) {
+            continue;
+        }
+        if (state->trusted_clock_available &&
+            entry->expires_utc != 0U &&
+            state->trusted_time_seconds >= entry->expires_utc) {
+            continue;
+        }
+        if (entry->operation == operation &&
+            entry->requester_partition_id == requester_partition_id &&
+            entry->target_id == target_id &&
+            entry->session_correlation_id == session_correlation_id &&
+            entry->confirmation_nonce == confirmation_nonce) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int fbvbs_confirmation_consume(
+    struct fbvbs_hypervisor_state *state,
+    uint32_t operation,
+    uint64_t requester_partition_id,
+    uint64_t target_id,
+    uint64_t session_correlation_id,
+    uint64_t confirmation_nonce,
+    uint64_t expires_utc
+)
+{
+    uint32_t slot = 0U;
+    uint32_t offset;
+    int found_slot = 0;
+
+    if (state == NULL || expires_utc == 0U) {
+        return INVALID_PARAMETER;
+    }
+    if (!state->trusted_clock_available) {
+        return POLICY_DENIED;
+    }
+
+    for (offset = 0U; offset < FBVBS_MAX_CONSUMED_CONFIRMATIONS; ++offset) {
+        struct fbvbs_consumed_confirmation *entry;
+
+        slot = (state->consumed_confirmation_cursor + offset) %
+            FBVBS_MAX_CONSUMED_CONFIRMATIONS;
+        entry = &state->consumed_confirmations[slot];
+        if (!entry->active ||
+            (entry->expires_utc != 0U && state->trusted_time_seconds >= entry->expires_utc)) {
+            found_slot = 1;
+            break;
+        }
+    }
+
+    if (found_slot == 0) {
+        return RESOURCE_EXHAUSTED;
+    }
+
+    state->consumed_confirmations[slot] = (struct fbvbs_consumed_confirmation){
+        .active = true,
+        .operation = operation,
+        .requester_partition_id = requester_partition_id,
+        .target_id = target_id,
+        .session_correlation_id = session_correlation_id,
+        .confirmation_nonce = confirmation_nonce,
+        .expires_utc = expires_utc,
+    };
+
+    state->consumed_confirmation_cursor =
+        (slot + 1U) % FBVBS_MAX_CONSUMED_CONFIRMATIONS;
+    return OK;
 }
 
 /*@ requires \valid_read(state);
@@ -368,10 +590,15 @@ static void fbvbs_partition_refresh_vm_state(struct fbvbs_partition *partition) 
 
     if (any_faulted != 0) {
         partition->state = FBVBS_PARTITION_STATE_FAULTED;
+        partition->health_state = FBVBS_PARTITION_HEALTH_QUARANTINED;
     } else if (any_running != 0) {
         partition->state = FBVBS_PARTITION_STATE_RUNNING;
+        partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
     } else if (any_runnable_or_blocked != 0) {
         partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
+        if (partition->health_state != FBVBS_PARTITION_HEALTH_RECOVERY) {
+            partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
+        }
     }
 }
 
@@ -1408,13 +1635,50 @@ static int fbvbs_share_registration_allows_mapping(
         (permissions & ~(uint32_t)reg->peer_permissions) == 0U;
 }
 
+static void fbvbs_log_memory_corruption_event(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
+)
+{
+    struct {
+        uint64_t memory_object_id;
+        uint64_t owner_partition_id;
+        uint32_t lifecycle_state;
+        uint32_t quarantine_reason;
+    } payload;
+
+    if (state == NULL || object == NULL) {
+        return;
+    }
+
+    payload.memory_object_id = object->memory_object_id;
+    payload.owner_partition_id = object->owner_partition_id;
+    payload.lifecycle_state = object->lifecycle_state;
+    payload.quarantine_reason = (quarantine_reason == 0U)
+        ? FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        : quarantine_reason;
+
+    (void)fbvbs_log_append(
+        state,
+        0U,
+        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+        FBVBS_SEVERITY_ERROR,
+        FBVBS_EVENT_MEMORY_CORRUPTION,
+        (const uint8_t *)&payload,
+        (uint32_t)sizeof(payload)
+    );
+}
+
 /*@ requires \valid(partition);
     requires \valid(object);
     assigns partition->mappings[0 .. FBVBS_MAX_MEMORY_MAPPINGS - 1], partition->mapped_bytes, object->map_count;
     ensures \result == OK || \result == INVALID_PARAMETER || \result == PERMISSION_DENIED ||
-            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY;
+            \result == RESOURCE_EXHAUSTED || \result == RESOURCE_BUSY ||
+            \result == INVALID_STATE || \result == INTERNAL_CORRUPTION;
 */
 static int fbvbs_apply_mapping(
+    struct fbvbs_hypervisor_state *state,
     struct fbvbs_partition *partition,
     struct fbvbs_memory_object *object,
     uint64_t guest_physical_address,
@@ -1425,6 +1689,9 @@ static int fbvbs_apply_mapping(
 
     if (!fbvbs_wx_safe(permissions)) {
         return INVALID_PARAMETER;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
     }
     /* Prevent cross-partition aliasing of non-shareable memory objects.
      * A PRIVATE or GUEST_MEMORY object must not be mapped by more than one
@@ -1444,6 +1711,18 @@ static int fbvbs_apply_mapping(
     if (mapping == NULL) {
         return RESOURCE_EXHAUSTED;
     }
+    if (object->map_count == UINT32_MAX) {
+        fbvbs_memory_object_mark_quarantined(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        return INTERNAL_CORRUPTION;
+    }
 
     *mapping = (struct fbvbs_memory_mapping){0};
     mapping->active = true;
@@ -1453,6 +1732,7 @@ static int fbvbs_apply_mapping(
     mapping->size = size;
     partition->mapped_bytes += size;
     object->map_count += 1U;
+    fbvbs_memory_object_refresh_lifecycle_state(object);
     return OK;
 }
 
@@ -1470,6 +1750,108 @@ static int fbvbs_device_exists(const struct fbvbs_hypervisor_state *state, uint6
     */
     for (index = 0U; index < state->device_catalog.count && index < FBVBS_MAX_DEVICE_CATALOG_ENTRIES; ++index) {
         if (state->device_catalog.entries[index].device_id == device_id) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static struct fbvbs_device_runtime_state *fbvbs_find_device_runtime_state(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t device_id,
+    int create_if_missing
+)
+{
+    uint32_t index;
+    struct fbvbs_device_runtime_state *free_slot = NULL;
+
+    if (state == NULL || device_id == 0U) {
+        return NULL;
+    }
+
+    for (index = 0U; index < FBVBS_MAX_DEVICE_CATALOG_ENTRIES; ++index) {
+        struct fbvbs_device_runtime_state *slot = &state->device_runtime[index];
+
+        if (slot->device_id == device_id) {
+            return slot;
+        }
+        if (free_slot == NULL && slot->device_id == 0U) {
+            free_slot = slot;
+        }
+    }
+
+    if (create_if_missing == 0 || free_slot == NULL) {
+        return NULL;
+    }
+
+    *free_slot = (struct fbvbs_device_runtime_state){0};
+    free_slot->device_id = device_id;
+    return free_slot;
+}
+
+static int fbvbs_device_is_quarantined(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t device_id
+)
+{
+    uint32_t index;
+
+    if (state == NULL || device_id == 0U) {
+        return 0;
+    }
+
+    for (index = 0U; index < FBVBS_MAX_DEVICE_CATALOG_ENTRIES; ++index) {
+        const struct fbvbs_device_runtime_state *slot = &state->device_runtime[index];
+
+        if (slot->device_id == device_id) {
+            return slot->quarantined ? 1 : 0;
+        }
+    }
+
+    return 0;
+}
+
+static void fbvbs_quarantine_device(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t device_id,
+    uint32_t quarantine_reason
+)
+{
+    struct fbvbs_device_runtime_state *slot;
+
+    slot = fbvbs_find_device_runtime_state(state, device_id, 1);
+    if (slot == NULL) {
+        return;
+    }
+
+    slot->quarantined = true;
+    slot->quarantine_reason =
+        (quarantine_reason == 0U)
+            ? FBVBS_DEVICE_QUARANTINE_REASON_PLATFORM_UNSUPPORTED
+            : quarantine_reason;
+    if (slot->deny_count != UINT32_MAX) {
+        slot->deny_count += 1U;
+    }
+}
+
+static int fbvbs_partition_has_assigned_device(
+    const struct fbvbs_partition *partition,
+    uint64_t device_id
+)
+{
+    uint32_t index;
+
+    if (partition == NULL || device_id == 0U) {
+        return 0;
+    }
+
+    if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
+        return 0;
+    }
+
+    for (index = 0U; index < partition->assigned_device_count; ++index) {
+        if (partition->assigned_devices[index] == device_id) {
             return 1;
         }
     }
@@ -1546,6 +1928,7 @@ static void fbvbs_log_iommu_domain_event(
     struct fbvbs_hypervisor_state *state,
     uint16_t event_code,
     uint64_t partition_id,
+    uint64_t device_id,
     uint64_t domain_id,
     uint32_t attached_device_count
 ) {
@@ -1553,6 +1936,7 @@ static void fbvbs_log_iommu_domain_event(
 
     event = (struct fbvbs_audit_device_assignment_event){0};
     event.partition_id = partition_id;
+    event.device_id = device_id;
     event.iommu_domain_id = domain_id;
     event.attached_device_count = attached_device_count;
 #ifdef __FRAMAC__
@@ -1656,6 +2040,7 @@ static int __attribute__((unused)) fbvbs_iommu_domain_create(
         state,
         FBVBS_EVENT_IOMMU_DOMAIN_CREATE,
         partition->partition_id,
+        0U,
         domain->domain_id,
         0U
     );
@@ -1707,6 +2092,8 @@ static int fbvbs_partition_create_common(
     partition->partition_id = state->next_partition_id++;
     partition->kind = kind;
     partition->state = FBVBS_PARTITION_STATE_CREATED;
+    partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
+    partition->quarantine_reason = 0U;
     partition->vcpu_count = vcpu_count;
     partition->vm_flags = vm_flags;
     partition->memory_limit_bytes = memory_limit_bytes;
@@ -2014,6 +2401,8 @@ static void fbvbs_partition_sanitize_memory(
     }
 #else
     /* Frama-C WP: skip page zeroing model (void* casts), just clear objects */
+    _Static_assert(sizeof(struct fbvbs_memory_object) == sizeof(state->memory_objects[0]),
+                   "fbvbs_memory_object size drift");
     /*@ loop invariant 0 <= index <= FBVBS_MAX_MEMORY_OBJECTS;
         loop assigns index,
                      state->memory_objects[0 .. FBVBS_MAX_MEMORY_OBJECTS - 1];
@@ -2054,6 +2443,12 @@ static void fbvbs_partition_sanitize_memory(
      *    explicitly zero each register file via MOV/VZEROALL. */
 }
 
+static void fbvbs_partition_audit_service_lifecycle(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *partition,
+    uint32_t operation
+);
+
 /*@ requires state == \null || \valid(state);
     requires partition == \null || \valid(partition);
     assigns *state, *partition;
@@ -2087,6 +2482,8 @@ static int fbvbs_partition_destroy_common(
     partition->kind = kind;
     partition->service_kind = service_kind;
     partition->state = FBVBS_PARTITION_STATE_DESTROYED;
+    partition->health_state = FBVBS_PARTITION_HEALTH_DEGRADED;
+    partition->quarantine_reason = 0U;
     partition->vcpu_count = vcpu_count;
     partition->vm_flags = 0U;
     partition->reserved0 = 0U;
@@ -2152,6 +2549,7 @@ static int fbvbs_partition_destroy_common(
                 state,
                 FBVBS_EVENT_IOMMU_DOMAIN_RELEASE,
                 partition_id,
+                0U,
                 domain->domain_id,
                 0U
             );
@@ -2164,6 +2562,8 @@ static int fbvbs_partition_destroy_common(
     partition->kind = kind;
     partition->service_kind = service_kind;
     partition->state = FBVBS_PARTITION_STATE_DESTROYED;
+    partition->health_state = FBVBS_PARTITION_HEALTH_DEGRADED;
+    partition->quarantine_reason = 0U;
     partition->measurement_epoch = measurement_epoch;
     partition->vcpu_count = vcpu_count;
     partition->tombstone = true;
@@ -2174,6 +2574,11 @@ static int fbvbs_partition_destroy_common(
     for (index = 0U; index < vcpu_count && index < FBVBS_MAX_VCPUS; ++index) {
         partition->vcpus[index].state = FBVBS_VCPU_STATE_DESTROYED;
     }
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_DESTROY
+    );
     return OK;
 }
 
@@ -2295,8 +2700,12 @@ int fbvbs_partition_get_status(
     }
 
     response->state = partition->state;
-    response->reserved0 = 0U;
+    response->health_state = partition->health_state;
     response->measurement_epoch = partition->measurement_epoch;
+    response->fault_code = partition->last_fault_code;
+    response->quarantine_reason = partition->quarantine_reason;
+    response->lockout_windows = partition->hypercall_lockout_windows;
+    response->policy_deny_count = partition->policy_deny_count;
     return OK;
 }
 
@@ -2377,7 +2786,76 @@ int fbvbs_partition_measure(
     partition->measurement_digest_id = state->next_measurement_digest_id++;
     partition->state = FBVBS_PARTITION_STATE_MEASURED;
     response->measurement_digest_id = partition->measurement_digest_id;
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_MEASURE
+    );
     return OK;
+}
+
+static void fbvbs_partition_audit_service_lifecycle(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *partition,
+    uint32_t operation
+) {
+    struct fbvbs_audit_service_lifecycle_event event;
+    uint16_t severity = FBVBS_SEVERITY_INFO;
+
+    if (state == NULL || partition == NULL ||
+        partition->kind != PARTITION_KIND_TRUSTED_SERVICE ||
+        partition->service_kind == SERVICE_KIND_NONE) {
+        return;
+    }
+
+    switch (operation) {
+        case FBVBS_SERVICE_AUDIT_OP_QUIESCE:
+        case FBVBS_SERVICE_AUDIT_OP_RECOVER:
+            severity = FBVBS_SEVERITY_NOTICE;
+            break;
+        case FBVBS_SERVICE_AUDIT_OP_FAULT:
+        case FBVBS_SERVICE_AUDIT_OP_DESTROY:
+            severity = FBVBS_SEVERITY_WARNING;
+            break;
+        default:
+            severity = FBVBS_SEVERITY_INFO;
+            break;
+    }
+
+    event = (struct fbvbs_audit_service_lifecycle_event){0};
+    event.partition_id = partition->partition_id;
+    event.measurement_epoch = partition->measurement_epoch;
+    event.operation = operation;
+    event.state = partition->state;
+    event.health_state = partition->health_state;
+    event.service_kind = partition->service_kind;
+    if (operation == FBVBS_SERVICE_AUDIT_OP_RECOVER) {
+        event.recovery_flags = (uint16_t)(partition->last_recovery_flags & 0xFFFFU);
+    }
+
+    if (operation == FBVBS_SERVICE_AUDIT_OP_FAULT ||
+        operation == FBVBS_SERVICE_AUDIT_OP_RECOVER ||
+        operation == FBVBS_SERVICE_AUDIT_OP_DESTROY) {
+        (void)fbvbs_log_append(
+            state,
+            0U,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            severity,
+            FBVBS_EVENT_SERVICE_RESTART,
+            (const uint8_t *)&event,
+            (uint32_t)sizeof(event)
+        );
+    } else {
+        (void)fbvbs_log_append_rate_limited(
+            state,
+            0U,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            severity,
+            FBVBS_EVENT_SERVICE_RESTART,
+            (const uint8_t *)&event,
+            (uint32_t)sizeof(event)
+        );
+    }
 }
 
 int fbvbs_partition_load_image(
@@ -2450,10 +2928,17 @@ int fbvbs_partition_start(struct fbvbs_hypervisor_state *state, uint64_t partiti
     }
 
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
+    partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
+    partition->quarantine_reason = 0U;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_RUNNABLE);
     if (partition->kind == PARTITION_KIND_FREEBSD_HOST) {
         partition->vcpus[0].rip = fbvbs_primary_host_callsite(state, FBVBS_HOST_CALLER_CLASS_FBVBS);
     }
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_START
+    );
     return OK;
 }
 
@@ -2477,7 +2962,13 @@ int fbvbs_partition_quiesce(struct fbvbs_hypervisor_state *state, uint64_t parti
     }
 
     partition->state = FBVBS_PARTITION_STATE_QUIESCED;
+    partition->health_state = FBVBS_PARTITION_HEALTH_DEGRADED;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_BLOCKED);
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_QUIESCE
+    );
     return OK;
 }
 
@@ -2497,10 +2988,17 @@ int fbvbs_partition_resume(struct fbvbs_hypervisor_state *state, uint64_t partit
     }
 
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
+    partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
+    partition->quarantine_reason = 0U;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_RUNNABLE);
     if (partition->kind == PARTITION_KIND_FREEBSD_HOST) {
         partition->vcpus[0].rip = fbvbs_primary_host_callsite(state, FBVBS_HOST_CALLER_CLASS_FBVBS);
     }
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_RESUME
+    );
     return OK;
 }
 
@@ -2536,11 +3034,19 @@ int fbvbs_partition_fault(
     }
 
     partition->state = FBVBS_PARTITION_STATE_FAULTED;
+    partition->health_state = FBVBS_PARTITION_HEALTH_QUARANTINED;
+    partition->quarantine_reason = fault_code;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_FAULTED);
     partition->last_fault_code = fault_code;
     partition->last_fault_source_component = source_component;
     partition->last_fault_detail0 = detail0;
     partition->last_fault_detail1 = detail1;
+    partition->last_recovery_flags = 0U;
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_FAULT
+    );
     event = (struct fbvbs_audit_partition_fault_event){0};
     event.partition_id = partition_id;
     event.fault_code = fault_code;
@@ -2577,15 +3083,21 @@ int fbvbs_partition_recover(
 ) {
     struct fbvbs_partition *partition;
     uint32_t revcheck;
+    int status;
 
     if (state == NULL || request == NULL) {
         return INVALID_PARAMETER;
     }
-
-#ifdef __FRAMAC__
     if (request->partition_id == 0U) {
         return INVALID_PARAMETER;
     }
+
+    status = fbvbs_partition_validate_recovery_approval(state, request);
+    if (status != OK) {
+        return status;
+    }
+
+#ifdef __FRAMAC__
     return OK;
 #endif
 
@@ -2593,15 +3105,49 @@ int fbvbs_partition_recover(
     if (partition == NULL) {
         return NOT_FOUND;
     }
-    if (!partition->occupied || partition->state != FBVBS_PARTITION_STATE_FAULTED) {
+    if (!partition->occupied ||
+        partition->state != FBVBS_PARTITION_STATE_FAULTED ||
+        partition->health_state != FBVBS_PARTITION_HEALTH_QUARANTINED) {
         return INVALID_STATE;
     }
-    if ((request->recovery_flags & ~0x7U) != 0U) {
+    if ((request->recovery_flags & ~0xFU) != 0U) {
         return INVALID_PARAMETER;
     }
     if (partition->manifest_object_id == 0U || partition->image_object_id == 0U || partition->entry_ip == 0U) {
         return MEASUREMENT_FAILED;
     }
+    fbvbs_partition_confirmation_lock(&state->storage_lock);
+    if (partition->last_recovery_session_correlation_id == request->session_correlation_id &&
+        partition->last_recovery_confirmation_nonce == request->confirmation_nonce) {
+        fbvbs_partition_confirmation_unlock(&state->storage_lock);
+        return POLICY_DENIED;
+    }
+    if (fbvbs_confirmation_was_consumed(
+            state,
+            FBVBS_RECOVERY_APPROVAL_OP_PARTITION_RECOVER,
+            request->partition_id,
+            request->partition_id,
+            request->session_correlation_id,
+            request->confirmation_nonce) != 0) {
+        fbvbs_partition_confirmation_unlock(&state->storage_lock);
+        return POLICY_DENIED;
+    }
+    status = fbvbs_confirmation_consume(
+        state,
+        FBVBS_RECOVERY_APPROVAL_OP_PARTITION_RECOVER,
+        request->partition_id,
+        request->partition_id,
+        request->session_correlation_id,
+        request->confirmation_nonce,
+        request->approval_expires_utc
+    );
+    if (status != OK) {
+        fbvbs_partition_confirmation_unlock(&state->storage_lock);
+        return status;
+    }
+    partition->last_recovery_session_correlation_id = request->session_correlation_id;
+    partition->last_recovery_confirmation_nonce = request->confirmation_nonce;
+    fbvbs_partition_confirmation_unlock(&state->storage_lock);
 
     /* Re-measurement check (Section 18.1): verify the manifest and image
        have not been revoked while the partition was in Faulted state.
@@ -2622,12 +3168,20 @@ int fbvbs_partition_recover(
     }
     partition->measurement_epoch += 1U;
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
+    partition->health_state = FBVBS_PARTITION_HEALTH_RECOVERY;
+    partition->quarantine_reason = 0U;
+    partition->last_recovery_flags = (uint32_t)request->recovery_flags;
     fbvbs_partition_reset_vcpus(partition, FBVBS_VCPU_STATE_RUNNABLE);
     fbvbs_partition_apply_image_registers(state, partition);
     partition->last_fault_code = 0U;
     partition->last_fault_source_component = 0U;
     partition->last_fault_detail0 = 0U;
     partition->last_fault_detail1 = 0U;
+    fbvbs_partition_audit_service_lifecycle(
+        state,
+        partition,
+        FBVBS_SERVICE_AUDIT_OP_RECOVER
+    );
     return OK;
 }
 
@@ -2656,6 +3210,8 @@ int fbvbs_partition_seed_freebsd_host(struct fbvbs_hypervisor_state *state) {
     /*@ assert partition != \null; */
     /*@ assert \valid(partition); */
     partition->state = FBVBS_PARTITION_STATE_RUNNABLE;
+    partition->health_state = FBVBS_PARTITION_HEALTH_HEALTHY;
+    partition->quarantine_reason = 0U;
     fbvbs_partition_set_vcpu_state(partition, FBVBS_VCPU_STATE_RUNNABLE);
     /*@ assert \valid(&partition->vcpus[0]); */
     partition->vcpus[0].rip = fbvbs_primary_host_callsite(state, FBVBS_HOST_CALLER_CLASS_FBVBS);
@@ -2697,6 +3253,9 @@ int fbvbs_partition_get_fault_info(
     struct fbvbs_partition_fault_info_response *response
 ) {
     struct fbvbs_partition *partition;
+    struct fbvbs_diag_reason_guidance_request guidance_request;
+    struct fbvbs_diag_reason_guidance_response guidance_response;
+    int guidance_status;
 
     if (state == NULL || response == NULL || partition_id == 0U) {
         return INVALID_PARAMETER;
@@ -2710,10 +3269,30 @@ int fbvbs_partition_get_fault_info(
         return INVALID_STATE;
     }
 
+    *response = (struct fbvbs_partition_fault_info_response){0};
     response->fault_code = partition->last_fault_code;
     response->source_component = partition->last_fault_source_component;
+    response->health_state = partition->health_state;
+    response->quarantine_reason = partition->quarantine_reason;
     response->fault_detail0 = partition->last_fault_detail0;
     response->fault_detail1 = partition->last_fault_detail1;
+    response->measurement_epoch = partition->measurement_epoch;
+
+    guidance_request = (struct fbvbs_diag_reason_guidance_request){0};
+    guidance_request.reason_domain = FBVBS_GUIDANCE_DOMAIN_PARTITION;
+    guidance_request.partition_id = partition_id;
+    guidance_status = fbvbs_diag_get_reason_guidance(
+        state,
+        &guidance_request,
+        &guidance_response
+    );
+    if (guidance_status == OK) {
+        response->severity = guidance_response.severity;
+        response->runbook_code = guidance_response.runbook_code;
+        response->deny_reason = guidance_response.deny_reason;
+        response->recommended_recovery_flags = guidance_response.recommended_recovery_flags;
+        response->recommended_action_flags = guidance_response.recommended_action_flags;
+    }
     return OK;
 }
 
@@ -2755,8 +3334,15 @@ int fbvbs_diag_get_partition_list(
             entry = (struct fbvbs_diag_partition_entry){0};
             entry.partition_id = partition->partition_id;
             entry.state = partition->state;
+            entry.health_state = partition->health_state;
+            entry.fault_code = partition->last_fault_code;
+            entry.quarantine_reason = partition->quarantine_reason;
             entry.kind = partition->kind;
             entry.service_kind = partition->service_kind;
+            entry.reserved0 = 0U;
+            entry.measurement_epoch = partition->measurement_epoch;
+            entry.lockout_windows = partition->hypercall_lockout_windows;
+            entry.policy_deny_count = partition->policy_deny_count;
 #ifdef __FRAMAC__
             response->entries[count * sizeof(struct fbvbs_diag_partition_entry)] = 0U;
 #else
@@ -3002,12 +3588,28 @@ int fbvbs_memory_map(
     if (object == NULL) {
         return NOT_FOUND;
     }
-    if (request->size > object->size) {
-        return INVALID_PARAMETER;
-    }
-
     if (requester_partition_id != object->owner_partition_id) {
         return PERMISSION_DENIED;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
+    if (fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        return INTERNAL_CORRUPTION;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
+    if (request->size > object->size) {
+        return INVALID_PARAMETER;
     }
 
     if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_PRIVATE) {
@@ -3029,6 +3631,7 @@ int fbvbs_memory_map(
     }
 
     return fbvbs_apply_mapping(
+        state,
         partition,
         object,
         request->guest_physical_address,
@@ -3077,6 +3680,19 @@ int fbvbs_memory_unmap(
         return PERMISSION_DENIED;
     }
 
+    if (object->lifecycle_state != FBVBS_MEMORY_OBJECT_STATE_QUARANTINED &&
+        fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        return INTERNAL_CORRUPTION;
+    }
+
     if (partition->mapped_bytes < mapping->size) {
         return INTERNAL_CORRUPTION;
     }
@@ -3089,6 +3705,7 @@ int fbvbs_memory_unmap(
 
     partition->mapped_bytes -= mapping->size;
     object->map_count -= 1U;
+    fbvbs_memory_object_refresh_lifecycle_state(object);
     *mapping = (struct fbvbs_memory_mapping){0};
     return OK;
 }
@@ -3147,6 +3764,20 @@ int fbvbs_memory_set_permission(
         if (requester_partition_id != object->owner_partition_id) {
             return PERMISSION_DENIED;
         }
+        if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+            return INVALID_STATE;
+        }
+        if (fbvbs_memory_object_validate_and_quarantine(
+                object,
+                FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+            ) != 0) {
+            fbvbs_log_memory_corruption_event(
+                state,
+                object,
+                FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+            );
+            return INTERNAL_CORRUPTION;
+        }
         if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE &&
             !fbvbs_share_registration_allows_mapping(
                 state,
@@ -3197,6 +3828,23 @@ int fbvbs_memory_register_shared(
     if (owner_partition_id == 0U || object->owner_partition_id != owner_partition_id) {
         return PERMISSION_DENIED;
     }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
+    if (fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        return INTERNAL_CORRUPTION;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
     if (object->object_flags != FBVBS_MEMORY_OBJECT_FLAG_SHAREABLE || request->size > object->size) {
         return PERMISSION_DENIED;
     }
@@ -3238,6 +3886,7 @@ int fbvbs_memory_register_shared(
     shared->peer_partition_id = request->peer_partition_id;
     shared->owner_partition_id = owner_partition_id;
     object->shared_count += 1U;
+    fbvbs_memory_object_refresh_lifecycle_state(object);
     response->shared_object_id = shared->shared_object_id;
     return OK;
 }
@@ -3264,6 +3913,18 @@ int fbvbs_memory_unregister_shared(  /* REQ-0909 */
 
     object = fbvbs_find_memory_object(state, shared->memory_object_id);
     if (object == NULL || object->shared_count == 0U) {
+        return INTERNAL_CORRUPTION;
+    }
+    if (object->lifecycle_state != FBVBS_MEMORY_OBJECT_STATE_QUARANTINED &&
+        fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
         return INTERNAL_CORRUPTION;
     }
 
@@ -3297,6 +3958,7 @@ int fbvbs_memory_unregister_shared(  /* REQ-0909 */
     }
 
     object->shared_count -= 1U;
+    fbvbs_memory_object_refresh_lifecycle_state(object);
     *shared = (struct fbvbs_shared_registration){0};
     return OK;
 }
@@ -3394,13 +4056,30 @@ int fbvbs_vm_map_memory(
     if (object == NULL) {
         return NOT_FOUND;
     }
+    if (requester_partition_id != object->owner_partition_id) {
+        return PERMISSION_DENIED;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
+    if (fbvbs_memory_object_validate_and_quarantine(
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        ) != 0) {
+        fbvbs_log_memory_corruption_event(
+            state,
+            object,
+            FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT
+        );
+        return INTERNAL_CORRUPTION;
+    }
+    if (object->lifecycle_state == FBVBS_MEMORY_OBJECT_STATE_QUARANTINED) {
+        return INVALID_STATE;
+    }
     if (request->size > object->size) {
         return INVALID_PARAMETER;
     }
 
-    if (requester_partition_id != object->owner_partition_id) {
-        return PERMISSION_DENIED;
-    }
     if (object->object_flags == FBVBS_MEMORY_OBJECT_FLAG_PRIVATE) {
         return PERMISSION_DENIED;
     }
@@ -3416,6 +4095,7 @@ int fbvbs_vm_map_memory(
     }
 
     return fbvbs_apply_mapping(
+        state,
         partition,
         object,
         request->guest_physical_address,
@@ -3477,6 +4157,7 @@ int fbvbs_vm_assign_device(
     const struct fbvbs_vm_device_request *request
 ) {
     struct fbvbs_partition *partition;
+    uint32_t attached_count;
 
     if (state == NULL || request == NULL || request->device_id == 0U) {
         return INVALID_PARAMETER;
@@ -3496,13 +4177,60 @@ int fbvbs_vm_assign_device(
     if (!fbvbs_partition_device_mutation_state_ok(partition, 0)) {
         return INVALID_STATE;
     }
+    attached_count = partition->assigned_device_count;
     if (partition->assigned_device_count >= FBVBS_MAX_ASSIGNED_DEVICES) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_ASSIGN,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
         return RESOURCE_EXHAUSTED;
     }
     if (!fbvbs_device_exists(state, request->device_id)) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_ASSIGN,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
         return NOT_FOUND;
     }
+    if (fbvbs_device_is_quarantined(state, request->device_id) != 0) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_ASSIGN,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
+        fbvbs_log_platform_gate_failure(
+            state,
+            request->vm_partition_id,
+            request->device_id,
+            FBVBS_PLATFORM_CAP_IOMMU
+        );
+        return INVALID_STATE;
+    }
     if (fbvbs_iommu_runtime_ready(&state->cpu_security) == 0) {
+        fbvbs_quarantine_device(
+            state,
+            request->device_id,
+            FBVBS_DEVICE_QUARANTINE_REASON_PLATFORM_UNSUPPORTED
+        );
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_ASSIGN,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
         fbvbs_log_platform_gate_failure(
             state,
             request->vm_partition_id,
@@ -3516,6 +4244,19 @@ int fbvbs_vm_assign_device(
      * programming, interrupt-remap installation, and safe reset/teardown.
      * Device passthrough therefore remains disabled even when the platform
      * advertises IOMMU capability. */
+    fbvbs_quarantine_device(
+        state,
+        request->device_id,
+        FBVBS_DEVICE_QUARANTINE_REASON_UNSAFE_TEARDOWN
+    );
+    fbvbs_log_iommu_domain_event(
+        state,
+        FBVBS_EVENT_VM_DEVICE_ASSIGN,
+        request->vm_partition_id,
+        request->device_id,
+        partition->iommu_domain_id,
+        attached_count
+    );
     fbvbs_log_platform_gate_failure(
         state,
         request->vm_partition_id,
@@ -3530,6 +4271,7 @@ int fbvbs_vm_release_device(
     const struct fbvbs_vm_device_request *request
 ) {
     struct fbvbs_partition *partition;
+    uint32_t attached_count;
 
     if (state == NULL || request == NULL || request->device_id == 0U) {
         return INVALID_PARAMETER;
@@ -3545,15 +4287,67 @@ int fbvbs_vm_release_device(
     if (!fbvbs_partition_device_mutation_state_ok(partition, 1)) {
         return INVALID_STATE;
     }
+    attached_count = partition->assigned_device_count;
     if (partition->assigned_device_count == 0U) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_RELEASE,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
         return NOT_FOUND;
     }
     if (partition->assigned_device_count > FBVBS_MAX_ASSIGNED_DEVICES) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_RELEASE,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
+        return INVALID_STATE;
+    }
+    if (fbvbs_partition_has_assigned_device(partition, request->device_id) == 0) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_RELEASE,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
+        return NOT_FOUND;
+    }
+    if (fbvbs_device_is_quarantined(state, request->device_id) != 0) {
+        fbvbs_log_iommu_domain_event(
+            state,
+            FBVBS_EVENT_VM_DEVICE_RELEASE,
+            request->vm_partition_id,
+            request->device_id,
+            partition->iommu_domain_id,
+            attached_count
+        );
         return INVALID_STATE;
     }
 
     /* Safe device teardown is not available in the retained-C build, so
      * release must fail closed instead of pretending to reset a device. */
+    fbvbs_quarantine_device(
+        state,
+        request->device_id,
+        FBVBS_DEVICE_QUARANTINE_REASON_UNSAFE_TEARDOWN
+    );
+    fbvbs_log_iommu_domain_event(
+        state,
+        FBVBS_EVENT_VM_DEVICE_RELEASE,
+        request->vm_partition_id,
+        request->device_id,
+        partition->iommu_domain_id,
+        attached_count
+    );
     (void)partition;
     return NOT_SUPPORTED_ON_PLATFORM;
 }

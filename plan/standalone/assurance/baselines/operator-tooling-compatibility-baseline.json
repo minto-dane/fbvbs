@@ -1,0 +1,950 @@
+{
+  "deprecated_field_policy": {
+    "append_only_within_major": true,
+    "deprecated_fields_must_not_be_repurposed": true,
+    "deprecated_fields_must_remain_accepted": true,
+    "notes": [
+      "Current standalone management ABI exports no deprecated fields.",
+      "Future deprecations must remain machine-declared in lifecycle.deprecated_fields until the next major ABI."
+    ],
+    "policy_schema_version": 1,
+    "removal_requires_major_version": true,
+    "reserved_fields_must_be_zero": true
+  },
+  "generated_utc": "2026-04-05T14:15:02.203353+00:00",
+  "matrix": [
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x0003",
+        "id": 3,
+        "name": "FBVBS_CALL_PARTITION_GET_STATUS"
+      },
+      "category": "health",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000001",
+          "name": "FBVBS_COMPAT_FLAG_HEALTH_SCHEMA_STABLE",
+          "value": 1
+        },
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "health_state is part of the stable operator-facing partition status view"
+      ],
+      "request_type": "fbvbs_partition_id_request",
+      "required_capability": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_CAP_PARTITION_MANAGE",
+        "value": 1
+      },
+      "response_type": "fbvbs_partition_status_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_HEALTH_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8003",
+        "id": 32771,
+        "name": "FBVBS_CALL_DIAG_GET_PARTITION_LIST"
+      },
+      "category": "health",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000010",
+          "name": "FBVBS_COMPAT_FLAG_PARTITION_DIAGNOSTICS_STABLE",
+          "value": 16
+        },
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "partition list exposes the stable partition diagnostics layout"
+      ],
+      "request_type": null,
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_partition_list_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_HEALTH_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8008",
+        "id": 32776,
+        "name": "FBVBS_CALL_DIAG_GET_REASON_GUIDANCE"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000004",
+          "name": "FBVBS_COMPAT_FLAG_FAILURE_MODE_GUIDANCE_STABLE",
+          "value": 4
+        },
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "deny / fault / health guidance is the primary operator remediation view"
+      ],
+      "request_type": "fbvbs_diag_reason_guidance_request",
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_reason_guidance_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_GUIDANCE_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8009",
+        "id": 32777,
+        "name": "FBVBS_CALL_DIAG_GET_INVENTORY"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "inventory counts power the one-screen operator summary"
+      ],
+      "request_type": null,
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_inventory_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_INVENTORY_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x800A",
+        "id": 32778,
+        "name": "FBVBS_CALL_DIAG_GET_FAULT_RECORD"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "latest partition fault and remediation guidance are stable"
+      ],
+      "request_type": "fbvbs_partition_id_request",
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_fault_record_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_FAULT_RECORD_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x000A",
+        "id": 10,
+        "name": "FBVBS_CALL_PARTITION_GET_FAULT_INFO"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000020",
+          "name": "FBVBS_COMPAT_FLAG_PARTITION_FAULT_INFO_STABLE",
+          "value": 32
+        },
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "partition fault info mirrors the structured fault record schema"
+      ],
+      "request_type": "fbvbs_partition_id_request",
+      "required_capability": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_CAP_PARTITION_MANAGE",
+        "value": 1
+      },
+      "response_type": "fbvbs_partition_fault_info_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_FAULT_RECORD_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x800B",
+        "id": 32779,
+        "name": "FBVBS_CALL_DIAG_GET_SCHEMA_REGISTRY"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000001",
+          "name": "FBVBS_COMPAT_FLAG_HEALTH_SCHEMA_STABLE",
+          "value": 1
+        },
+        {
+          "hex": "0x0000000000000002",
+          "name": "FBVBS_COMPAT_FLAG_AUDIT_SCHEMA_STABLE",
+          "value": 2
+        },
+        {
+          "hex": "0x0000000000000004",
+          "name": "FBVBS_COMPAT_FLAG_FAILURE_MODE_GUIDANCE_STABLE",
+          "value": 4
+        },
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        },
+        {
+          "hex": "0x0000000000000010",
+          "name": "FBVBS_COMPAT_FLAG_PARTITION_DIAGNOSTICS_STABLE",
+          "value": 16
+        },
+        {
+          "hex": "0x0000000000000020",
+          "name": "FBVBS_COMPAT_FLAG_PARTITION_FAULT_INFO_STABLE",
+          "value": 32
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "schema registry is the compatibility fixed point for tooling"
+      ],
+      "request_type": null,
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_schema_registry_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x800C",
+        "id": 32780,
+        "name": "FBVBS_CALL_DIAG_NEGOTIATE_COMMAND_VERSION"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "target-call negotiation exposes ABI version, class, capability, and feature flags"
+      ],
+      "request_type": "fbvbs_diag_command_version_request",
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_command_version_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x800D",
+        "id": 32781,
+        "name": "FBVBS_CALL_DIAG_NEGOTIATE_GUEST_FEATURES"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "guest feature bitmap negotiation exposes the standalone guest profile and runtime capability gating"
+      ],
+      "request_type": "fbvbs_diag_guest_feature_request",
+      "required_capability": {
+        "hex": "0x0000000000000400",
+        "name": "FBVBS_CAP_AUDIT_DIAG",
+        "value": 1024
+      },
+      "response_type": "fbvbs_diag_guest_feature_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8007",
+        "id": 32775,
+        "name": "FBVBS_CALL_DIAG_GET_SCALING_LIMITS"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "scaling summary is operator-readable and versioned with diagnostics"
+      ],
+      "request_type": null,
+      "required_capability": {
+        "hex": "0x0000000000001000",
+        "name": "FBVBS_CAP_SCALE_MANAGE",
+        "value": 4096
+      },
+      "response_type": "fbvbs_diag_scaling_limits_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8010",
+        "id": 32784,
+        "name": "FBVBS_CALL_DIAG_SET_SCALING_LIMITS"
+      },
+      "category": "diagnostic",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "runtime scaling limits remain operator-managed and reserved-zero stable"
+      ],
+      "request_type": "fbvbs_diag_set_scaling_limits_request",
+      "required_capability": {
+        "hex": "0x0000000000001000",
+        "name": "FBVBS_CAP_SCALE_MANAGE",
+        "value": 4096
+      },
+      "response_type": "fbvbs_diag_scaling_limits_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8011",
+        "id": 32785,
+        "name": "FBVBS_CALL_OCS_VCD_ATTACH"
+      },
+      "category": "control",
+      "command_class_flags": {
+        "hex": "0x0000000000000005",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION",
+          "FBVBS_COMMAND_CLASS_SERVICE"
+        ],
+        "value": 5
+      },
+      "compatibility_flags": [],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "optional OCS transport substrate remains capability gated"
+      ],
+      "request_type": "fbvbs_ocs_vcd_attach_request",
+      "required_capability": {
+        "hex": "0x0000000000002000",
+        "name": "FBVBS_CAP_OCS_ACCESS",
+        "value": 8192
+      },
+      "response_type": null,
+      "schema_version": null,
+      "service_kind": {
+        "hex": "0x0000000000000006",
+        "name": "SERVICE_KIND_OCS",
+        "value": 6
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x8012",
+        "id": 32786,
+        "name": "FBVBS_CALL_OCS_VCD_STATUS"
+      },
+      "category": "control",
+      "command_class_flags": {
+        "hex": "0x0000000000000005",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION",
+          "FBVBS_COMMAND_CLASS_SERVICE"
+        ],
+        "value": 5
+      },
+      "compatibility_flags": [],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "status is owner-bound and fail-closed on mismatch"
+      ],
+      "request_type": null,
+      "required_capability": {
+        "hex": "0x0000000000002000",
+        "name": "FBVBS_CAP_OCS_ACCESS",
+        "value": 8192
+      },
+      "response_type": "fbvbs_ocs_vcd_status_response",
+      "schema_version": null,
+      "service_kind": {
+        "hex": "0x0000000000000006",
+        "name": "SERVICE_KIND_OCS",
+        "value": 6
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x9001",
+        "id": 36865,
+        "name": "FBVBS_CALL_STORAGE_CREATE_POOL"
+      },
+      "category": "storage",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "storage pool creation is a stable host-only management ABI"
+      ],
+      "request_type": "fbvbs_storage_pool_create_request",
+      "required_capability": {
+        "hex": "0x0000000000000800",
+        "name": "FBVBS_CAP_STORAGE_MANAGE",
+        "value": 2048
+      },
+      "response_type": "fbvbs_storage_pool_create_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x9007",
+        "id": 36871,
+        "name": "FBVBS_CALL_STORAGE_GET_POOL_STATUS"
+      },
+      "category": "storage",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "storage pool status is part of the standalone operator inventory surface"
+      ],
+      "request_type": "fbvbs_storage_pool_request",
+      "required_capability": {
+        "hex": "0x0000000000000800",
+        "name": "FBVBS_CAP_STORAGE_MANAGE",
+        "value": 2048
+      },
+      "response_type": "fbvbs_storage_pool_status_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x9003",
+        "id": 36867,
+        "name": "FBVBS_CALL_STORAGE_CREATE_VDISK"
+      },
+      "category": "storage",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "virtual disk creation keeps reserved-zero stable for tooling safety"
+      ],
+      "request_type": "fbvbs_storage_vdisk_create_request",
+      "required_capability": {
+        "hex": "0x0000000000000800",
+        "name": "FBVBS_CAP_STORAGE_MANAGE",
+        "value": 2048
+      },
+      "response_type": "fbvbs_storage_vdisk_create_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    },
+    {
+      "abi_version": {
+        "maximum": 1,
+        "minimum": 1,
+        "negotiation_status": "exact"
+      },
+      "call": {
+        "hex": "0x9008",
+        "id": 36872,
+        "name": "FBVBS_CALL_STORAGE_GET_VDISK_STATUS"
+      },
+      "category": "storage",
+      "command_class_flags": {
+        "hex": "0x0000000000000001",
+        "names": [
+          "FBVBS_COMMAND_CLASS_HOST_PARTITION"
+        ],
+        "value": 1
+      },
+      "compatibility_flags": [
+        {
+          "hex": "0x0000000000000008",
+          "name": "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+          "value": 8
+        }
+      ],
+      "lifecycle": {
+        "deprecated_fields": [],
+        "stage": "stable"
+      },
+      "notes": [
+        "virtual disk status remains stable for operator consoles and exports"
+      ],
+      "request_type": "fbvbs_storage_vdisk_request",
+      "required_capability": {
+        "hex": "0x0000000000000800",
+        "name": "FBVBS_CAP_STORAGE_MANAGE",
+        "value": 2048
+      },
+      "response_type": "fbvbs_storage_vdisk_status_response",
+      "schema_version": {
+        "hex": "0x0000000000000001",
+        "name": "FBVBS_MANAGEMENT_ABI_SCHEMA_VERSION",
+        "value": 1
+      },
+      "service_kind": {
+        "hex": "0x0000000000000000",
+        "name": "SERVICE_KIND_NONE",
+        "value": 0
+      }
+    }
+  ],
+  "matrix_schema_version": 1,
+  "schema_registry": {
+    "audit_schema_version": 1,
+    "compatibility_flags": {
+      "hex": "0x000000000000003F",
+      "names": [
+        "FBVBS_COMPAT_FLAG_HEALTH_SCHEMA_STABLE",
+        "FBVBS_COMPAT_FLAG_AUDIT_SCHEMA_STABLE",
+        "FBVBS_COMPAT_FLAG_FAILURE_MODE_GUIDANCE_STABLE",
+        "FBVBS_COMPAT_FLAG_RESERVED_FIELDS_MUST_BE_ZERO",
+        "FBVBS_COMPAT_FLAG_PARTITION_DIAGNOSTICS_STABLE",
+        "FBVBS_COMPAT_FLAG_PARTITION_FAULT_INFO_STABLE"
+      ],
+      "value": 63
+    },
+    "fault_record_schema_version": 1,
+    "guidance_schema_version": 1,
+    "health_schema_version": 1,
+    "inventory_schema_version": 1,
+    "management_abi_version": 1
+  },
+  "source_files": {
+    "docs": [
+      "plan/standalone/implementation/standalone-implementation-plan.md",
+      "plan/standalone/assurance/management-diagnostics-abi.md",
+      "plan/standalone/assurance/compatibility-and-versioning.md",
+      "plan/standalone/operations/operator-control-plane.md"
+    ],
+    "header": "hypervisor/include/fbvbs_abi.h"
+  },
+  "summary": {
+    "control_row_count": 2,
+    "diagnostic_row_count": 9,
+    "row_count": 17
+  },
+  "tool": {
+    "name": "generate_operator_tooling_compatibility_matrix.py",
+    "version": 1
+  }
+}

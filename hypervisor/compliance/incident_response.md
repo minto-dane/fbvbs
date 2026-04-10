@@ -276,7 +276,7 @@ Required when:
 
 ## 6. Partition Fault Handling Evidence
 
-The fault handling subsystem is verified by `tests/test_fault_injection.c`
+The fault handling subsystem is verified by `tests/c/security/test_fault_injection.c`
 (18 tests):
 
 | Test | Scenario | Verification |

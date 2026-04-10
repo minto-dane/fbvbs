@@ -8,7 +8,7 @@
  * global state is computed once from all profiles and then immutable.
  *
  * Design references: fbvbs-design.md Section 21.1-21.11
- * Feature catalog: plan/cpu-sec.md (81+ features)
+ * Feature catalog: plan/full-stack/cpu-sec.md (81+ features)
  *
  * Requirements: REQ-0310 (eIBRS/AutoIBRS), REQ-0311 (IBPB),
  *   REQ-0312 (BHI_DIS_S), REQ-0313 (PBRSB), REQ-0314 (STIBP),

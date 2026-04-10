@@ -7,6 +7,371 @@
  */
 #include "fbvbs_hypervisor.h"
 
+/*@ assigns *lock; */
+static void fbvbs_command_tracker_lock(volatile uint32_t *lock)
+{
+#ifdef __FRAMAC__
+    if (lock != NULL) {
+        *lock = 1U;
+    }
+    return;
+#else
+    while (__sync_lock_test_and_set(lock, 1U) != 0U) {
+        /* busy wait */
+    }
+#endif
+}
+
+/*@ assigns *lock; */
+static void fbvbs_command_tracker_unlock(volatile uint32_t *lock)
+{
+#ifndef __FRAMAC__
+    __sync_lock_release(lock);
+#else
+    if (lock != NULL) {
+        *lock = 0U;
+    }
+#endif
+}
+
+/*@ assigns *lock; */
+static void fbvbs_hypercall_guard_lock(volatile uint32_t *lock)
+{
+#ifdef __FRAMAC__
+    if (lock != NULL) {
+        *lock = 1U;
+    }
+    return;
+#else
+    while (__sync_lock_test_and_set(lock, 1U) != 0U) {
+        /* busy wait */
+    }
+#endif
+}
+
+/*@ assigns *lock; */
+static void fbvbs_hypercall_guard_unlock(volatile uint32_t *lock)
+{
+#ifndef __FRAMAC__
+    __sync_lock_release(lock);
+#else
+    if (lock != NULL) {
+        *lock = 0U;
+    }
+#endif
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_is_policy_deny_status(int status)
+{
+    return (status == PERMISSION_DENIED ||
+            status == INVALID_CALLER ||
+            status == CALLSITE_REJECTED ||
+            status == POLICY_DENIED ||
+            status == INVALID_PARAMETER ||
+            status == ABI_VERSION_UNSUPPORTED ||
+            status == REPLAY_DETECTED);
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_is_critical_policy_deny_status(int status)
+{
+    return (status == INVALID_CALLER ||
+            status == CALLSITE_REJECTED ||
+            status == REPLAY_DETECTED ||
+            status == POLICY_DENIED);
+}
+
+/*@ assigns \nothing; */
+uint32_t fbvbs_policy_deny_reason_from_status(int status)
+{
+    switch (status) {
+        case INVALID_PARAMETER:
+            return FBVBS_DENY_REASON_INVALID_PARAMETER;
+        case ABI_VERSION_UNSUPPORTED:
+            return FBVBS_DENY_REASON_ABI_VERSION;
+        case PERMISSION_DENIED:
+            return FBVBS_DENY_REASON_PERMISSION;
+        case INVALID_CALLER:
+            return FBVBS_DENY_REASON_INVALID_CALLER;
+        case CALLSITE_REJECTED:
+            return FBVBS_DENY_REASON_CALLSITE;
+        case POLICY_DENIED:
+            return FBVBS_DENY_REASON_POLICY;
+        case REPLAY_DETECTED:
+            return FBVBS_DENY_REASON_REPLAY;
+        case RETRY_LATER:
+            return FBVBS_DENY_REASON_BUSY;
+        default:
+            return FBVBS_DENY_REASON_UNSPECIFIED;
+    }
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_counts_as_policy_deny(uint32_t deny_reason)
+{
+    return deny_reason != FBVBS_DENY_REASON_BUSY;
+}
+
+static void fbvbs_note_rate_limit_retry(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *owner,
+    uint64_t command_page_gpa,
+    uint16_t call_id
+);
+
+/*@ assigns \nothing; */
+static void fbvbs_audit_policy_deny(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *owner,
+    uint64_t command_page_gpa,
+    uint16_t call_id,
+    int status,
+    uint32_t deny_reason,
+    uint32_t deny_count_snapshot,
+    uint32_t lockout_windows_snapshot
+)
+{
+    struct fbvbs_audit_policy_deny_event event;
+    uint16_t severity;
+
+    if (state == NULL || !fbvbs_is_policy_deny_status(status)) {
+        return;
+    }
+
+    severity = (status == REPLAY_DETECTED ||
+                status == CALLSITE_REJECTED ||
+                status == INVALID_CALLER)
+        ? FBVBS_SEVERITY_ERROR
+        : FBVBS_SEVERITY_WARNING;
+
+    event = (struct fbvbs_audit_policy_deny_event){
+        .partition_id = (owner != NULL) ? owner->partition_id : 0U,
+        .command_page_gpa = command_page_gpa,
+        .call_id = call_id,
+        .status = (uint32_t)status,
+        .deny_reason = deny_reason,
+        .deny_count = deny_count_snapshot,
+        .lockout_windows = lockout_windows_snapshot,
+        .reserved0 = 0U,
+    };
+
+    (void)fbvbs_log_append_rate_limited(
+        state,
+        0U,
+        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+        severity,
+        FBVBS_EVENT_POLICY_DENY,
+        (const uint8_t *)&event,
+        (uint32_t)sizeof(event)
+    );
+}
+
+/*@ assigns \nothing; */
+static void fbvbs_note_policy_deny(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *owner,
+    uint64_t command_page_gpa,
+    uint16_t call_id,
+    int status,
+    uint32_t deny_reason
+)
+{
+    uint32_t deny_count_snapshot = 0U;
+    uint32_t critical_deny_count_snapshot = 0U;
+    uint32_t lockout_windows_snapshot = 0U;
+    uint64_t partition_id_snapshot = 0U;
+    int should_fault_partition = 0;
+
+    if (!fbvbs_is_policy_deny_status(status)) {
+        return;
+    }
+    if (deny_reason == FBVBS_DENY_REASON_UNSPECIFIED) {
+        deny_reason = fbvbs_policy_deny_reason_from_status(status);
+    }
+
+    if (state != NULL && owner != NULL) {
+        fbvbs_hypercall_guard_lock(&state->hypercall_guard_lock);
+        if (fbvbs_counts_as_policy_deny(deny_reason) != 0 &&
+            owner->policy_deny_count != UINT32_MAX) {
+            owner->policy_deny_count += 1U;
+        }
+        if (fbvbs_is_critical_policy_deny_status(status) != 0 &&
+            owner->critical_policy_deny_count != UINT32_MAX) {
+            owner->critical_policy_deny_count += 1U;
+        }
+        deny_count_snapshot = owner->policy_deny_count;
+        critical_deny_count_snapshot = owner->critical_policy_deny_count;
+        lockout_windows_snapshot = owner->hypercall_lockout_windows;
+        partition_id_snapshot = owner->partition_id;
+        if (fbvbs_is_critical_policy_deny_status(status) != 0 &&
+            critical_deny_count_snapshot >= FBVBS_POLICY_DENY_THRESHOLD_FOR_FAULT &&
+            owner->state != FBVBS_PARTITION_STATE_FAULTED) {
+            should_fault_partition = 1;
+        }
+        fbvbs_hypercall_guard_unlock(&state->hypercall_guard_lock);
+    }
+
+    fbvbs_audit_policy_deny(
+        state,
+        owner,
+        command_page_gpa,
+        call_id,
+        status,
+        deny_reason,
+        deny_count_snapshot,
+        lockout_windows_snapshot
+    );
+
+    if (should_fault_partition != 0 && partition_id_snapshot != 0U) {
+        int fault_status = fbvbs_partition_fault(
+            state,
+            partition_id_snapshot,
+            FBVBS_FAULT_POLICY_DENY_THRESHOLD,
+            FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+            (uint64_t)critical_deny_count_snapshot,
+            (uint64_t)call_id
+        );
+        if (fault_status != OK && state != NULL) {
+            struct fbvbs_audit_partition_fault_event failure_event;
+
+            failure_event = (struct fbvbs_audit_partition_fault_event){0};
+            failure_event.partition_id = partition_id_snapshot;
+            failure_event.fault_code = FBVBS_FAULT_POLICY_DENY_THRESHOLD;
+            failure_event.source_component = FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR;
+            failure_event.detail0 = (uint64_t)critical_deny_count_snapshot;
+            failure_event.detail1 = (uint64_t)(uint32_t)fault_status;
+            (void)fbvbs_log_append(
+                state,
+                0U,
+                FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+                FBVBS_SEVERITY_CRITICAL,
+                FBVBS_EVENT_PARTITION_FAULT,
+                (const uint8_t *)(const void *)&failure_event,
+                (uint32_t)sizeof(failure_event)
+            );
+        }
+    }
+}
+
+/*@ assigns \nothing; */
+static void fbvbs_audit_rate_limit_retry(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_partition *owner,
+    uint64_t command_page_gpa,
+    uint16_t call_id,
+    uint32_t deny_count_snapshot,
+    uint32_t lockout_windows_snapshot
+) {
+    struct fbvbs_audit_policy_deny_event event;
+
+    if (state == NULL) {
+        return;
+    }
+
+    event = (struct fbvbs_audit_policy_deny_event){
+        .partition_id = (owner != NULL) ? owner->partition_id : 0U,
+        .command_page_gpa = command_page_gpa,
+        .call_id = call_id,
+        .status = (uint32_t)RETRY_LATER,
+        .deny_reason = FBVBS_DENY_REASON_RATE_LIMIT,
+        .deny_count = deny_count_snapshot,
+        .lockout_windows = lockout_windows_snapshot,
+        .reserved0 = 0U,
+    };
+
+    (void)fbvbs_log_append_rate_limited(
+        state,
+        0U,
+        FBVBS_SOURCE_COMPONENT_MICROHYPERVISOR,
+        FBVBS_SEVERITY_WARNING,
+        FBVBS_EVENT_POLICY_DENY,
+        (const uint8_t *)&event,
+        (uint32_t)sizeof(event)
+    );
+}
+
+/*@ assigns \nothing; */
+static void fbvbs_note_rate_limit_retry(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *owner,
+    uint64_t command_page_gpa,
+    uint16_t call_id
+) {
+    uint32_t deny_count_snapshot = 0U;
+    uint32_t lockout_windows_snapshot = 0U;
+
+    if (state != NULL && owner != NULL) {
+        fbvbs_hypercall_guard_lock(&state->hypercall_guard_lock);
+        if (owner->policy_deny_count != UINT32_MAX) {
+            owner->policy_deny_count += 1U;
+        }
+        deny_count_snapshot = owner->policy_deny_count;
+        lockout_windows_snapshot = owner->hypercall_lockout_windows;
+        fbvbs_hypercall_guard_unlock(&state->hypercall_guard_lock);
+    }
+
+    fbvbs_audit_rate_limit_retry(
+        state,
+        owner,
+        command_page_gpa,
+        call_id,
+        deny_count_snapshot,
+        lockout_windows_snapshot
+    );
+}
+
+/*@ requires \valid(state);
+    requires \valid(owner);
+    assigns state->hypercall_dispatch_counter,
+            owner->hypercall_window_start,
+            owner->hypercall_window_count,
+            owner->hypercall_lockout_windows;
+    ensures \result == OK || \result == RETRY_LATER;
+*/
+static int fbvbs_enforce_hypercall_abuse_guard(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_partition *owner
+)
+{
+    uint32_t owner_window_position;
+
+    if (state->hypercall_dispatch_counter == UINT32_MAX) {
+        state->hypercall_dispatch_counter = 1U;
+    } else {
+        state->hypercall_dispatch_counter += 1U;
+    }
+
+    owner_window_position = owner->hypercall_window_start;
+    if (owner_window_position == UINT32_MAX ||
+        owner_window_position >= FBVBS_HYPERCALL_WINDOW_CALLS) {
+        owner->hypercall_window_start = 0U;
+        owner->hypercall_window_count = 0U;
+        if (owner->hypercall_lockout_windows != 0U) {
+            owner->hypercall_lockout_windows -= 1U;
+        }
+    }
+
+    owner->hypercall_window_start += 1U;
+
+    if (owner->hypercall_lockout_windows != 0U) {
+        return RETRY_LATER;
+    }
+    if (owner->hypercall_window_count >= FBVBS_HYPERCALL_MAX_CALLS_PER_WINDOW) {
+        owner->hypercall_lockout_windows = FBVBS_HYPERCALL_LOCKOUT_WINDOWS;
+        return RETRY_LATER;
+    }
+
+    owner->hypercall_window_count += 1U;
+    return OK;
+}
+
 /*@ assigns \nothing;
     ensures \result == 0 || \result == 1;
 */
@@ -17,7 +382,7 @@ static int fbvbs_is_page_aligned(uint64_t value) {
 /*@ requires \valid_read(page) || page == \null;
     assigns \nothing;
     ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == ABI_VERSION_UNSUPPORTED || \result == RESOURCE_BUSY;
+            \result == ABI_VERSION_UNSUPPORTED || \result == RETRY_LATER;
     behavior null_page:
       assumes page == \null;
       ensures \result == INVALID_PARAMETER;
@@ -72,7 +437,7 @@ static int fbvbs_validate_command_page(
         return INVALID_PARAMETER;
     }
     if (page->command_state == EXECUTING) {
-        return RESOURCE_BUSY;
+        return RETRY_LATER;
     }
     if (page->command_state != READY) {
         return INVALID_PARAMETER;
@@ -164,6 +529,30 @@ static int fbvbs_validate_command_sequence(
         return REPLAY_DETECTED;
     }
 
+    (void)cached_caller_nonce;
+    return OK;
+}
+
+/*@ requires \valid(state);
+    assigns state->command_trackers[0 .. FBVBS_MAX_COMMAND_TRACKERS - 1];
+    ensures \result == OK || \result == RESOURCE_EXHAUSTED || \result == REPLAY_DETECTED;
+*/
+static int fbvbs_commit_command_sequence(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t page_gpa,
+    uint64_t cached_caller_sequence,
+    uint64_t cached_caller_nonce
+) {
+    struct fbvbs_command_tracker *tracker;
+
+    tracker = fbvbs_get_command_tracker(state, page_gpa);
+    if (tracker == NULL) {
+        return RESOURCE_EXHAUSTED;
+    }
+    if (tracker->sequence_seen && cached_caller_sequence <= tracker->last_sequence) {
+        return REPLAY_DETECTED;
+    }
+
     tracker->sequence_seen = true;
     tracker->last_sequence = cached_caller_sequence;
     tracker->last_nonce = cached_caller_nonce;
@@ -214,7 +603,8 @@ static struct fbvbs_partition *fbvbs_find_command_page_owner(
             \result == SERVICE_KIND_KSI ||
             \result == SERVICE_KIND_IKS ||
             \result == SERVICE_KIND_SKS ||
-            \result == SERVICE_KIND_UVS;
+            \result == SERVICE_KIND_UVS ||
+            \result == SERVICE_KIND_OCS;
 */
 static uint16_t fbvbs_service_kind_for_call(uint16_t call_id) {
     switch (call_id) {
@@ -248,8 +638,77 @@ static uint16_t fbvbs_service_kind_for_call(uint16_t call_id) {
         case FBVBS_CALL_UVS_VERIFY_ARTIFACT:
         case FBVBS_CALL_UVS_CHECK_REVOCATION:
             return SERVICE_KIND_UVS;
+        case FBVBS_CALL_OCS_VCD_ATTACH:
+        case FBVBS_CALL_OCS_VCD_STATUS:
+            return SERVICE_KIND_OCS;
         default:
             return SERVICE_KIND_NONE;
+    }
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_storage_call_allows_tenant_owner(uint16_t call_id) {
+    switch (call_id) {
+        case FBVBS_CALL_STORAGE_ATTACH_VDISK:
+        case FBVBS_CALL_STORAGE_DETACH_VDISK:
+        case FBVBS_CALL_STORAGE_GET_VDISK_STATUS:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 || \result == 1;
+*/
+static int fbvbs_diag_call_allowed_for_service(
+    uint16_t call_id,
+    const struct fbvbs_partition *owner
+) {
+    if (owner == NULL || owner->kind != PARTITION_KIND_TRUSTED_SERVICE) {
+        return 0;
+    }
+
+    switch (owner->service_kind) {
+        case SERVICE_KIND_KCI:
+            if ((owner->capability_mask & (FBVBS_CAP_KCI_ACCESS | FBVBS_CAP_AUDIT_DIAG)) !=
+                (FBVBS_CAP_KCI_ACCESS | FBVBS_CAP_AUDIT_DIAG)) {
+                return 0;
+            }
+            switch (call_id) {
+                case FBVBS_CALL_DIAG_GET_PARTITION_LIST:
+                case FBVBS_CALL_DIAG_GET_CAPABILITIES:
+                case FBVBS_CALL_DIAG_GET_ARTIFACT_LIST:
+                case FBVBS_CALL_DIAG_GET_DEVICE_LIST:
+                case FBVBS_CALL_DIAG_GET_REASON_GUIDANCE:
+                case FBVBS_CALL_DIAG_GET_INVENTORY:
+                case FBVBS_CALL_DIAG_GET_FAULT_RECORD:
+                case FBVBS_CALL_DIAG_GET_SCHEMA_REGISTRY:
+                case FBVBS_CALL_DIAG_NEGOTIATE_COMMAND_VERSION:
+                case FBVBS_CALL_DIAG_NEGOTIATE_GUEST_FEATURES:
+                case FBVBS_CALL_DIAG_GET_SCALING_LIMITS:
+                    return 1;
+                default:
+                    return 0;
+            }
+        case SERVICE_KIND_OCS:
+            if ((owner->capability_mask & (FBVBS_CAP_OCS_ACCESS | FBVBS_CAP_AUDIT_DIAG)) !=
+                (FBVBS_CAP_OCS_ACCESS | FBVBS_CAP_AUDIT_DIAG)) {
+                return 0;
+            }
+            switch (call_id) {
+                case FBVBS_CALL_DIAG_GET_PARTITION_LIST:
+                case FBVBS_CALL_DIAG_GET_REASON_GUIDANCE:
+                case FBVBS_CALL_DIAG_GET_INVENTORY:
+                case FBVBS_CALL_DIAG_GET_FAULT_RECORD:
+                    return 1;
+                default:
+                    return 0;
+            }
+        default:
+            return 0;
     }
 }
 
@@ -265,7 +724,10 @@ static uint16_t fbvbs_service_kind_for_call(uint16_t call_id) {
             \result == FBVBS_CAP_SKS_ACCESS ||
             \result == FBVBS_CAP_UVS_ACCESS ||
             \result == FBVBS_CAP_VM_MANAGE ||
-            \result == FBVBS_CAP_AUDIT_DIAG;
+            \result == FBVBS_CAP_AUDIT_DIAG ||
+            \result == FBVBS_CAP_STORAGE_MANAGE ||
+            \result == FBVBS_CAP_SCALE_MANAGE ||
+            \result == FBVBS_CAP_OCS_ACCESS;
 */
 static uint64_t fbvbs_required_capability_for_call(uint16_t call_id) {
     switch (call_id) {
@@ -337,7 +799,30 @@ static uint64_t fbvbs_required_capability_for_call(uint16_t call_id) {
         case FBVBS_CALL_DIAG_GET_CAPABILITIES:
         case FBVBS_CALL_DIAG_GET_ARTIFACT_LIST:
         case FBVBS_CALL_DIAG_GET_DEVICE_LIST:
+        case FBVBS_CALL_DIAG_GET_REASON_GUIDANCE:
+        case FBVBS_CALL_DIAG_GET_INVENTORY:
+        case FBVBS_CALL_DIAG_GET_FAULT_RECORD:
+        case FBVBS_CALL_DIAG_GET_SCHEMA_REGISTRY:
+        case FBVBS_CALL_DIAG_NEGOTIATE_COMMAND_VERSION:
+        case FBVBS_CALL_DIAG_NEGOTIATE_GUEST_FEATURES:
+        case FBVBS_CALL_DIAG_GET_SCALING_LIMITS:
             return FBVBS_CAP_AUDIT_DIAG;
+        case FBVBS_CALL_DIAG_SET_SCALING_LIMITS:
+            return FBVBS_CAP_SCALE_MANAGE;
+        case FBVBS_CALL_OCS_VCD_ATTACH:
+        case FBVBS_CALL_OCS_VCD_STATUS:
+            return FBVBS_CAP_OCS_ACCESS;
+        case FBVBS_CALL_STORAGE_CREATE_POOL:
+        case FBVBS_CALL_STORAGE_DESTROY_POOL:
+        case FBVBS_CALL_STORAGE_CREATE_VDISK:
+        case FBVBS_CALL_STORAGE_DESTROY_VDISK:
+        case FBVBS_CALL_STORAGE_ATTACH_VDISK:
+        case FBVBS_CALL_STORAGE_DETACH_VDISK:
+        case FBVBS_CALL_STORAGE_GET_POOL_STATUS:
+        case FBVBS_CALL_STORAGE_GET_VDISK_STATUS:
+        case FBVBS_CALL_STORAGE_SET_VDISK_QOS:
+        case FBVBS_CALL_STORAGE_REPORT_CORRUPTION:
+            return FBVBS_CAP_STORAGE_MANAGE;
         default:
             return 0ULL;
     }
@@ -380,6 +865,14 @@ static int fbvbs_is_host_partition_call(uint16_t call_id) {
         case FBVBS_CALL_DIAG_GET_CAPABILITIES:
         case FBVBS_CALL_DIAG_GET_ARTIFACT_LIST:
         case FBVBS_CALL_DIAG_GET_DEVICE_LIST:
+        case FBVBS_CALL_DIAG_GET_REASON_GUIDANCE:
+        case FBVBS_CALL_DIAG_GET_INVENTORY:
+        case FBVBS_CALL_DIAG_GET_FAULT_RECORD:
+        case FBVBS_CALL_DIAG_GET_SCHEMA_REGISTRY:
+        case FBVBS_CALL_DIAG_NEGOTIATE_COMMAND_VERSION:
+        case FBVBS_CALL_DIAG_NEGOTIATE_GUEST_FEATURES:
+        case FBVBS_CALL_DIAG_GET_SCALING_LIMITS:
+        case FBVBS_CALL_DIAG_SET_SCALING_LIMITS:
             return 1;
         default:
             return 0;
@@ -412,6 +905,199 @@ static int fbvbs_is_vm_partition_call(uint16_t call_id) {
 */
 static int fbvbs_is_service_call(uint16_t call_id) {
     return fbvbs_service_kind_for_call(call_id) != SERVICE_KIND_NONE;
+}
+
+/*@ assigns \nothing;
+    ensures \result == 0 ||
+            (\result & ~(FBVBS_COMMAND_CLASS_HOST_PARTITION |
+                         FBVBS_COMMAND_CLASS_VM_PARTITION |
+                         FBVBS_COMMAND_CLASS_SERVICE)) == 0;
+*/
+static uint32_t fbvbs_command_class_flags_for_call(uint16_t call_id) {
+    uint32_t flags = 0U;
+
+    if (fbvbs_is_host_partition_call(call_id) != 0) {
+        flags |= FBVBS_COMMAND_CLASS_HOST_PARTITION;
+    }
+    if (fbvbs_is_vm_partition_call(call_id) != 0) {
+        flags |= FBVBS_COMMAND_CLASS_VM_PARTITION;
+    }
+    if (fbvbs_is_service_call(call_id) != 0) {
+        flags |= FBVBS_COMMAND_CLASS_SERVICE;
+    }
+    return flags;
+}
+
+/*@ requires \valid(response);
+    assigns *response;
+    ensures \result == OK;
+*/
+static int fbvbs_diag_negotiate_command_version(
+    uint16_t target_call_id,
+    uint32_t requested_abi_version,
+    struct fbvbs_diag_command_version_response *response
+) {
+    struct fbvbs_diag_schema_registry_response schema_registry = {0};
+    uint64_t required_capability_mask;
+
+    *response = (struct fbvbs_diag_command_version_response){0};
+    response->target_call_id = target_call_id;
+    required_capability_mask = fbvbs_required_capability_for_call(target_call_id);
+    if (required_capability_mask == 0ULL) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_UNSUPPORTED_CALL;
+        return OK;
+    }
+
+    response->minimum_abi_version = FBVBS_ABI_VERSION;
+    response->maximum_abi_version = FBVBS_ABI_VERSION;
+    response->command_class_flags = fbvbs_command_class_flags_for_call(target_call_id);
+    response->service_kind = fbvbs_service_kind_for_call(target_call_id);
+    response->required_capability_mask = required_capability_mask;
+    response->supported_feature_flags =
+        FBVBS_COMMAND_FEATURE_CALLER_SEQUENCE_REQUIRED |
+        FBVBS_COMMAND_FEATURE_CALLER_NONCE_REQUIRED |
+        FBVBS_COMMAND_FEATURE_SEPARATE_OUTPUT_SUPPORTED |
+        FBVBS_COMMAND_FEATURE_RESERVED_ZERO_REQUIRED |
+        FBVBS_COMMAND_FEATURE_REPLAY_PROTECTION;
+    response->required_feature_flags =
+        FBVBS_COMMAND_FEATURE_CALLER_SEQUENCE_REQUIRED |
+        FBVBS_COMMAND_FEATURE_CALLER_NONCE_REQUIRED |
+        FBVBS_COMMAND_FEATURE_RESERVED_ZERO_REQUIRED |
+        FBVBS_COMMAND_FEATURE_REPLAY_PROTECTION;
+    if (fbvbs_is_host_partition_call(target_call_id) != 0) {
+        response->supported_feature_flags |= FBVBS_COMMAND_FEATURE_HOST_CALLSITE_VALIDATION;
+        response->required_feature_flags |= FBVBS_COMMAND_FEATURE_HOST_CALLSITE_VALIDATION;
+    }
+    if (fbvbs_diag_get_schema_registry(&schema_registry) == OK) {
+        response->compatibility_flags = schema_registry.compatibility_flags;
+    }
+
+    response->negotiated_abi_version = FBVBS_ABI_VERSION;
+    if (requested_abi_version == 0U) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_COMPATIBLE_FALLBACK;
+    } else if (requested_abi_version == FBVBS_ABI_VERSION) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_EXACT;
+    } else {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_UNSUPPORTED_VERSION;
+        response->negotiated_abi_version = 0U;
+    }
+
+    return OK;
+}
+
+/*@ requires \valid_read(state);
+    assigns \nothing;
+*/
+static uint64_t fbvbs_guest_feature_bitmap_for_partition_kind(
+    const struct fbvbs_hypervisor_state *state,
+    uint16_t partition_kind
+) {
+    uint64_t flags;
+
+    if (partition_kind != PARTITION_KIND_GUEST_VM) {
+        return 0ULL;
+    }
+
+    flags = FBVBS_GUEST_FEATURE_VCPU_REGISTER_ACCESS |
+            FBVBS_GUEST_FEATURE_MEMORY_MAP |
+            FBVBS_GUEST_FEATURE_INTERRUPT_INJECTION |
+            FBVBS_GUEST_FEATURE_VDISK_ATTACH;
+    if ((state->capability_bitmap1 & CAP_BITMAP1_MEASURED_BOOT) != 0ULL) {
+        flags |= FBVBS_GUEST_FEATURE_MEASURED_BOOT;
+    }
+    if ((state->capability_bitmap1 & CAP_BITMAP1_IOMMU) != 0ULL) {
+        flags |= FBVBS_GUEST_FEATURE_DEVICE_ASSIGNMENT;
+    }
+    return flags;
+}
+
+/*@ requires \valid_read(state);
+    assigns \nothing;
+*/
+static uint64_t fbvbs_required_guest_feature_bitmap_for_partition_kind(
+    const struct fbvbs_hypervisor_state *state,
+    uint16_t partition_kind
+) {
+    uint64_t required = 0ULL;
+
+    if (partition_kind != PARTITION_KIND_GUEST_VM) {
+        return 0ULL;
+    }
+    required =
+        FBVBS_GUEST_FEATURE_VCPU_REGISTER_ACCESS |
+        FBVBS_GUEST_FEATURE_MEMORY_MAP;
+    if ((state->capability_bitmap1 & CAP_BITMAP1_MEASURED_BOOT) != 0ULL) {
+        required |= FBVBS_GUEST_FEATURE_MEASURED_BOOT;
+    }
+    return required;
+}
+
+/*@ requires \valid_read(state);
+    requires \valid(response);
+    assigns *response;
+    ensures \result == OK;
+*/
+static int fbvbs_diag_negotiate_guest_features(
+    const struct fbvbs_hypervisor_state *state,
+    uint16_t partition_kind,
+    uint32_t requested_abi_version,
+    uint64_t requested_feature_bitmap,
+    struct fbvbs_diag_guest_feature_response *response
+) {
+    struct fbvbs_diag_schema_registry_response schema_registry = {0};
+    uint64_t supported_bitmap;
+    uint64_t required_bitmap;
+    uint64_t negotiated_bitmap;
+
+    *response = (struct fbvbs_diag_guest_feature_response){0};
+    response->partition_kind = partition_kind;
+    response->minimum_abi_version = FBVBS_ABI_VERSION;
+    response->maximum_abi_version = FBVBS_ABI_VERSION;
+
+    supported_bitmap = fbvbs_guest_feature_bitmap_for_partition_kind(state, partition_kind);
+    required_bitmap = fbvbs_required_guest_feature_bitmap_for_partition_kind(state, partition_kind);
+    response->supported_feature_bitmap = supported_bitmap;
+    response->required_feature_bitmap = required_bitmap;
+    if (fbvbs_diag_get_schema_registry(&schema_registry) == OK) {
+        response->compatibility_flags = schema_registry.compatibility_flags;
+    }
+
+    if (partition_kind != PARTITION_KIND_GUEST_VM) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_UNSUPPORTED_PROFILE;
+        return OK;
+    }
+
+    if (requested_abi_version == 0U) {
+        response->negotiated_abi_version = FBVBS_ABI_VERSION;
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_COMPATIBLE_FALLBACK;
+        response->negotiated_feature_bitmap = supported_bitmap;
+        return OK;
+    }
+    if (requested_abi_version != FBVBS_ABI_VERSION) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_UNSUPPORTED_VERSION;
+        return OK;
+    }
+
+    if (requested_feature_bitmap == 0ULL) {
+        response->negotiated_abi_version = FBVBS_ABI_VERSION;
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_COMPATIBLE_FALLBACK;
+        response->negotiated_feature_bitmap = supported_bitmap;
+        return OK;
+    }
+
+    negotiated_bitmap = requested_feature_bitmap & supported_bitmap;
+    negotiated_bitmap |= required_bitmap;
+    response->denied_feature_bitmap = requested_feature_bitmap & ~supported_bitmap;
+    response->negotiated_feature_bitmap = negotiated_bitmap;
+    response->negotiated_abi_version = FBVBS_ABI_VERSION;
+    if (response->denied_feature_bitmap != 0ULL ||
+        (requested_feature_bitmap & required_bitmap) != required_bitmap) {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_COMPATIBLE_FALLBACK;
+    } else {
+        response->negotiation_status = FBVBS_NEGOTIATION_STATUS_EXACT;
+    }
+
+    return OK;
 }
 
 /*@ requires count == 0U || \valid_read(table + (0 .. count - 1));
@@ -534,7 +1220,10 @@ static int fbvbs_validate_caller_for_call(
     /* Enforce capability_mask: the calling partition must have the required
        capability bit set. This is checked for all partition kinds. */
     if ((owner->capability_mask & required_cap) == 0ULL) {
-        return PERMISSION_DENIED;
+        if (!(owner->kind == PARTITION_KIND_GUEST_VM &&
+              fbvbs_storage_call_allows_tenant_owner(call_id) != 0)) {
+            return PERMISSION_DENIED;
+        }
     }
 
     if (call_id == FBVBS_CALL_MEMORY_SET_PERMISSION) {
@@ -546,6 +1235,10 @@ static int fbvbs_validate_caller_for_call(
 
     service_kind = fbvbs_service_kind_for_call(call_id);
     if (service_kind != SERVICE_KIND_NONE) {
+        if (service_kind == SERVICE_KIND_OCS &&
+            owner->kind == PARTITION_KIND_FREEBSD_HOST) {
+            return INVALID_CALLER;
+        }
         if (owner->kind == PARTITION_KIND_FREEBSD_HOST) {
             return fbvbs_validate_host_callsite(state, call_id, observed_rip);
         }
@@ -560,6 +1253,9 @@ static int fbvbs_validate_caller_for_call(
 
     if (fbvbs_is_host_partition_call(call_id) &&
         owner->kind != PARTITION_KIND_FREEBSD_HOST) {
+        if (fbvbs_diag_call_allowed_for_service(call_id, owner) != 0) {
+            return OK;
+        }
         return INVALID_CALLER;
     }
     if (owner->kind == PARTITION_KIND_FREEBSD_HOST) {
@@ -772,12 +1468,6 @@ static void fbvbs_write_output_bytes(
     }
 }
 
-#ifdef __FRAMAC__
-/*@ requires \valid_read(page);
-    requires request_size <= sizeof(page->body);
-    assigns \nothing;
-*/
-#else
 /*@ requires \valid_read(page);
     requires request_size == 0U ||
              \valid(((uint8_t *)destination) + (0 .. request_size - 1));
@@ -787,36 +1477,20 @@ static void fbvbs_write_output_bytes(
                         page->body + (0 .. request_size - 1));
     assigns ((uint8_t *)destination)[0 .. request_size - 1];
 */
-#endif
 static void fbvbs_read_request_bytes(
     const struct fbvbs_command_page_v1 *page,
     void *destination,
     uint32_t request_size
 ) {
-#ifdef __FRAMAC__
-    (void)page;
-    (void)destination;
-    (void)request_size;
-#else
     fbvbs_copy_memory(destination, page->body, request_size);
-#endif
 }
 
-#ifdef __FRAMAC__
-/*@ requires \valid_read(state);
-    requires \valid(page);
-    requires \valid_read(owner) || owner == \null;
-    assigns page->actual_output_length;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_CALLER || \result == BUFFER_TOO_SMALL;
-*/
-#else
 /*@ requires \valid_read(state);
     requires \valid(page);
     requires \valid_read(owner) || owner == \null;
     assigns page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
     ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_CALLER || \result == BUFFER_TOO_SMALL;
 */
-#endif
 static int fbvbs_write_response(
     const struct fbvbs_hypervisor_state *state,
     const struct fbvbs_partition *owner,
@@ -838,16 +1512,6 @@ static int fbvbs_write_response(
         return status;
     }
 
-#ifdef __FRAMAC__
-    /* WP model: the byte copy involves two Typed-model-incompatible casts:
-       1. response comes from (const uint8_t *)&struct_var (cross-type)
-       2. GPA path uses (uint8_t *)(uintptr_t)output_page_gpa (GPA cast)
-       The assigns clause covers page->body and actual_output_length.
-       Copy correctness is verified independently in write_output_bytes. */
-    (void)response;
-    (void)cached_output_gpa;
-    (void)cached_flags;
-#else
     const uint8_t *response_bytes = (const uint8_t *)response;
 
     if (response_length > 0U) {
@@ -859,30 +1523,10 @@ static int fbvbs_write_response(
             fbvbs_write_output_bytes(page->body, response_bytes, response_length);
         }
     }
-#endif
 
     page->actual_output_length = response_length;
     return OK;
 }
-
-#ifdef __FRAMAC__
-/*@ requires \valid_read(state);
-    requires \valid(page);
-    requires \valid_read(owner) || owner == \null;
-    assigns page->actual_output_length;
-    ensures \result == OK || \result == INVALID_PARAMETER || \result == INVALID_CALLER || \result == BUFFER_TOO_SMALL;
-*/
-static int fbvbs_write_response_model(
-    const struct fbvbs_hypervisor_state *state,
-    const struct fbvbs_partition *owner,
-    struct fbvbs_command_page_v1 *page,
-    uint32_t response_length
-) {
-    return fbvbs_write_response(state, owner, page, NULL, response_length);
-}
-#define fbvbs_write_response(state, owner, page, response, response_length) \
-    fbvbs_write_response_model((state), (owner), (page), (response_length))
-#endif
 
 /* ---- Per-command handler functions ----
  *
@@ -896,15 +1540,9 @@ static int fbvbs_write_response_model(
     "requires \\valid_read(owner) || owner == \\null;\n" \
     "assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];\n"
 
-#ifdef __FRAMAC__
-#define FBVBS_READ_REQUEST(type, name) \
-    type name = (type){0}; \
-    (void)page
-#else
 #define FBVBS_READ_REQUEST(type, name) \
     type name = (type){0}; \
     fbvbs_read_request_bytes(page, &name, (uint32_t)sizeof(name))
-#endif
 
 /*@ requires \valid(state);
     requires \valid(page);
@@ -1046,6 +1684,10 @@ static int handle_partition_recover(struct fbvbs_hypervisor_state *state, const 
     (void)owner;
     if (cached_input_length != sizeof(struct fbvbs_partition_recover_request)) {
         return INVALID_PARAMETER;
+    }
+    if (request.session_correlation_id != page->caller_sequence ||
+        request.confirmation_nonce != page->caller_nonce) {
+        return POLICY_DENIED;
     }
     return fbvbs_partition_recover(state, &request);
 }
@@ -1926,6 +2568,463 @@ static int handle_diag_get_device_list(struct fbvbs_hypervisor_state *state, con
     return status;
 }
 
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_get_scaling_limits(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_diag_scaling_limits_response response = {0};
+    int status;
+
+    if (cached_input_length != 0U) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_get_scaling_limits(state, &response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_get_reason_guidance(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_diag_reason_guidance_request, request);
+    struct fbvbs_diag_reason_guidance_response response = {0};
+    int status;
+
+    if (cached_input_length != sizeof(struct fbvbs_diag_reason_guidance_request)) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_get_reason_guidance(state, &request, &response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_get_inventory(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_diag_inventory_response response = {0};
+    int status;
+
+    if (cached_input_length != 0U) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_get_inventory(state, &response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_get_fault_record(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_partition_id_request, request);
+    struct fbvbs_diag_fault_record_response response = {0};
+    int status;
+
+    if (cached_input_length != sizeof(struct fbvbs_partition_id_request)) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_get_fault_record(state, request.partition_id, &response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_get_schema_registry(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_diag_schema_registry_response response = {0};
+    int status;
+
+    (void)state;
+    if (cached_input_length != 0U) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_get_schema_registry(&response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_negotiate_command_version(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_diag_command_version_request, request);
+    struct fbvbs_diag_command_version_response response = {0};
+    int status;
+
+    (void)state;
+    if (cached_input_length != sizeof(struct fbvbs_diag_command_version_request)) {
+        return INVALID_PARAMETER;
+    }
+    if (request.reserved0 != 0U || request.reserved1 != 0U) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_negotiate_command_version(
+        request.target_call_id,
+        request.requested_abi_version,
+        &response
+    );
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_negotiate_guest_features(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_diag_guest_feature_request, request);
+    struct fbvbs_diag_guest_feature_response response = {0};
+    int status;
+
+    (void)owner;
+    if (cached_input_length != sizeof(struct fbvbs_diag_guest_feature_request)) {
+        return INVALID_PARAMETER;
+    }
+    if (request.reserved0 != 0U) {
+        return INVALID_PARAMETER;
+    }
+    status = fbvbs_diag_negotiate_guest_features(
+        state,
+        request.partition_kind,
+        request.requested_abi_version,
+        request.requested_feature_bitmap,
+        &response
+    );
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_diag_set_scaling_limits(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_diag_set_scaling_limits_request, request);
+    struct fbvbs_diag_scaling_limits_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_diag_set_scaling_limits_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_diag_set_scaling_limits(state, &request, &response);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_ocs_vcd_attach(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_ocs_vcd_attach_request, request);
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_ocs_vcd_attach_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_ocs_vcd_attach(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_ocs_vcd_status(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_ocs_vcd_status_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != 0U) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_ocs_vcd_status(state, &response, owner->partition_id);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_storage_create_pool(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_pool_create_request, request);
+    struct fbvbs_storage_pool_create_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_pool_create_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_storage_create_pool(state, &request, &response, owner->partition_id);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_destroy_pool(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_storage_pool_destroy_request request = {0};
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length == sizeof(struct fbvbs_storage_pool_destroy_request)) {
+        fbvbs_read_request_bytes(page, &request, (uint32_t)sizeof(request));
+        if (request.reserved0 != 0U || request.reserved1 != 0U) {
+            return INVALID_PARAMETER;
+        }
+        if (request.session_correlation_id != page->caller_sequence ||
+            request.confirmation_nonce != page->caller_nonce) {
+            return POLICY_DENIED;
+        }
+    } else if (cached_input_length == sizeof(struct fbvbs_storage_pool_request)) {
+        struct fbvbs_storage_pool_request legacy_request = {0};
+
+        fbvbs_read_request_bytes(page, &legacy_request, (uint32_t)sizeof(legacy_request));
+        request.pool_id = legacy_request.pool_id;
+        request.session_correlation_id = page->caller_sequence;
+        request.confirmation_nonce = page->caller_nonce;
+    } else {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_destroy_pool(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_storage_create_vdisk(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_create_request, request);
+    struct fbvbs_storage_vdisk_create_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_create_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_storage_create_vdisk(state, &request, &response, owner->partition_id);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_destroy_vdisk(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    struct fbvbs_storage_vdisk_destroy_request request = {0};
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length == sizeof(struct fbvbs_storage_vdisk_destroy_request)) {
+        fbvbs_read_request_bytes(page, &request, (uint32_t)sizeof(request));
+        if (request.reserved0 != 0U || request.reserved1 != 0U) {
+            return INVALID_PARAMETER;
+        }
+        if (request.session_correlation_id != page->caller_sequence ||
+            request.confirmation_nonce != page->caller_nonce) {
+            return POLICY_DENIED;
+        }
+    } else if (cached_input_length == sizeof(struct fbvbs_storage_vdisk_request)) {
+        struct fbvbs_storage_vdisk_request legacy_request = {0};
+
+        fbvbs_read_request_bytes(page, &legacy_request, (uint32_t)sizeof(legacy_request));
+        request.vdisk_id = legacy_request.vdisk_id;
+        request.session_correlation_id = page->caller_sequence;
+        request.confirmation_nonce = page->caller_nonce;
+    } else {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_destroy_vdisk(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_attach_vdisk(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_attach_request, request);
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_attach_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_attach_vdisk(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_detach_vdisk(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_request, request);
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_detach_vdisk(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_storage_get_pool_status(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_pool_request, request);
+    struct fbvbs_storage_pool_status_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_pool_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_storage_get_pool_status(state, &request, &response, owner->partition_id);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state, page->actual_output_length, page->body[0 .. sizeof(page->body) - 1];
+*/
+static int handle_storage_get_vdisk_status(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_request, request);
+    struct fbvbs_storage_vdisk_status_response response = {0};
+    int status;
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    status = fbvbs_storage_get_vdisk_status(state, &request, &response, owner->partition_id);
+    if (status == OK) {
+        status = fbvbs_write_response(state, owner, page, &response, sizeof(response));
+    }
+    return status;
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_set_vdisk_qos(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_qos_request, request);
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_qos_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_set_vdisk_qos(state, &request, owner->partition_id);
+}
+
+/*@ requires \valid(state);
+    requires \valid(page);
+    requires \valid_read(owner) || owner == \null;
+    assigns *state;
+*/
+static int handle_storage_report_corruption(struct fbvbs_hypervisor_state *state, const struct fbvbs_partition *owner, struct fbvbs_command_page_v1 *page, uint32_t cached_input_length) {
+    FBVBS_READ_REQUEST(struct fbvbs_storage_vdisk_corruption_request, request);
+
+    if (owner == NULL) {
+        return PERMISSION_DENIED;
+    }
+    if (cached_input_length != sizeof(struct fbvbs_storage_vdisk_corruption_request)) {
+        return INVALID_PARAMETER;
+    }
+
+    return fbvbs_storage_report_vdisk_corruption(state, &request, owner->partition_id);
+}
+
 /* ---- Command dispatch (page is a parameter => assigns can reference it) ---- */
 
 /*@ requires \valid(state);
@@ -1935,7 +3034,7 @@ static int handle_diag_get_device_list(struct fbvbs_hypervisor_state *state, con
             page->body[0 .. sizeof(page->body) - 1];
     ensures \result == OK || \result == INVALID_PARAMETER ||
             \result == INVALID_CALLER || \result == BUFFER_TOO_SMALL ||
-            \result == RESOURCE_BUSY || \result == PERMISSION_DENIED ||
+            \result == RESOURCE_BUSY || \result == RETRY_LATER || \result == PERMISSION_DENIED ||
             \result == NOT_SUPPORTED_ON_PLATFORM || \result == RESOURCE_EXHAUSTED ||
             \result == REPLAY_DETECTED;
 */
@@ -1949,22 +3048,15 @@ static int fbvbs_dispatch_command(
     int status;
     uint64_t required_cap;
 
-#ifdef __FRAMAC__
-    (void)state;
-    (void)owner;
-    (void)page;
-    (void)cached_call_id;
-    (void)cached_input_length;
-    return NOT_SUPPORTED_ON_PLATFORM;
-#endif
-
     /* Defense-in-depth capability check using the same switch-based
      * function as validate_caller_for_call.  Uses cached_call_id to
      * prevent TOCTOU — a concurrent vCPU could modify page->call_id
      * between the authorization check and the dispatch switch below. */
     required_cap = fbvbs_required_capability_for_call(cached_call_id);
     if (required_cap != 0ULL && owner != NULL &&
-        (owner->capability_mask & required_cap) == 0ULL) {
+                (owner->capability_mask & required_cap) == 0ULL &&
+                !(owner->kind == PARTITION_KIND_GUEST_VM &&
+                    fbvbs_storage_call_allows_tenant_owner(cached_call_id) != 0)) {
         return PERMISSION_DENIED;
     }
 
@@ -1973,7 +3065,7 @@ static int fbvbs_dispatch_command(
        both pass validation, but only one will win the CAS here. */
 #ifdef __FRAMAC__
     if (page->command_state != READY) {
-        return RESOURCE_BUSY;
+        return RETRY_LATER;
     }
     page->command_state = EXECUTING;
 #else
@@ -1982,7 +3074,7 @@ static int fbvbs_dispatch_command(
         if (!__atomic_compare_exchange_n(
             &page->command_state, &expected, EXECUTING,
             0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            return RESOURCE_BUSY;
+            return RETRY_LATER;
         }
     }
 #endif
@@ -2163,6 +3255,66 @@ static int fbvbs_dispatch_command(
         case FBVBS_CALL_DIAG_GET_DEVICE_LIST:
             status = handle_diag_get_device_list(state, owner, page, cached_input_length);
             break;
+        case FBVBS_CALL_DIAG_GET_SCALING_LIMITS:
+            status = handle_diag_get_scaling_limits(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_GET_REASON_GUIDANCE:
+            status = handle_diag_get_reason_guidance(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_GET_INVENTORY:
+            status = handle_diag_get_inventory(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_GET_FAULT_RECORD:
+            status = handle_diag_get_fault_record(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_NEGOTIATE_COMMAND_VERSION:
+            status = handle_diag_negotiate_command_version(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_NEGOTIATE_GUEST_FEATURES:
+            status = handle_diag_negotiate_guest_features(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_GET_SCHEMA_REGISTRY:
+            status = handle_diag_get_schema_registry(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_DIAG_SET_SCALING_LIMITS:
+            status = handle_diag_set_scaling_limits(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_OCS_VCD_ATTACH:
+            status = handle_ocs_vcd_attach(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_OCS_VCD_STATUS:
+            status = handle_ocs_vcd_status(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_CREATE_POOL:
+            status = handle_storage_create_pool(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_DESTROY_POOL:
+            status = handle_storage_destroy_pool(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_CREATE_VDISK:
+            status = handle_storage_create_vdisk(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_DESTROY_VDISK:
+            status = handle_storage_destroy_vdisk(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_ATTACH_VDISK:
+            status = handle_storage_attach_vdisk(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_DETACH_VDISK:
+            status = handle_storage_detach_vdisk(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_GET_POOL_STATUS:
+            status = handle_storage_get_pool_status(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_GET_VDISK_STATUS:
+            status = handle_storage_get_vdisk_status(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_SET_VDISK_QOS:
+            status = handle_storage_set_vdisk_qos(state, owner, page, cached_input_length);
+            break;
+        case FBVBS_CALL_STORAGE_REPORT_CORRUPTION:
+            status = handle_storage_report_corruption(state, owner, page, cached_input_length);
+            break;
         default:
             status = NOT_SUPPORTED_ON_PLATFORM;
             break;
@@ -2178,7 +3330,7 @@ static int fbvbs_dispatch_command(
     assigns *state, *registers,
             state->command_trackers[0 .. FBVBS_MAX_COMMAND_TRACKERS - 1];
     ensures \result == OK || \result == INVALID_PARAMETER ||
-            \result == PERMISSION_DENIED || \result == RESOURCE_BUSY ||
+            \result == PERMISSION_DENIED || \result == RESOURCE_BUSY || \result == RETRY_LATER ||
             \result == REPLAY_DETECTED || \result == RESOURCE_EXHAUSTED ||
             \result == NOT_SUPPORTED_ON_PLATFORM || \result == INVALID_CALLER ||
             \result == BUFFER_TOO_SMALL || \result == ABI_VERSION_UNSUPPORTED;
@@ -2199,15 +3351,6 @@ int fbvbs_dispatch_hypercall(
         return INVALID_PARAMETER;
     }
 
-#ifdef __FRAMAC__
-    (void)owner;
-    (void)owner_vcpu_id;
-    (void)observed_rip;
-    (void)page_gpa;
-    (void)page;
-    return NOT_SUPPORTED_ON_PLATFORM;
-#endif
-
     status = fbvbs_validate_trap_registers(registers);
     if (status != OK) {
         return status;
@@ -2226,6 +3369,16 @@ int fbvbs_dispatch_hypercall(
     owner = fbvbs_find_command_page_owner(state, page_gpa, &owner_vcpu_id);
     if (owner == NULL || owner_vcpu_id >= owner->vcpu_count ||
         owner_vcpu_id >= FBVBS_MAX_VCPUS) {
+        fbvbs_audit_policy_deny(
+            state,
+            NULL,
+            page_gpa,
+            0U,
+            PERMISSION_DENIED,
+            FBVBS_DENY_REASON_PERMISSION,
+            0U,
+            0U
+        );
         return PERMISSION_DENIED;
     }
     /* Resolve the page through the authenticated partition slot rather than
@@ -2241,10 +3394,59 @@ int fbvbs_dispatch_hypercall(
         uint32_t cached_input_length = page->input_length;
         uint64_t cached_caller_sequence = page->caller_sequence;
         uint64_t cached_caller_nonce = page->caller_nonce;
+        bool policy_deny_noted = false;
 
         status = fbvbs_validate_command_page(page, cached_input_length);
         if (status != OK) {
-            finish_trap = true;
+            if (status != RETRY_LATER) {
+                fbvbs_note_policy_deny(
+                    state,
+                    owner,
+                    page_gpa,
+                    cached_call_id,
+                    status,
+                    FBVBS_DENY_REASON_UNSPECIFIED
+                );
+                policy_deny_noted = true;
+            }
+            if (status == RETRY_LATER) {
+                registers->rax = (uint64_t)(uint32_t)status;
+                registers->rbx = page->command_state;
+                registers->rcx = page->actual_output_length;
+                registers->rdx = 0U;
+                finish_trap = false;
+            } else {
+                finish_trap = true;
+            }
+            goto finish;
+        }
+
+        fbvbs_hypercall_guard_lock(&state->hypercall_guard_lock);
+        status = fbvbs_enforce_hypercall_abuse_guard(state, owner);
+        fbvbs_hypercall_guard_unlock(&state->hypercall_guard_lock);
+        if (status != OK) {
+            if (status == RETRY_LATER) {
+                fbvbs_note_rate_limit_retry(state, owner, page_gpa, cached_call_id);
+            } else {
+                fbvbs_note_policy_deny(
+                    state,
+                    owner,
+                    page_gpa,
+                    cached_call_id,
+                    status,
+                    FBVBS_DENY_REASON_UNSPECIFIED
+                );
+            }
+            policy_deny_noted = true;
+            if (status == RETRY_LATER) {
+                registers->rax = (uint64_t)(uint32_t)status;
+                registers->rbx = page->command_state;
+                registers->rcx = page->actual_output_length;
+                registers->rdx = 0U;
+                finish_trap = false;
+            } else {
+                finish_trap = true;
+            }
             goto finish;
         }
 
@@ -2253,20 +3455,71 @@ int fbvbs_dispatch_hypercall(
         }
         status = fbvbs_validate_caller_for_call(state, owner, cached_call_id, observed_rip);
         if (status != OK) {
-            finish_trap = true;
-            goto finish;
-        }
-        status = fbvbs_validate_command_sequence(state, page_gpa,
-                                                cached_caller_sequence,
-                                                cached_caller_nonce);
-        if (status != OK) {
+            fbvbs_note_policy_deny(
+                state, owner, page_gpa, cached_call_id, status, FBVBS_DENY_REASON_UNSPECIFIED
+            );
+            policy_deny_noted = true;
             finish_trap = true;
             goto finish;
         }
 
+        fbvbs_command_tracker_lock(&state->command_tracker_lock);
+        status = fbvbs_validate_command_sequence(state, page_gpa,
+                                                cached_caller_sequence,
+                                                cached_caller_nonce);
+        if (status != OK) {
+            fbvbs_command_tracker_unlock(&state->command_tracker_lock);
+            fbvbs_note_policy_deny(
+                state, owner, page_gpa, cached_call_id, status, FBVBS_DENY_REASON_UNSPECIFIED
+            );
+            policy_deny_noted = true;
+            finish_trap = true;
+            goto finish;
+        }
+
+        fbvbs_command_tracker_unlock(&state->command_tracker_lock);
+
         status = fbvbs_dispatch_command(state, owner, page, cached_call_id,
                                         cached_input_length);
-        finish_trap = true;
+        if (status == RETRY_LATER) {
+            /* Keep the command page state untouched when another vCPU is
+               already executing this page. */
+            registers->rax = (uint64_t)(uint32_t)status;
+            registers->rbx = page->command_state;
+            registers->rcx = page->actual_output_length;
+            registers->rdx = 0U;
+            finish_trap = false;
+        } else {
+            fbvbs_command_tracker_lock(&state->command_tracker_lock);
+            {
+                int sequence_status = fbvbs_commit_command_sequence(
+                    state,
+                    page_gpa,
+                    cached_caller_sequence,
+                    cached_caller_nonce
+                );
+                fbvbs_command_tracker_unlock(&state->command_tracker_lock);
+                if (sequence_status != OK) {
+                    status = sequence_status;
+                    fbvbs_note_policy_deny(
+                        state,
+                        owner,
+                        page_gpa,
+                        cached_call_id,
+                        status,
+                        FBVBS_DENY_REASON_UNSPECIFIED
+                    );
+                    policy_deny_noted = true;
+                }
+            }
+            finish_trap = true;
+        }
+
+        if (!policy_deny_noted && status != OK && status != RETRY_LATER) {
+            fbvbs_note_policy_deny(
+                state, owner, page_gpa, cached_call_id, status, FBVBS_DENY_REASON_UNSPECIFIED
+            );
+        }
     }
 finish:
     if (finish_trap) {

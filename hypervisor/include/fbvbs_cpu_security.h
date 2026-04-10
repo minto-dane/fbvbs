@@ -5,7 +5,7 @@
  * All structures are multicore-aware: each logical processor
  * maintains an independent fbvbs_cpu_security_profile.
  *
- * References: plan/cpu-sec.md (81+ features), design Section 21.1-21.11
+ * References: plan/full-stack/cpu-sec.md (81+ features), design Section 21.1-21.11
  */
 #ifndef FBVBS_CPU_SECURITY_H
 #define FBVBS_CPU_SECURITY_H

@@ -6,6 +6,9 @@ QEMU ?= qemu-system-x86_64
 BUILD_DIR := build
 INCLUDES := -Iinclude
 DEPFLAGS := -MMD -MP
+TOOLS_DIR := $(CURDIR)/tools
+TOOLS_PYTHONPATH := $(TOOLS_DIR)/audit:$(TOOLS_DIR)/compatibility:$(TOOLS_DIR)/diagnostics:$(TOOLS_DIR)/incident:$(TOOLS_DIR)/operator:$(TOOLS_DIR)/partition:$(TOOLS_DIR)/security:$(TOOLS_DIR)/service:$(TOOLS_DIR)/storage:$(TOOLS_DIR)/verification:$(TOOLS_DIR)/release
+export PYTHONPATH := $(TOOLS_PYTHONPATH):$(PYTHONPATH)
 BOOT_ARTIFACT_IDS := 1000 1100 1200 1300 1400 1500 1600 3000 3700
 BOOT_ARTIFACT_FILES := $(addprefix $(BUILD_DIR)/boot-artifacts/fbvbs-artifact-,$(addsuffix .bin,$(BOOT_ARTIFACT_IDS)))
 
@@ -29,10 +32,11 @@ HARDENING_FLAGS := -fno-strict-overflow \
 # Sources that compile without generated bindings
 CORE_SOURCES := \
     src/cpu_security.c \
-    src/vmx.c \
+	src/platform/vmx.c \
     src/memory.c \
     src/memory_utils.c \
-    src/log.c
+	src/log.c \
+	src/core/scaling.c
 
 # All sources — constants now defined in fbvbs_abi.h
 ALL_SOURCES := $(CORE_SOURCES) \
@@ -40,21 +44,23 @@ ALL_SOURCES := $(CORE_SOURCES) \
     src/partition.c \
     src/security.c \
     src/kernel.c \
-    src/acpi.c \
+	src/platform/acpi.c \
     src/vm_policy.c \
-    src/boot_multiboot.c \
-    src/iommu_vtd.c \
-    src/iommu_amdvi.c \
-    src/early_init.c \
-    src/vmcs_setup.c \
-    src/hlat.c \
-    src/vmx_controls.c \
-    src/amd_npt.c \
+	src/platform/boot_multiboot.c \
+	src/platform/iommu_vtd.c \
+	src/platform/iommu_amdvi.c \
+	src/platform/early_init.c \
+	src/platform/vmcs_setup.c \
+	src/platform/hlat.c \
+	src/platform/vmx_controls.c \
+	src/platform/amd_npt.c \
     src/page_alloc.c \
     src/watchdog.c \
-    src/apic.c \
-    src/idt.c \
-    src/mp_init.c
+	src/platform/apic.c \
+	src/platform/idt.c \
+	src/platform/mp_init.c \
+	src/io/vcd_virtualization.c \
+	src/storage/storage_virtualization.c
 
 # UEFI sources (MS ABI, separate compilation flags)
 UEFI_SOURCES := src/uefi_entry.c
@@ -62,28 +68,31 @@ UEFI_SOURCES := src/uefi_entry.c
 # Frama-C WP sources.
 FRAMA_C_WP_SOURCES := \
 	src/cpu_security.c \
-	src/vmx.c \
+	src/platform/vmx.c \
 	src/memory.c \
 	src/memory_utils.c \
+	src/core/scaling.c \
 	src/freestanding_runtime.c \
 	src/log.c \
 	src/vm_policy.c \
-	src/boot_multiboot.c \
+	src/platform/boot_multiboot.c \
 	src/watchdog.c \
-	src/early_init.c \
-	src/acpi.c \
-	src/apic.c \
-	src/idt.c \
-	src/vmx_controls.c \
-	src/vmcs_setup.c \
-	src/hlat.c \
+	src/platform/early_init.c \
+	src/platform/acpi.c \
+	src/platform/apic.c \
+	src/platform/idt.c \
+	src/platform/vmx_controls.c \
+	src/platform/vmcs_setup.c \
+	src/platform/hlat.c \
 	src/kernel.c \
 	src/command.c \
 	src/security.c \
     src/partition.c \
     src/page_alloc.c \
-    src/amd_npt.c \
-    src/mp_init.c
+    src/platform/amd_npt.c \
+	src/platform/mp_init.c \
+	src/storage/storage_virtualization.c \
+	src/io/vcd_virtualization.c
 
 # ---------- compiler flags ----------
 
@@ -121,7 +130,9 @@ TEST_BINS := \
 	$(BUILD_DIR)/fbvbs_vmx_controls_tests \
 	$(BUILD_DIR)/fbvbs_early_init_tests \
 	$(BUILD_DIR)/fbvbs_iommu_tests \
-	$(BUILD_DIR)/fbvbs_vmx_handoff_tests
+	$(BUILD_DIR)/fbvbs_vmx_handoff_tests \
+	$(BUILD_DIR)/fbvbs_scaling_storage_tests \
+	$(BUILD_DIR)/fbvbs_vcd_virtualization_tests
 
 # ---------- Frama-C ----------
 
@@ -134,17 +145,17 @@ FRAMAC ?= $(shell \
 FRAMAC_WP_FLAGS := \
     -wp \
 	-wp-prover alt-ergo,z3 \
-	-wp-timeout 60 \
+	-wp-timeout 180 \
     -wp-model 'Typed+Cast' \
     -wp-rte \
     -kernel-warn-key annot-error=abort \
     -cpp-extra-args="-D__FRAMAC__ -Iinclude"
 PROOF_SHARD_TIMEOUT ?= 1200
-QEMU_MATRIX_SCRIPT := tools/qemu_smoke_matrix.py
+QEMU_MATRIX_SCRIPT := tools/verification/qemu_smoke_matrix.py
 
 # ---------- targets ----------
 
-.PHONY: all clean analyze test proof frama-c-wp proof-smoke proof-shards fuzz-build fuzz-smoke coverage coverage-clean cppcheck traceability ci baremetal-elf baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-kvm-smoke run-qemu-iommu-smoke run-qemu-matrix provenance sign-release release-readiness release-manifest release-evidence release-hypervisor
+.PHONY: all clean analyze test compatibility-check semantic-drift-check proof frama-c-wp proof-smoke proof-shards fuzz-build fuzz-smoke coverage coverage-clean cppcheck traceability ci baremetal-elf baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-kvm-smoke run-qemu-iommu-smoke run-qemu-matrix provenance sign-release release-readiness release-manifest release-evidence release-hypervisor
 
 all: analyze
 
@@ -160,6 +171,40 @@ test: $(TEST_BINS)
 	$(BUILD_DIR)/fbvbs_early_init_tests
 	$(BUILD_DIR)/fbvbs_iommu_tests
 	$(BUILD_DIR)/fbvbs_vmx_handoff_tests
+	$(BUILD_DIR)/fbvbs_scaling_storage_tests
+	$(BUILD_DIR)/fbvbs_vcd_virtualization_tests
+
+compatibility-check: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/compatibility
+	python3 tools/compatibility/generate_operator_tooling_compatibility_matrix.py --output-dir $(BUILD_DIR)/compatibility
+	python3 tools/compatibility/check_standalone_compatibility_changes.py \
+		--baseline ../plan/standalone/assurance/baselines/operator-tooling-compatibility-baseline.json \
+		--current $(BUILD_DIR)/compatibility/operator-tooling-compatibility-matrix.json \
+		--report $(BUILD_DIR)/compatibility/compatibility-change-report.json
+	python3 tools/compatibility/check_standalone_reserved_fields.py --output-dir $(BUILD_DIR)/compatibility
+	python3 tests/python/compatibility/test_operator_tooling_compatibility_matrix.py
+	python3 tests/python/compatibility/test_standalone_compatibility_change_detector.py
+	python3 tests/python/compatibility/test_state_manifest_and_compatibility_tools.py
+	python3 tests/python/audit/test_command_audit_mapping_tool.py
+	python3 tests/python/compatibility/test_standalone_reserved_field_checker.py
+	python3 tests/python/verification/test_command_page_fuzz_corpus.py
+	python3 tests/python/partition/test_standalone_command_contracts_tools.py
+	python3 tests/python/partition/test_standalone_command_idempotency_tool.py
+	python3 tests/python/partition/test_partition_transition_precondition_validator.py
+	python3 tests/python/partition/test_management_rate_limit_policy_tool.py
+	python3 tests/python/operator/test_operator_privilege_model_tool.py
+	python3 tests/python/security/test_command_origin_attestation_tools.py
+	python3 tests/python/audit/test_break_glass_audit_tools.py
+	python3 tests/python/service/test_service_privilege_review_tools.py
+	python3 tests/python/service/test_service_plane_security_tools.py
+	python3 tests/python/partition/test_boundary_and_capacity_tools.py
+	python3 tests/python/storage/test_storage_and_memory_integrity_tools.py
+	python3 tests/python/storage/test_storage_governance_tools.py
+
+semantic-drift-check: | $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/verification
+	python3 tools/verification/generate_framac_divergence_report.py --output-dir $(BUILD_DIR)/verification --strict
+	python3 tests/python/verification/test_framac_divergence_report_tool.py
 
 proof: frama-c-wp
 
@@ -230,48 +275,59 @@ $(BUILD_DIR):
 
 # UEFI sources need relaxed flags (MS ABI, CHAR16)
 $(BUILD_DIR)/analyze_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(UEFI_ANALYZER_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/host_uefi_entry.o: src/uefi_entry.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(UEFI_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/analyze_%.o: src/%.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(ANALYZER_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/host_%.o: src/%.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/baremetal_%.o: src/%.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(BAREMETAL_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/baremetal_boot.o: src/boot.S | $(BUILD_DIR)
 	$(AS) --64 $< -o $@
 
-$(BUILD_DIR)/gen_boot_artifacts: tools/gen_boot_artifacts.c | $(BUILD_DIR)
+$(BUILD_DIR)/gen_boot_artifacts: tools/build/gen_boot_artifacts.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $< -o $@
 
-$(BUILD_DIR)/fbvbs_leaf_boundary_tests: $(BUILD_DIR)/host_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_leaf_boundary_tests: $(BUILD_DIR)/host_platform/vmx.o tests/c/platform/test_leaf_boundary.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_policy_security_tests: $(HOST_OBJECTS) tests/test_policy_security.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_policy_security_tests: $(HOST_OBJECTS) tests/c/security/test_policy_security.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_fault_injection_tests: $(HOST_OBJECTS) tests/test_fault_injection.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_fault_injection_tests: $(HOST_OBJECTS) tests/c/security/test_fault_injection.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_vmcs_setup_tests: $(HOST_OBJECTS) tests/test_vmcs_setup.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_vmcs_setup_tests: $(HOST_OBJECTS) tests/c/platform/test_vmcs_setup.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_vmx_controls_tests: $(HOST_OBJECTS) tests/test_vmx_controls.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_vmx_controls_tests: $(HOST_OBJECTS) tests/c/platform/test_vmx_controls.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_early_init_tests: $(HOST_OBJECTS) tests/test_early_init.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_early_init_tests: $(HOST_OBJECTS) tests/c/platform/test_early_init.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_iommu_tests: $(HOST_OBJECTS) tests/test_iommu.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_iommu_tests: $(HOST_OBJECTS) tests/c/platform/test_iommu.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fbvbs_vmx_handoff_tests: $(HOST_OBJECTS) tests/test_vmx_handoff.c | $(BUILD_DIR)
+$(BUILD_DIR)/fbvbs_vmx_handoff_tests: $(HOST_OBJECTS) tests/c/platform/test_vmx_handoff.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_scaling_storage_tests: $(HOST_OBJECTS) tests/c/storage/test_scaling_storage.c | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fbvbs_vcd_virtualization_tests: $(HOST_OBJECTS) tests/c/storage/test_vcd_virtualization.c | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) $^ -o $@
 
 -include $(DEPFILES)
@@ -359,14 +415,14 @@ run-qemu-matrix: $(BUILD_DIR)/fbvbs-baremetal.iso
 		--require-pass tcg-amd-iommu
 
 provenance: reproducible sbom | $(BUILD_DIR)
-	python3 tools/generate_provenance.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/provenance.json
+	python3 tools/release/generate_provenance.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/provenance.json
 
 sign-release: release-manifest release-evidence | $(BUILD_DIR)
 	@test -n "$$FBVBS_RELEASE_SIGNING_KEY" || { echo "ERROR: set FBVBS_RELEASE_SIGNING_KEY to a PEM private key path"; exit 1; }
-	python3 tools/sign_release_artifacts.py --build-dir $(BUILD_DIR) --key "$$FBVBS_RELEASE_SIGNING_KEY" $${FBVBS_RELEASE_SIGNING_CERT:+--cert "$$FBVBS_RELEASE_SIGNING_CERT"}
+	python3 tools/release/sign_release_artifacts.py --build-dir $(BUILD_DIR) --key "$$FBVBS_RELEASE_SIGNING_KEY" $${FBVBS_RELEASE_SIGNING_CERT:+--cert "$$FBVBS_RELEASE_SIGNING_CERT"}
 
-release-readiness: fuzz-smoke reproducible sbom provenance proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix | $(BUILD_DIR)
-	python3 tools/release_readiness.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-readiness.json
+release-readiness: compatibility-check fuzz-smoke reproducible sbom provenance proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix | $(BUILD_DIR)
+	python3 tools/release/release_readiness.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-readiness.json
 
 release-manifest: fuzz-smoke reproducible sbom provenance proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix release-readiness | $(BUILD_DIR)
 	@printf "FBVBS retained-C release manifest\n" > $(BUILD_DIR)/release-manifest.txt
@@ -399,11 +455,11 @@ release-manifest: fuzz-smoke reproducible sbom provenance proof-smoke proof-shar
 	@echo "Release manifest written to $(BUILD_DIR)/release-manifest.txt"
 
 release-evidence: release-manifest | $(BUILD_DIR)
-	python3 tools/release_evidence_bundle.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-evidence.tar.gz
+	python3 tools/release/release_evidence_bundle.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/release-evidence.tar.gz
 
 release-hypervisor:
 	@$(MAKE) clean
-	@$(MAKE) analyze test cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix
+	@$(MAKE) analyze test compatibility-check cppcheck fuzz-build fuzz-smoke coverage traceability reproducible sbom proof-smoke proof-shards baremetal-iso verify-baremetal-iso run-qemu-smoke run-qemu-iommu-smoke run-qemu-matrix
 	@$(MAKE) provenance
 	@$(MAKE) release-manifest
 	@$(MAKE) release-evidence
@@ -411,7 +467,7 @@ release-hypervisor:
 
 # ---------- traceability (Phase 9-1, REQ-1000) ----------
 traceability:
-	python3 tools/traceability_matrix.py
+	python3 tools/verification/traceability_matrix.py
 
 # ---------- cppcheck static analysis (Phase 9-1, MISRA C evidence) ----------
 # Runs cppcheck with all checks. 0 errors/warnings expected.
@@ -444,28 +500,28 @@ $(BUILD_DIR)/cov_early_init_tests: COV_CFLAGS += -DFBVBS_EARLY_INIT_COVERAGE_TES
 $(BUILD_DIR)/cov_%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/cov_policy_security_tests: $(COV_OBJECTS) tests/test_policy_security.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_policy_security_tests: $(COV_OBJECTS) tests/c/security/test_policy_security.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_fault_injection_tests: $(COV_OBJECTS) tests/test_fault_injection.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_fault_injection_tests: $(COV_OBJECTS) tests/c/security/test_fault_injection.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_leaf_boundary_tests: $(BUILD_DIR)/cov_vmx.o tests/test_leaf_boundary.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_leaf_boundary_tests: $(BUILD_DIR)/cov_vmx.o tests/c/platform/test_leaf_boundary.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_vmcs_setup_tests: $(COV_OBJECTS) tests/test_vmcs_setup.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_vmcs_setup_tests: $(COV_OBJECTS) tests/c/platform/test_vmcs_setup.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_vmx_controls_tests: $(COV_OBJECTS) tests/test_vmx_controls.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_vmx_controls_tests: $(COV_OBJECTS) tests/c/platform/test_vmx_controls.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_early_init_tests: $(COV_OBJECTS) tests/test_early_init.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_early_init_tests: $(COV_OBJECTS) tests/c/platform/test_early_init.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_iommu_tests: $(COV_OBJECTS) tests/test_iommu.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_iommu_tests: $(COV_OBJECTS) tests/c/platform/test_iommu.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
-$(BUILD_DIR)/cov_vmx_handoff_tests: $(COV_OBJECTS) tests/test_vmx_handoff.c | $(BUILD_DIR)
+$(BUILD_DIR)/cov_vmx_handoff_tests: $(COV_OBJECTS) tests/c/platform/test_vmx_handoff.c | $(BUILD_DIR)
 	$(CC) $(COV_CFLAGS) $^ -o $@ -lgcov
 
 COV_TEST_BINS := \
@@ -579,7 +635,7 @@ FUZZ_CFLAGS := $(COMMON_WARNINGS) -O1 -g $(INCLUDES) -DFUZZ_TARGET \
 fuzz-build: $(BUILD_DIR)/fuzz_command_page $(BUILD_DIR)/fuzz_multiboot2 $(BUILD_DIR)/fuzz_manifest $(BUILD_DIR)/fuzz_iommu $(BUILD_DIR)/fuzz_log_decoder $(BUILD_DIR)/fuzz_partition_loader
 
 fuzz-smoke: fuzz-build | $(BUILD_DIR)
-	python3 tools/fuzz_smoke.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/fuzz-smoke.txt
+	python3 tools/fuzz/fuzz_smoke.py --build-dir $(BUILD_DIR) --output $(BUILD_DIR)/fuzz-smoke.txt
 
 $(BUILD_DIR)/fuzz_command_page: $(HOST_OBJECTS) fuzz/fuzz_command_page.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
@@ -587,10 +643,10 @@ $(BUILD_DIR)/fuzz_command_page: $(HOST_OBJECTS) fuzz/fuzz_command_page.c | $(BUI
 $(BUILD_DIR)/fuzz_manifest: $(HOST_OBJECTS) fuzz/fuzz_manifest.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fuzz_multiboot2: fuzz/fuzz_multiboot2.c src/boot_multiboot.c src/log.c src/memory_utils.c | $(BUILD_DIR)
+$(BUILD_DIR)/fuzz_multiboot2: fuzz/fuzz_multiboot2.c src/platform/boot_multiboot.c src/log.c src/memory_utils.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
-$(BUILD_DIR)/fuzz_iommu: fuzz/fuzz_iommu.c src/iommu_vtd.c src/iommu_amdvi.c src/acpi.c src/page_alloc.c src/memory_utils.c | $(BUILD_DIR)
+$(BUILD_DIR)/fuzz_iommu: fuzz/fuzz_iommu.c src/platform/iommu_vtd.c src/platform/iommu_amdvi.c src/platform/acpi.c src/page_alloc.c src/memory_utils.c | $(BUILD_DIR)
 	$(CC) $(FUZZ_CFLAGS) $^ -o $@
 
 $(BUILD_DIR)/fuzz_log_decoder: fuzz/fuzz_log_decoder.c src/log.c src/memory_utils.c | $(BUILD_DIR)
@@ -603,15 +659,15 @@ $(BUILD_DIR)/fuzz_partition_loader: $(HOST_OBJECTS) fuzz/fuzz_partition_loader.c
 # Fuzz campaign with crash triage.  --duration is in seconds (60s CI smoke).
 
 fuzz-campaign: fuzz-build
-	bash tools/fuzz_campaign.sh --duration 60 --output-dir $(BUILD_DIR)/fuzz-campaign
+	bash tools/fuzz/fuzz_campaign.sh --duration 60 --output-dir $(BUILD_DIR)/fuzz-campaign
 
 fuzz-triage: fuzz-campaign
-	bash tools/fuzz_triage.sh --campaign-dir $(BUILD_DIR)/fuzz-campaign
+	bash tools/fuzz/fuzz_triage.sh --campaign-dir $(BUILD_DIR)/fuzz-campaign
 
 # ---------- __FRAMAC__ stub sync check ----------
 # Detects drift between __FRAMAC__ stubs and production code.
 framac-sync:
-	python3 tools/check_framac_stubs.py --strict
+	python3 tools/verification/check_framac_stubs.py --strict
 
 # ---------- grub.cfg placeholder rejection ----------
 # Rejects any grub.cfg that still contains PLACEHOLDER_ tokens.

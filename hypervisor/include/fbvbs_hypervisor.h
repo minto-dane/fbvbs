@@ -35,6 +35,23 @@ struct fbvbs_trap_registers {
 #define FBVBS_MAX_MANIFEST_PROFILES 10U
 #define FBVBS_MAX_BOOT_MODULES 16U
 #define FBVBS_BOOT_MODULE_CMDLINE_BYTES 64U
+#define FBVBS_MAX_STORAGE_POOLS 64U
+#define FBVBS_MAX_VIRTUAL_DISKS 4096U
+#define FBVBS_VCD_RX_RING_SIZE 256U
+#define FBVBS_VCD_TX_RING_SIZE 2048U
+#define FBVBS_VCD_RING_MAGIC 0x56434431U
+#define FBVBS_OCS_MESSAGE_MAGIC 0x4F435331U
+#define FBVBS_OCS_PROTOCOL_VERSION 1U
+
+#define FBVBS_OCS_OPCODE_HELLO                 1U
+#define FBVBS_OCS_OPCODE_GET_SYSTEM_SUMMARY    2U
+#define FBVBS_OCS_OPCODE_GET_PARTITION_SUMMARY 3U
+#define FBVBS_OCS_OPCODE_GET_SCALING_SUMMARY   4U
+#define FBVBS_OCS_OPCODE_GET_STORAGE_SUMMARY   5U
+#define FBVBS_OCS_OPCODE_GET_HELP              6U
+#define FBVBS_OCS_OPCODE_QUIESCE_PARTITION     7U
+#define FBVBS_OCS_OPCODE_RESUME_PARTITION      8U
+#define FBVBS_OCS_OPCODE_RECOVER_PARTITION     9U
 
 struct fbvbs_memory_mapping {
     bool active;
@@ -62,6 +79,166 @@ struct fbvbs_shared_registration {
     uint64_t peer_partition_id;
 };
 
+struct fbvbs_scaling_runtime_limits {
+    uint32_t max_vm_count_runtime;
+    uint32_t max_vcpus_per_vm_runtime;
+    uint32_t max_host_cpu_count_runtime;
+    uint32_t max_vdisks_per_vm_runtime;
+    uint64_t max_memory_per_vm_runtime_bytes;
+    uint64_t max_vdisk_size_runtime_bytes;
+};
+
+struct fbvbs_vcd_ring_header {
+    volatile uint32_t write_index;
+    volatile uint32_t read_index;
+    uint32_t size;
+    uint32_t magic;
+};
+
+struct fbvbs_vcd_rx_ring_page {
+    struct fbvbs_vcd_ring_header header;
+    uint8_t buffer[FBVBS_VCD_RX_RING_SIZE];
+};
+
+struct fbvbs_vcd_tx_ring_page {
+    struct fbvbs_vcd_ring_header header;
+    uint8_t buffer[FBVBS_VCD_TX_RING_SIZE];
+};
+
+struct fbvbs_vcd_control_block {
+    bool active;
+    uint8_t reserved0[3];
+    uint32_t corruption_count;
+    uint64_t owner_partition_id;
+    uint64_t rx_ring_gpa;
+    uint64_t tx_ring_gpa;
+};
+
+struct fbvbs_ocs_message_header {
+    uint32_t magic;
+    uint16_t opcode;
+    uint16_t status;
+    uint32_t payload_length;
+    uint32_t reserved0;
+    uint64_t session_id;
+    uint64_t sequence;
+};
+
+struct fbvbs_ocs_hello_response {
+    uint32_t protocol_version;
+    uint32_t reserved0;
+    uint64_t owner_partition_id;
+    uint64_t session_id;
+    uint32_t rx_ring_size;
+    uint32_t tx_ring_size;
+};
+
+struct fbvbs_ocs_system_summary_response {
+    uint32_t occupied_partition_count;
+    uint32_t healthy_partition_count;
+    uint32_t degraded_partition_count;
+    uint32_t quarantined_partition_count;
+    uint32_t recovery_partition_count;
+    uint32_t active_vcd;
+    uint32_t session_active;
+    uint32_t reserved0;
+};
+
+struct fbvbs_ocs_partition_summary_response {
+    uint32_t occupied_partition_count;
+    uint32_t guest_vm_count;
+    uint32_t service_partition_count;
+    uint32_t faulted_partition_count;
+    uint32_t quarantined_partition_count;
+    uint32_t recovery_partition_count;
+    uint32_t reserved0;
+    uint32_t reserved1;
+};
+
+struct fbvbs_ocs_scaling_summary_response {
+    uint32_t runtime_max_vm_count;
+    uint32_t runtime_max_vcpus_per_vm;
+    uint32_t runtime_max_host_cpu_count;
+    uint32_t runtime_max_vdisks_per_vm;
+    uint64_t runtime_max_memory_per_vm_bytes;
+    uint64_t runtime_max_vdisk_size_bytes;
+};
+
+struct fbvbs_ocs_storage_summary_response {
+    uint32_t active_pool_count;
+    uint32_t active_vdisk_count;
+    uint32_t attached_vdisk_count;
+    uint32_t reserved0;
+};
+
+struct fbvbs_ocs_help_response {
+    uint32_t supported_opcode_count;
+    uint32_t reserved0;
+    uint16_t supported_opcodes[12];
+};
+
+struct fbvbs_ocs_partition_control_request {
+    uint64_t partition_id;
+    uint64_t flags;
+};
+
+struct fbvbs_ocs_partition_control_response {
+    uint64_t partition_id;
+    uint32_t partition_state;
+    uint32_t health_state;
+    uint32_t quarantine_reason;
+    uint32_t fault_code;
+    uint64_t measurement_epoch;
+};
+
+struct fbvbs_ocs_runtime_state {
+    bool active;
+    uint8_t reserved0[7];
+    uint64_t owner_partition_id;
+    uint64_t session_id;
+    uint64_t last_rx_sequence;
+    uint64_t last_tx_sequence;
+    uint32_t command_count;
+    uint32_t last_status;
+};
+
+struct fbvbs_storage_pool {
+    bool active;
+    uint8_t reserved0;
+    uint16_t generation;
+    uint32_t flags;
+    uint64_t pool_id;
+    uint64_t capacity_bytes;
+    uint64_t allocated_bytes;
+    uint64_t granularity_bytes;
+    uint32_t vdisk_count;
+    uint32_t reserved1;
+};
+
+struct fbvbs_virtual_disk {
+    bool active;
+    bool attached;
+    uint16_t generation;
+    uint32_t flags;
+    uint32_t lifecycle_state;
+    uint32_t corruption_count;
+    uint32_t quarantine_reason;
+    uint64_t vdisk_id;
+    uint64_t pool_id;
+    uint64_t owner_partition_id;
+    uint64_t attached_partition_id;
+    uint64_t size_bytes;
+    uint64_t max_iops;
+    uint64_t max_bandwidth_bytes_per_sec;
+};
+
+#define FBVBS_VDISK_STATE_PROVISIONED     1U
+#define FBVBS_VDISK_STATE_ATTACHED        2U
+#define FBVBS_VDISK_STATE_DETACH_PENDING  3U
+#define FBVBS_VDISK_STATE_RELEASE_PENDING 4U
+#define FBVBS_VDISK_STATE_QUARANTINED     5U
+#define FBVBS_VDISK_STATE_DESTROYED       6U
+
 struct fbvbs_partition {
     bool occupied;
     bool tombstone;
@@ -69,6 +246,8 @@ struct fbvbs_partition {
     uint16_t kind;
     uint16_t service_kind;
     uint32_t state;
+    uint32_t health_state;
+    uint32_t quarantine_reason;
     uint32_t vcpu_count;
     uint32_t vm_flags;
     uint32_t reserved0;
@@ -86,6 +265,10 @@ struct fbvbs_partition {
     uint32_t last_fault_source_component;
     uint64_t last_fault_detail0;
     uint64_t last_fault_detail1;
+    uint32_t last_recovery_flags;
+    uint32_t reserved_recovery0;
+    uint64_t last_recovery_session_correlation_id;
+    uint64_t last_recovery_confirmation_nonce;
     uint32_t assigned_device_count;
     uint32_t reserved1;
     uint64_t iommu_domain_id;
@@ -101,6 +284,13 @@ struct fbvbs_partition {
      * the partition is faulted (fail-safe halt). */
     uint32_t consecutive_timer_exits;
     uint32_t watchdog_faults_total;
+
+    /* Hypercall abuse guard: per-partition sliding window counters. */
+    uint32_t policy_deny_count;
+    uint32_t critical_policy_deny_count;
+    uint32_t hypercall_window_start;
+    uint32_t hypercall_window_count;
+    uint32_t hypercall_lockout_windows;
 };
 
 struct fbvbs_log_storage {
@@ -149,6 +339,15 @@ struct fbvbs_boot_module {
 #define FBVBS_MEMORY_BACKING_EXTERNAL_CONTIGUOUS 1U
 #define FBVBS_MEMORY_BACKING_OWNED_PAGE_LIST 2U
 
+#define FBVBS_MEMORY_OBJECT_STATE_RELEASED     0U
+#define FBVBS_MEMORY_OBJECT_STATE_ALLOCATED    1U
+#define FBVBS_MEMORY_OBJECT_STATE_MAPPED       2U
+#define FBVBS_MEMORY_OBJECT_STATE_SHARED       3U
+#define FBVBS_MEMORY_OBJECT_STATE_QUARANTINED  4U
+
+#define FBVBS_MEMORY_QUARANTINE_REASON_INVARIANT     1U
+#define FBVBS_MEMORY_QUARANTINE_REASON_HASH_MISMATCH 2U
+
 struct fbvbs_memory_object {
     bool allocated;
     uint8_t backing_kind;
@@ -159,8 +358,10 @@ struct fbvbs_memory_object {
     uint64_t size;
     uint32_t map_count;
     uint32_t shared_count;
+    uint32_t lifecycle_state;
+    uint32_t corruption_count;
     uint32_t backing_page_count;
-    uint32_t reserved1;
+    uint32_t quarantine_reason;
     uint64_t backing_phys_base;
     uint64_t backing_page_list_head_phys;
 };
@@ -267,6 +468,18 @@ struct fbvbs_iommu_domain {
     uint64_t owner_partition_id;
 };
 
+#define FBVBS_DEVICE_QUARANTINE_REASON_PLATFORM_UNSUPPORTED 1U
+#define FBVBS_DEVICE_QUARANTINE_REASON_UNSAFE_TEARDOWN      2U
+
+struct fbvbs_device_runtime_state {
+    bool quarantined;
+    uint8_t reserved0[3];
+    uint32_t quarantine_reason;
+    uint32_t deny_count;
+    uint32_t reserved1;
+    uint64_t device_id;
+};
+
 struct fbvbs_command_tracker {
     bool active;
     bool sequence_seen;
@@ -275,6 +488,21 @@ struct fbvbs_command_tracker {
     uint64_t page_gpa;
     uint64_t last_sequence;
     uint64_t last_nonce;
+};
+
+#ifndef FBVBS_MAX_CONSUMED_CONFIRMATIONS
+#define FBVBS_MAX_CONSUMED_CONFIRMATIONS 64U
+#endif
+
+struct fbvbs_consumed_confirmation {
+    bool active;
+    uint8_t reserved0[3];
+    uint32_t operation;
+    uint64_t requester_partition_id;
+    uint64_t target_id;
+    uint64_t session_correlation_id;
+    uint64_t confirmation_nonce;
+    uint64_t expires_utc;
 };
 
 struct fbvbs_memory_map_entry {
@@ -316,6 +544,9 @@ struct fbvbs_hypervisor_state {
     uint64_t next_manifest_set_id;
     uint64_t current_manifest_set_id;
     uint64_t next_iommu_domain_id;
+    uint64_t next_storage_pool_id;
+    uint64_t next_vdisk_id;
+    struct fbvbs_scaling_runtime_limits scaling_limits;
     uint64_t approved_module_object_id;
     uint64_t approved_module_manifest_object_id;
     uint64_t approved_module_base_gpa;
@@ -328,6 +559,7 @@ struct fbvbs_hypervisor_state {
     uint64_t capability_bitmap0;
     uint64_t capability_bitmap1;
     uint32_t runtime_state_flags;
+    uint32_t hypercall_dispatch_counter;
     uint32_t revoked_object_count;
     uint32_t reserved_revocation0;
     uint64_t revoked_object_ids[FBVBS_MAX_ARTIFACT_CATALOG_ENTRIES];
@@ -357,9 +589,17 @@ struct fbvbs_hypervisor_state {
     uint32_t intercepted_msr_count;
     struct fbvbs_artifact_catalog artifact_catalog;
     struct fbvbs_device_catalog device_catalog;
+    struct fbvbs_device_runtime_state device_runtime[FBVBS_MAX_DEVICE_CATALOG_ENTRIES];
     struct fbvbs_command_tracker command_trackers[FBVBS_MAX_COMMAND_TRACKERS];
     struct fbvbs_iommu_domain iommu_domains[FBVBS_MAX_PARTITIONS];
     struct fbvbs_partition partitions[FBVBS_MAX_PARTITIONS];
+    struct fbvbs_storage_pool storage_pools[FBVBS_MAX_STORAGE_POOLS];
+    struct fbvbs_virtual_disk virtual_disks[FBVBS_MAX_VIRTUAL_DISKS];
+    struct fbvbs_consumed_confirmation consumed_confirmations[FBVBS_MAX_CONSUMED_CONFIRMATIONS];
+    uint32_t consumed_confirmation_cursor;
+    uint32_t reserved_consumed_confirmation0;
+    struct fbvbs_vcd_control_block vcd;
+    struct fbvbs_ocs_runtime_state ocs_runtime;
     const void *multiboot_info;  /* Pointer to Multiboot information structure */
     const void *acpi_rsdp;       /* Pointer to bootloader-provided ACPI RSDP copy */
     uint32_t memory_map_count;
@@ -370,6 +610,10 @@ struct fbvbs_hypervisor_state {
     uint32_t boot_module_count;
     struct fbvbs_boot_module boot_modules[FBVBS_MAX_BOOT_MODULES];
     volatile uint32_t log_lock;  /* Spinlock for log operations */
+    volatile uint32_t hypercall_guard_lock;  /* Spinlock for abuse guard counters */
+    volatile uint32_t command_tracker_lock;  /* Spinlock for command sequence tracker */
+    volatile uint32_t storage_lock;  /* Spinlock for storage virtualization state */
+    volatile uint32_t vcd_lock;  /* Spinlock for VCD virtualization state */
 
     /* Log rate limiter (Phase 0A-5): per-event-class counters.
      * Indexed by event_code >> 4 (upper nibble), giving 16 classes.
@@ -550,6 +794,25 @@ int fbvbs_memory_object_hash_page_sha384(
     const struct fbvbs_memory_object *object,
     uint32_t page_index,
     uint8_t out[48]
+);
+/*@ requires \valid(object);
+    assigns *object;
+*/
+void fbvbs_memory_object_refresh_lifecycle_state(struct fbvbs_memory_object *object);
+/*@ requires \valid(object);
+    assigns *object;
+*/
+void fbvbs_memory_object_mark_quarantined(
+    struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
+);
+/*@ requires \valid(object);
+    assigns *object;
+    ensures \result == 0 || \result == -1;
+*/
+int fbvbs_memory_object_validate_and_quarantine(
+    struct fbvbs_memory_object *object,
+    uint32_t quarantine_reason
 );
 void fbvbs_memory_object_release_backing(struct fbvbs_memory_object *object);
 
@@ -847,6 +1110,19 @@ int fbvbs_partition_fault(
     uint32_t source_component,
     uint64_t detail0,
     uint64_t detail1
+);
+/*@ requires \valid(out_digest + (0 .. 47));
+    requires state == \null || \valid_read(state);
+    terminates \true; assigns out_digest[0 .. 47]; exits \false; */
+void fbvbs_partition_compute_recovery_approval_digest(
+    const struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    uint64_t recovery_flags,
+    uint64_t session_correlation_id,
+    uint64_t confirmation_nonce,
+    uint64_t approval_expires_utc,
+    const uint8_t approval_ledger_digest[48],
+    uint8_t out_digest[48]
 );
 /*@ requires \valid(state); requires \valid_read(request);
     terminates \true; assigns *state; exits \false; */
@@ -1180,6 +1456,47 @@ int fbvbs_diag_get_capabilities(
     struct fbvbs_hypervisor_state *state,
     struct fbvbs_diag_capabilities_response *response
 );
+/*@ assigns \nothing;
+    terminates \true; exits \false; */
+uint32_t fbvbs_policy_deny_reason_from_status(int status);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_diag_get_reason_guidance(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_diag_reason_guidance_request *request,
+    struct fbvbs_diag_reason_guidance_response *response
+);
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_diag_get_inventory(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_diag_inventory_response *response
+);
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_diag_get_fault_record(
+    struct fbvbs_hypervisor_state *state,
+    uint64_t partition_id,
+    struct fbvbs_diag_fault_record_response *response
+);
+/*@ requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_diag_get_schema_registry(
+    struct fbvbs_diag_schema_registry_response *response
+);
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_diag_get_scaling_limits(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_diag_scaling_limits_response *response
+);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
+int fbvbs_diag_set_scaling_limits(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_diag_set_scaling_limits_request *request,
+    struct fbvbs_diag_scaling_limits_response *response
+);
 /*@ requires \valid(state); requires \valid(response); requires \valid(response_length);
     terminates \true; assigns *response, *response_length; exits \false; */
 int fbvbs_diag_get_artifact_list(
@@ -1194,6 +1511,115 @@ int fbvbs_diag_get_device_list(
     struct fbvbs_diag_device_list_response *response,
     uint32_t *response_length
 );
+/*@ requires \valid(state);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_scaling_init(struct fbvbs_hypervisor_state *state);
+
+/*@ requires \valid(out_digest + (0 .. 47));
+    requires state == \null || \valid_read(state);
+    terminates \true; assigns out_digest[0 .. 47]; exits \false; */
+void fbvbs_storage_compute_confirmation_digest(
+    const struct fbvbs_hypervisor_state *state,
+    uint32_t operation,
+    uint64_t requester_partition_id,
+    uint64_t target_id,
+    uint64_t session_correlation_id,
+    uint64_t confirmation_nonce,
+    uint64_t confirmation_expires_utc,
+    uint8_t out_digest[48]
+);
+
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
+int fbvbs_storage_create_pool(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_pool_create_request *request,
+    struct fbvbs_storage_pool_create_response *response,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_destroy_pool(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_pool_destroy_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
+int fbvbs_storage_create_vdisk(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_create_request *request,
+    struct fbvbs_storage_vdisk_create_response *response,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_destroy_vdisk(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_destroy_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_attach_vdisk(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_attach_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_detach_vdisk(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_storage_get_pool_status(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_pool_request *request,
+    struct fbvbs_storage_pool_status_response *response,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request); requires \valid(response);
+    terminates \true; assigns *response; exits \false; */
+int fbvbs_storage_get_vdisk_status(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_request *request,
+    struct fbvbs_storage_vdisk_status_response *response,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_set_vdisk_qos(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_qos_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_storage_report_vdisk_corruption(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_storage_vdisk_corruption_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid_read(request);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_ocs_vcd_attach(
+    struct fbvbs_hypervisor_state *state,
+    const struct fbvbs_ocs_vcd_attach_request *request,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state); requires \valid(response);
+    terminates \true; assigns *state, *response; exits \false; */
+int fbvbs_ocs_vcd_status(
+    struct fbvbs_hypervisor_state *state,
+    struct fbvbs_ocs_vcd_status_response *response,
+    uint64_t requester_partition_id
+);
+/*@ requires \valid(state);
+    terminates \true; assigns *state; exits \false; */
+int fbvbs_ocs_runtime_poll(struct fbvbs_hypervisor_state *state);
 int fbvbs_validate_trap_registers(const struct fbvbs_trap_registers *registers);
 int fbvbs_dispatch_hypercall(
     struct fbvbs_hypervisor_state *state,

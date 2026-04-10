@@ -6,6 +6,7 @@
 
 - `fuzz_command_page.c`
   - コマンドページの解析とディスパッチ前提条件を検査します
+  - `fuzz/corpus/command_page/` には schema registry と guest feature negotiation の valid / malformed / reserved-zero seed を含め、host-only 管理 ABI の parser/smoke を決定論的に再現します
   - 制限事項: ファズハーネスはシングルスレッドで動作するため、複数 CPU が同時にコマンドページを操作する競合状態（TOCTOU）は検査対象外です。ハイパーバイザー本体はマルチ CPU 対応であり、本番コードではスピンロックやローカルコピーで競合を防いでいます
 - `fuzz_manifest.c`
   - マニフェスト・プロファイル・アーティファクトの検証パスを検査します
@@ -23,6 +24,7 @@
 - リポジトリにはハーネスのソース、`fuzz/corpus/` 配下のシードコーパス、`make -C hypervisor fuzz-build`、`make -C hypervisor fuzz-smoke` が同梱されています。
 - シードコーパスは意図的に小規模かつ決定論的です。長時間の AFL++/libFuzzer による本格的なファジングは、補完的な外部エビデンスとして別途実施します。
 - ファズテストの結果は補助的なエビデンスであり、形式検証やハードウェア検証の代替にはなりません。
+- `fuzz/corpus/command_page/` には standalone 管理 ABI の malformed input seed を同梱しています。guest feature negotiation、command version negotiation、reserved-zero 違反、reserved flag 違反、短い入出力長を最低限の corpus として固定しています。
 
 ## 使い方
 
